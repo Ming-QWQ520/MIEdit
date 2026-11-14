@@ -1,24 +1,42 @@
-//! PE 图标资源替换（Windows）：解析 .ico，通过 UpdateResourceW 写入
-//! RT_ICON / RT_GROUP_ICON 资源，实现“成品 EXE 换图标”（NSIS 的 SetIcon 能力）。
+//! PE 资源替换（Windows）：通过 `UpdateResourceW` 在**同一事务**中写入
+//! 图标资源（RT_ICON / RT_GROUP_ICON）与版本信息资源（RT_VERSION，
+//! VS_VERSIONINFO 字节序列由 `miedit_core::versioninfo` 构造）。
+//! 对齐 NSIS 的 SetIcon + `VIProductVersion` / `VIAddVersionKey` 能力。
 
 use anyhow::{bail, Result};
 use std::path::Path;
 
+/// 一次事务写入 PE 资源：`ico_bytes` 替换图标，`versioninfo` 写入 RT_VERSION #1。
+/// 两者都为 None 时不做任何事；任一写入失败则整个事务回滚（EndUpdateResource 不提交）。
 #[cfg(windows)]
-pub fn patch_icon(pe: &Path, ico_bytes: &[u8]) -> Result<()> {
+pub fn patch_pe_resources(
+    pe: &Path,
+    ico_bytes: Option<&[u8]>,
+    versioninfo: Option<&[u8]>,
+) -> Result<()> {
     use windows::core::{HSTRING, PCWSTR};
     use windows::Win32::Foundation::BOOL;
     use windows::Win32::System::LibraryLoader::{
         BeginUpdateResourceW, EndUpdateResourceW, UpdateResourceW,
     };
-    use windows::Win32::UI::WindowsAndMessaging::{RT_GROUP_ICON, RT_ICON};
+    use windows::Win32::UI::WindowsAndMessaging::{RT_GROUP_ICON, RT_ICON, RT_VERSION};
 
     /// MAKEINTRESOURCEW 未被 windows-rs 绑定：其结果就是把整数值当作指针。
     fn make_int_res(id: u16) -> PCWSTR {
         PCWSTR(id as usize as *const u16)
     }
 
-    let (group, images) = parse_ico(ico_bytes)?;
+    if ico_bytes.is_none() && versioninfo.is_none() {
+        return Ok(());
+    }
+
+    let (group, images) = match ico_bytes {
+        Some(b) => {
+            let (g, i) = parse_ico(b)?;
+            (Some(g), Some(i))
+        }
+        None => (None, None),
+    };
 
     let pe_h = HSTRING::from(pe.as_os_str());
     let handle = unsafe {
@@ -29,29 +47,48 @@ pub fn patch_icon(pe: &Path, ico_bytes: &[u8]) -> Result<()> {
 
     let mut failed = None;
     unsafe {
-        for (i, img) in images.iter().enumerate() {
-            if let Err(e) = UpdateResourceW(
-                handle,
-                RT_ICON,
-                make_int_res((i + 1) as u16),
-                0,
-                Some(img.as_ptr().cast::<core::ffi::c_void>()),
-                img.len() as u32,
-            ) {
-                failed = Some(format!("写入 RT_ICON #{} 失败: {e}", i + 1));
-                break;
+        if let Some(images) = &images {
+            for (i, img) in images.iter().enumerate() {
+                if let Err(e) = UpdateResourceW(
+                    handle,
+                    RT_ICON,
+                    make_int_res((i + 1) as u16),
+                    0,
+                    Some(img.as_ptr().cast::<core::ffi::c_void>()),
+                    img.len() as u32,
+                ) {
+                    failed = Some(format!("写入 RT_ICON #{} 失败: {e}", i + 1));
+                    break;
+                }
             }
         }
         if failed.is_none() {
-            if let Err(e) = UpdateResourceW(
-                handle,
-                RT_GROUP_ICON,
-                make_int_res(1),
-                0,
-                Some(group.as_ptr().cast::<core::ffi::c_void>()),
-                group.len() as u32,
-            ) {
-                failed = Some(format!("写入 RT_GROUP_ICON 失败: {e}"));
+            if let Some(group) = &group {
+                if let Err(e) = UpdateResourceW(
+                    handle,
+                    RT_GROUP_ICON,
+                    make_int_res(1),
+                    0,
+                    Some(group.as_ptr().cast::<core::ffi::c_void>()),
+                    group.len() as u32,
+                ) {
+                    failed = Some(format!("写入 RT_GROUP_ICON 失败: {e}"));
+                }
+            }
+        }
+        // 版本信息资源（同一事务；先图标后版本，避免资源表重复打开）
+        if failed.is_none() {
+            if let Some(vi) = versioninfo {
+                if let Err(e) = UpdateResourceW(
+                    handle,
+                    RT_VERSION,
+                    make_int_res(1),
+                    0,
+                    Some(vi.as_ptr().cast::<core::ffi::c_void>()),
+                    vi.len() as u32,
+                ) {
+                    failed = Some(format!("写入 RT_VERSION 失败: {e}"));
+                }
             }
         }
         if failed.is_none() {
@@ -67,8 +104,12 @@ pub fn patch_icon(pe: &Path, ico_bytes: &[u8]) -> Result<()> {
 }
 
 #[cfg(not(windows))]
-pub fn patch_icon(_pe: &Path, _ico_bytes: &[u8]) -> Result<()> {
-    bail!("图标替换仅支持 Windows")
+pub fn patch_pe_resources(
+    _pe: &Path,
+    _ico_bytes: Option<&[u8]>,
+    _versioninfo: Option<&[u8]>,
+) -> Result<()> {
+    bail!("PE 资源替换（图标/版本信息）仅支持 Windows")
 }
 
 /// 解析 .ico：返回（RT_GROUP_ICON 数据, 各 RT_ICON 图像数据）。

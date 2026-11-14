@@ -35,6 +35,7 @@
 | 卸载注册表 | HKLM/HKCU `...\Uninstall\{app_id}`（控制面板可见），支持自定义注册表键值 |
 | 快捷方式 | 开始菜单（自动含“卸载”快捷方式）与桌面，per-machine / per-user 自适应 |
 | **默认图标** | 未配置图标时自动使用内置 **modern-install.ico / modern-uninstall.ico**（NSIS 做法），PE 资源 + 窗口图标同步替换 |
+| **EXE 版本信息** | 安装器/卸载器 EXE 嵌入 VERSIONINFO（NSIS `VIProductVersion` / `VIAddVersionKey` 对齐）：产品名/版本/公司/描述/版权，资源管理器属性可见 |
 | 磁盘空间检测 | 目录页显示需要/可用空间，不足禁用安装 |
 | 运行中检测 | 安装前独占探测主程序占用，重试/继续 |
 | 升级检测 | 发现旧版本记录版本号并静默卸载后升级（`InstallDirRegKey` 式目录记忆） |
@@ -157,7 +158,7 @@ crates/
 ## 测试
 
 ```bash
-cargo test --workspace    # 10 个单元测试：归档/包尾/通配符/路径安全/icon 解析/组件过滤映射/slug
+cargo test --workspace    # 20 个单元测试：归档/包尾/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/组件过滤映射/slug
 ```
 
 已在 Windows 10 x64 实机验证：CLI 与 GUI 构建链路、静默安装/卸载全清理、组件过滤生效、

@@ -14,7 +14,7 @@
 | 3 | 卸载前主程序运行检测 | NSIS `un.onInit` / Inno CloseApplications | **已完成**（v0.2.0） |
 | 4 | QuietUninstallString 注册表值 | NSIS / ARP 惯例 | **已完成**（v0.2.0） |
 | 5 | install.log 落盘（LogSet） | NSIS `LogSet on` | **已完成**（v0.2.0） |
-| 6 | 安装器 EXE 版本信息资源（VERSIONINFO） | NSIS `VIProductVersion`/`VIAddVersionKey` | 待办 |
+| 6 | 安装器 EXE 版本信息资源（VERSIONINFO） | NSIS `VIProductVersion`/`VIAddVersionKey` | **已完成**（v0.3.0） |
 | 7 | 包完整性 CRC32 校验 + `--ncrc` 开关 | NSIS `CRCCheck`（fileform.h firstheader CRC） | 待办 |
 | 8 | 覆盖失败重试交互（安装期文件被占用） | NSIS Retry/Ignore/Abort 文件对话框 | 待办 |
 | 9 | 安装期被占用文件重启替换 + "需要重启"完成页 | NSIS `SetRebootFlag` / Inno `restartreplace` | 待办 |
@@ -109,5 +109,12 @@
 
 ## 变更日志
 
+- v0.3.0（步骤 6）：安装器与卸载器 EXE 嵌入 **VERSIONINFO 版本信息资源**
+  （NSIS `VIProductVersion` / `VIAddVersionKey` 对齐）：
+  ProductName / ProductVersion / FileVersion / CompanyName / FileDescription /
+  LegalCopyright 取自 `[app]`（name/version/publisher，空值跳过）；
+  VS_VERSIONINFO 字节序列由 `miedit_core::versioninfo` 纯函数构造（含结构回读单元测试）；
+  图标与版本信息在同一 `UpdateResourceW` 事务写入（卸载器为 EXE 内嵌前预写 RT_VERSION）。
+  Windows 资源管理器属性可见性待实机验证。
 - v0.2.0（步骤 1–5）：SetOverwrite 覆盖策略（含 ifnewer + 源时间戳保留）、
   卸载 Delete /REBOOTOK 重启删除、卸载前运行检测、QuietUninstallString、install.log 落盘。

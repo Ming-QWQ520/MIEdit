@@ -17,6 +17,7 @@ use miedit_core::archive::ArchiveWriter;
 use miedit_core::config::Config;
 use miedit_core::files;
 use miedit_core::trailer::{self, Range, Trailer};
+use miedit_core::versioninfo::{copyright_line, VersionInfo};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Seek, Write};
@@ -248,6 +249,45 @@ pub fn build_package(
     let stub_bytes = fs::read(&stub_path)?;
     let unp_bytes = fs::read(&unp_path)?;
 
+    // 6.5 VERSIONINFO 版本信息资源（NSIS VIProductVersion / VIAddVersionKey 对齐，
+    //     路线图步骤 6）：安装器与卸载器 EXE 均嵌入，资源管理器属性可见。
+    //     字符串来自 [app]（name/version/publisher）；空值不写对应键。
+    let vi_installer = VersionInfo {
+        product_name: cfg.app.name.clone(),
+        product_version: cfg.app.version.clone(),
+        file_version: cfg.app.version.clone(),
+        company_name: cfg.app.publisher.clone(),
+        file_description: format!("{} 安装程序", cfg.app.name),
+        legal_copyright: copyright_line(&cfg.app.publisher),
+    };
+    let vi_uninstaller = VersionInfo {
+        file_description: format!("{} 卸载程序", cfg.app.name),
+        ..vi_installer.clone()
+    };
+
+    // 卸载器 EXE 预写 VERSIONINFO：写临时文件 → UpdateResourceW(RT_VERSION) → 读回；
+    // 失败（如非 Windows 环境）仅警告，回退为原始字节（不阻断构建）。
+    let unp_bytes = {
+        let tmp = opts.output.with_extension("tmp-unp.exe");
+        let patched = (|| -> Result<Vec<u8>> {
+            fs::write(&tmp, &unp_bytes)
+                .with_context(|| format!("写入卸载器临时文件失败: {}", tmp.display()))?;
+            icon::patch_pe_resources(&tmp, None, Some(&vi_uninstaller.build()))?;
+            Ok(fs::read(&tmp)?)
+        })();
+        let _ = fs::remove_file(&tmp);
+        match patched {
+            Ok(b) => {
+                progress("卸载器 VERSIONINFO: 已写入（产品名/版本/描述/公司/版权）");
+                b
+            }
+            Err(e) => {
+                progress(&format!("警告: 卸载器版本信息写入失败（保留原样）: {e:#}"));
+                unp_bytes
+            }
+        }
+    };
+
     // 7. 输出目录
     let out = &opts.output;
     if let Some(parent) = out.parent() {
@@ -256,23 +296,27 @@ pub fn build_package(
         }
     }
 
-    // 8. 若配置了图标：先复制 stub 到临时文件并替换 PE 图标资源
-    let base_bytes = if !icon_ico.is_empty() {
+    // 8. PE 资源替换：图标（RT_ICON/RT_GROUP_ICON）+ VERSIONINFO（RT_VERSION）
+    //    在同一 UpdateResourceW 事务中完成（先图标后版本，避免重复打开资源表）。
+    let base_bytes = {
         let tmp = out.with_extension("tmp.exe");
-        fs::copy(&stub_path, &tmp)
-            .with_context(|| format!("复制 stub 失败: {}", tmp.display()))?;
-        let patched = icon::patch_icon(&tmp, &icon_ico);
-        if let Err(e) = patched {
-            let _ = fs::remove_file(&tmp);
-            progress(&format!("警告: 图标替换失败（保留默认图标）: {e:#}"));
-            stub_bytes
-        } else {
-            let b = fs::read(&tmp)?;
-            let _ = fs::remove_file(&tmp);
-            b
+        let patched = (|| -> Result<Vec<u8>> {
+            fs::copy(&stub_path, &tmp)
+                .with_context(|| format!("复制 stub 失败: {}", tmp.display()))?;
+            icon::patch_pe_resources(&tmp, Some(&icon_ico), Some(&vi_installer.build()))?;
+            Ok(fs::read(&tmp)?)
+        })();
+        let _ = fs::remove_file(&tmp);
+        match patched {
+            Ok(b) => {
+                progress("安装器 VERSIONINFO: 已写入（产品名/版本/描述/公司/版权）");
+                b
+            }
+            Err(e) => {
+                progress(&format!("警告: PE 资源替换失败（保留默认图标/无版本信息）: {e:#}"));
+                stub_bytes
+            }
         }
-    } else {
-        stub_bytes
     };
 
     // 9. 压缩方式（NSIS 风格 solid 整包压缩 或 条目级 deflate）

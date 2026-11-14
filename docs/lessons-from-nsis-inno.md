@@ -85,4 +85,21 @@
 有意后续再做：覆盖失败时的 Retry/Ignore/Abort 交互（NSIS 细粒度文件对话框）、
 `/NCRC` 与包 CRC32（见 `nsis-alignment-roadmap.md` 步骤 3）。
 
+## 六、落地清单 · 第三批（NSIS 对齐 #2，v0.3.0）
+
+1. **EXE 版本信息资源**（NSIS：`VIProductVersion` + `VIAddVersionKey` 由 makensis
+   写入安装器与卸载器 EXE 的 RT_VERSION 资源，资源管理器属性可见）：
+   MIEdit 编译器在构建时给**安装器与卸载器 EXE 都嵌入 VERSIONINFO**——
+   ProductName / ProductVersion / FileVersion 取 `[app].name/version`，
+   CompanyName / LegalCopyright 取 `[app].publisher`（空值跳过对应键），
+   FileDescription 为"{应用名} 安装程序 / 卸载程序"。
+   VS_VERSIONINFO 二进制结构（头部 6 字节 + UTF-16LE + 32 位对齐 +
+   VS_FIXEDFILEINFO + StringFileInfo/VarFileInfo）由 `miedit_core::versioninfo`
+   **纯函数手工构造**，配结构回读单元测试；PE 写入复用 icon.rs 的
+   `UpdateResourceW` 链路并与图标替换**合并为同一事务**（`patch_pe_resources`，
+   先图标后版本，一次 Begin/End）。卸载器在编译期写临时文件预写 RT_VERSION
+   后再内嵌进安装包（其清单/图标仍按原设计安装期追加尾部，互不影响）。
+   版本号宽容解析：`1.2.3` → dwMS=1.2/dwLS=3.0（NSIS 严格要求 x.x.x.x，
+   这里对自由格式脚本取数字前缀，超出 65535 截断）。
+
 > 对齐路线图见 [nsis-alignment-roadmap.md](nsis-alignment-roadmap.md)，按步骤持续迭代。

@@ -10,6 +10,7 @@ pub mod manifest;
 pub mod overwrite;
 pub mod trailer;
 pub mod util;
+pub mod versioninfo;
 pub mod winutil;
 
 /// 当前 MIEdit 版本
