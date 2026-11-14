@@ -61,3 +61,28 @@
 - NSIS `Source/exehead/ui.c`：组件页“组件描述”面板联动 —— MIEdit 组件页可加描述侧栏。
 - Inno `Compression.Zstd.pas`：Zstd 拉起/卸载函数表 —— MIEdit 可加 zstd 条目压缩档位。
 - Inno `Compiler.SetupCompiler.pas`：`MinVersion`/`OnlyBelowVersion` 检查 —— 安装器可加系统版本门槛。
+
+## 五、落地清单 · 第二批（NSIS 安装/卸载行为对齐 #1）
+
+以 NSIS 为主的安装/卸载**运行时行为**对齐（v0.2.0）：
+
+1. **`SetOverwrite` 覆盖策略**（NSIS：脚本指令编译进指令流，exehead 写文件路径按策略决策）：
+   `install.overwrite = on | off | try | ifnewer`。决策逻辑独立为 `miedit_core::overwrite`
+   （纯函数 + 单元测试）；编译器校验非法值并在 `files_map.FileRef` 写入源文件修改时间；
+   安装器写盘成功后用 `SetFileTime` 回设目标时间戳（NSIS 保留源时间戳的做法），
+   保证下一次 `ifnewer` 升级比较语义正确。
+2. **`Delete /REBOOTOK` 重启删除**（NSIS：被占用文件不视为失败，`MoveFileEx(MOVEFILE_DELAY_UNTIL_REBOOT)`
+   写入 `PendingFileRenameOperations`）：卸载器删除失败时自动转入重启删除，
+   `RunState.reboot_scheduled` 计数，完成页与静默日志分别提示。
+3. **卸载前运行检测**（NSIS `un.onInit` 检测应用窗口 / Inno Restart Manager）：卸载清单新增
+   `main_exe`（serde default 向后兼容旧清单），确认页显示琥珀色警告 + “重新检测”按钮，
+   静默模式记录警告后继续。
+4. **`QuietUninstallString`**（NSIS / ARP 自动化惯例）：卸载注册表键补充
+   `"uninstall.exe" /S` 值。
+5. **`install.log` 落盘**（NSIS `LogSet on` 语义）：安装完成把累计日志写入
+   `$INSTDIR\install.log`，`install.write_log = false` 可关闭。
+
+有意后续再做：覆盖失败时的 Retry/Ignore/Abort 交互（NSIS 细粒度文件对话框）、
+`/NCRC` 与包 CRC32（见 `nsis-alignment-roadmap.md` 步骤 3）。
+
+> 对齐路线图见 [nsis-alignment-roadmap.md](nsis-alignment-roadmap.md)，按步骤持续迭代。

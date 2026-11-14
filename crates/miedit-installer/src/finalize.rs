@@ -52,6 +52,8 @@ pub fn finalize_install(
         uninstall_key: format!(
             r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{app_id}"
         ),
+        // 主程序相对路径（卸载前运行检测用，NSIS un.onInit / Inno CloseApplications 对齐）
+        main_exe: cfg.app.exe.clone(),
         user_data_dirs: cfg
             .install
             .user_data_dirs
@@ -116,6 +118,11 @@ pub fn finalize_install(
         ("NoModify".into(), RegValue::Dword(1)),
         ("NoRepair".into(), RegValue::Dword(1)),
         ("EstimatedSize".into(), RegValue::Dword(total_kb)),
+        // NSIS 对齐：静默卸载入口（Add/Remove Programs 自动化使用）
+        (
+            "QuietUninstallString".into(),
+            RegValue::Str(format!("\"{}\" /S", uninst_path.display())),
+        ),
     ];
     if let Some(exe) = &exe_abs {
         values.push(("DisplayIcon".into(), RegValue::Str(exe.display().to_string())));

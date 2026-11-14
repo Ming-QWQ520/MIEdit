@@ -1,5 +1,7 @@
 //! Windows 工具：权限检查/提权、快捷方式（COM）、注册表、消息框、自删除等。
 
+// Context 仅在 Windows 实现中使用（with_context）
+#[cfg_attr(not(windows), allow(unused_imports))]
 use anyhow::{anyhow, bail, Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -209,6 +211,8 @@ pub fn create_shortcut(
 
 /// 开始菜单程序目录（per_machine = 公共，否则当前用户）。
 pub fn start_menu_dir(per_machine: bool) -> PathBuf {
+    #[cfg(not(windows))]
+    let _ = per_machine;
     #[cfg(windows)]
     {
         let env_or = |k: &str, d: &str| {
@@ -233,6 +237,8 @@ pub fn start_menu_dir(per_machine: bool) -> PathBuf {
 
 /// 桌面目录（per_machine = 公共桌面，否则当前用户）。
 pub fn desktop_dir(per_machine: bool) -> PathBuf {
+    #[cfg(not(windows))]
+    let _ = per_machine;
     #[cfg(windows)]
     {
         let env_or = |k: &str, d: &str| {
@@ -273,6 +279,8 @@ pub fn read_prev_install_dir(per_machine: bool, app_id: &str) -> Option<PathBuf>
     if app_id.trim().is_empty() {
         return None;
     }
+    #[cfg(not(windows))]
+    let _ = per_machine;
     #[cfg(windows)]
     {
         use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ};
@@ -482,6 +490,77 @@ pub fn remove_dir_all_quiet(path: &Path) -> Result<()> {
 // ---------------------------------------------------------------------------
 // 自删除
 // ---------------------------------------------------------------------------
+
+/// 将文件删除计划到系统重启时执行（NSIS `Delete /REBOOTOK` 做法：
+/// MoveFileExW + MOVEFILE_DELAY_UNTIL_REBOOT，写入 PendingFileRenameOperations）。
+/// 需要管理员权限；失败时返回 Err（调用方回退为普通错误）。
+pub fn schedule_delete_on_reboot(path: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_DELAY_UNTIL_REBOOT};
+        let p = match path.to_str() {
+            Some(s) => {
+                let mut wide: Vec<u16> = s.encode_utf16().collect();
+                wide.push(0);
+                wide
+            }
+            None => return Err(anyhow!("路径无法编码为 UTF-16: {}", path.display())),
+        };
+        unsafe {
+            // 目标传 NULL = 重启时删除该文件
+            MoveFileExW(
+                PCWSTR(p.as_ptr()),
+                PCWSTR::null(),
+                MOVEFILE_DELAY_UNTIL_REBOOT,
+            )
+        }
+        .map_err(|e| anyhow!("计划重启删除失败: {} ({e})", path.display()))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err(anyhow!("当前平台不支持重启删除"))
+    }
+}
+
+/// 设置文件修改时间（NSIS 保留源文件时间戳的做法，保证 `ifnewer` 升级语义）。
+/// 尽力而为：失败由调用方决定是否记录警告。
+pub fn set_file_mtime(path: &Path, epoch_secs: u64) -> Result<()> {
+    if epoch_secs == 0 {
+        return Ok(());
+    }
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Storage::FileSystem::{SetFileTime, FILETIME};
+        use std::os::windows::io::AsRawHandle;
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .with_context(|| format!("打开文件失败: {}", path.display()))?;
+        // Unix epoch 秒 → Windows FILETIME（1601-01-01 起的 100ns 数）
+        let ticks = (epoch_secs as i64 + 11_644_473_600) * 10_000_000;
+        let ft = FILETIME {
+            dwLowDateTime: (ticks as u64 & 0xFFFF_FFFF) as u32,
+            dwHighDateTime: ((ticks as u64) >> 32) as u32,
+        };
+        unsafe {
+            SetFileTime(
+                HANDLE(f.as_raw_handle()),
+                None,
+                None,
+                Some(&ft),
+            )
+        }
+        .map_err(|e| anyhow!("设置文件时间失败: {} ({e})", path.display()))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
 
 /// 卸载器自删除（NSIS 式稳健做法）：
 /// 1. 优先把运行中的自身移动到 %TEMP%（重命名跨目录可行，进程继续运行）；

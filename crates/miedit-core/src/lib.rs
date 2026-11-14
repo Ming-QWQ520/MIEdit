@@ -7,10 +7,9 @@ pub mod archive;
 pub mod config;
 pub mod files;
 pub mod manifest;
+pub mod overwrite;
 pub mod trailer;
 pub mod util;
-
-#[cfg(windows)]
 pub mod winutil;
 
 /// 当前 MIEdit 版本

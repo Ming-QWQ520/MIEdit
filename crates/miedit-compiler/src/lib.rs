@@ -214,6 +214,7 @@ pub fn build_package(
             rule_paths.push(miedit_core::config::FileRef {
                 path: f.arc_path.clone(),
                 size: f.size,
+                mtime: f.mtime,
             });
             if seen.insert(f.arc_path.clone(), ()).is_some() {
                 continue; // 重复的包内路径取第一个
@@ -286,6 +287,19 @@ pub fn build_package(
         ),
     };
     cfg.install.compression = compression.clone();
+
+    // 覆盖模式校验（NSIS SetOverwrite：on/off/try/ifnewer，默认 on）
+    let overwrite = match cfg.install.overwrite.trim().to_ascii_lowercase().as_str() {
+        "" | "on" => "on",
+        "off" => "off",
+        "try" => "try",
+        "ifnewer" => "ifnewer",
+        other => bail!(
+            "未知覆盖模式 \"{}\"（NSIS SetOverwrite 支持: on, off, try, ifnewer）",
+            other
+        ),
+    };
+    cfg.install.overwrite = overwrite.to_string();
 
     // 10. 写出最终安装包
     let mut f = fs::File::create(out)

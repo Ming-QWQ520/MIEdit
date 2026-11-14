@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 
 const ACCENT: Color32 = Color32::from_rgb(0xE5, 0x48, 0x4D);
 const GREEN: Color32 = Color32::from_rgb(0x3D, 0xD6, 0x8C);
+const AMBER: Color32 = Color32::from_rgb(0xF5, 0xA6, 0x23);
 const BG_TOP: Color32 = Color32::from_rgb(0x17, 0x1A, 0x21);
 const BG_BOTTOM: Color32 = Color32::from_rgb(0x0D, 0x0E, 0x12);
 const CARD: Color32 = Color32::from_black_alpha(110);
@@ -36,6 +37,8 @@ struct RunState {
     log: Vec<String>,
     finished: bool,
     errors: Vec<String>,
+    /// 已计划重启后删除的文件数（NSIS Delete /REBOOTOK）
+    reboot_scheduled: usize,
 }
 
 struct UninstallerApp {
@@ -48,6 +51,8 @@ struct UninstallerApp {
     icon_tex: Option<egui::TextureHandle>,
     /// 卸载页“显示细节”开关（默认收起）
     show_details: bool,
+    /// 主程序是否正在运行（确认页警告，可重新检测）
+    app_running: bool,
 }
 
 fn main() {
@@ -102,8 +107,19 @@ fn real_main(silent: bool, args: &[String]) -> Result<i32> {
     let run = Arc::new(Mutex::new(RunState::default()));
 
     if silent {
+        // 卸载前运行检测（NSIS un.onInit / Inno CloseApplications 对齐）：
+        // 静默模式记录警告后继续，被占用文件转入重启删除
+        if main_exe_running(&manifest) {
+            run.lock().unwrap().log.push(
+                format!("警告: 主程序 {} 可能正在运行，被占用的文件将在重启后删除", manifest.main_exe),
+            );
+        }
         let errors = do_uninstall(&manifest, &run, None, false);
-        let log = run.lock().unwrap().log.clone();
+        let mut log = run.lock().unwrap().log.clone();
+        let reboot = run.lock().unwrap().reboot_scheduled;
+        if reboot > 0 {
+            log.push(format!("注意: {reboot} 个文件将在系统重启后删除"));
+        }
         write_silent_log(&log);
         if errors.is_empty() {
             cleanup_after_uninstall(&manifest);
@@ -114,8 +130,17 @@ fn real_main(silent: bool, args: &[String]) -> Result<i32> {
             Ok(1)
         }
     } else {
-        run_gui(manifest, icon_bytes, run)
+        let app_running = main_exe_running(&manifest);
+        run_gui(manifest, icon_bytes, run, app_running)
     }
+}
+
+/// 主程序是否正在运行（清单携带 main_exe 时检测文件占用）。
+fn main_exe_running(m: &UninstallManifest) -> bool {
+    if m.main_exe.trim().is_empty() {
+        return false;
+    }
+    winutil::is_file_locked(&PathBuf::from(&m.install_dir).join(&m.main_exe))
 }
 
 fn write_silent_log(log: &[String]) {
@@ -155,13 +180,28 @@ fn do_uninstall(
         }
     };
 
-    // 1. 文件
+    // 1. 文件（NSIS Delete /REBOOTOK 对齐：占用中的文件转入重启删除，不算失败）
     for f in &m.files {
         let p = PathBuf::from(f);
         if let Err(e) = winutil::remove_file_quiet(&p) {
-            errors.push(format!("{e:#}"));
+            match winutil::schedule_delete_on_reboot(&p) {
+                Ok(()) => {
+                    let mut r = run.lock().unwrap();
+                    r.reboot_scheduled += 1;
+                    r.log
+                        .push(format!("已计划重启后删除（文件占用）: {}", p.display()));
+                    r.current = format!("重启删除 {}", p.display());
+                    r.done_count += 1;
+                    drop(r);
+                    if let Some(c) = ctx {
+                        c.request_repaint();
+                    }
+                }
+                Err(re) => errors.push(format!("删除失败: {e:#}；且无法计划重启删除: {re:#}")),
+            }
+        } else {
+            tick(run, format!("删除 {}", p.display()), ctx);
         }
-        tick(run, format!("删除 {}", p.display()), ctx);
     }
 
     // 2. 目录（最深的先删）
@@ -312,6 +352,7 @@ fn run_gui(
     manifest: UninstallManifest,
     icon_bytes: Option<Vec<u8>>,
     run: Arc<Mutex<RunState>>,
+    app_running: bool,
 ) -> Result<i32> {
     // 图标：任务栏 + 标题栏 + 确认页
     let icon_data: Option<egui::IconData> = icon_bytes.and_then(|b| decode_icon(&b));
@@ -334,6 +375,7 @@ fn run_gui(
         delete_user_data: false,
         icon_tex: None,
         show_details: false,
+        app_running,
     };
     eframe::run_native(
         "MIEdit Uninstaller",
@@ -456,6 +498,21 @@ impl UninstallerApp {
                 .color(TEXT_DIM)
                 .size(14.5),
             );
+            // 卸载前运行检测（NSIS un.onInit / Inno CloseApplications 对齐）
+            if self.app_running {
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "检测到 {} 可能正在运行，建议关闭后再卸载；\n被占用的文件将在系统重启后删除。",
+                        self.manifest.app_name
+                    ))
+                    .color(AMBER)
+                    .size(13.5),
+                );
+                if ui.add(secondary_button("重新检测")).clicked() {
+                    self.app_running = main_exe_running(&self.manifest);
+                }
+            }
         });
         if !self.manifest.user_data_dirs.is_empty() {
             ui.vertical_centered(|ui| {
@@ -531,6 +588,18 @@ impl UninstallerApp {
                     .color(TEXT_DIM)
                     .size(14.0),
             );
+            // NSIS /REBOOTOK 对齐：占用文件已计划重启删除
+            let reboot = self.run.lock().unwrap().reboot_scheduled;
+            if reboot > 0 {
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{reboot} 个文件正在使用中，已计划在系统重启后删除；重启后将完成全部清理。"
+                    ))
+                    .color(AMBER)
+                    .size(13.5),
+                );
+            }
         });
     }
 

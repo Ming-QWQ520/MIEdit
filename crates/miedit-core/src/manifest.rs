@@ -3,12 +3,15 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct UninstallManifest {
     pub app_name: String,
     pub app_id: String,
     pub version: String,
     pub publisher: String,
     pub install_dir: String,
+    /// 主程序相对路径（相对 install_dir；卸载前运行检测用，可为空）
+    pub main_exe: String,
     /// true = 安装时写入了 HKLM（卸载时需要管理员）
     pub per_machine: bool,
     /// 已安装文件（绝对路径）

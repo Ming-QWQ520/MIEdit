@@ -17,7 +17,23 @@ pub struct CollectedFile {
     /// 包内路径（'/' 分隔，相对安装根目录）
     pub arc_path: String,
     pub size: u64,
+    /// 源文件修改时间（Unix 秒；供 NSIS `SetOverwrite ifnewer` 比较）
+    pub mtime: u64,
     pub is_dir: bool,
+}
+
+/// 读取文件修改时间（Unix 秒）；失败返回 0（未知）。
+pub fn mtime_epoch(p: &Path) -> u64 {
+    let t = match p.metadata() {
+        Ok(m) => match m.modified() {
+            Ok(t) => t,
+            Err(_) => return 0,
+        },
+        Err(_) => return 0,
+    };
+    t.duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// 展开一条文件规则。
@@ -41,6 +57,7 @@ pub fn gather(spec: &FileSpec, base_dir: &Path) -> Result<Vec<CollectedFile>> {
             fs_path: src.clone(),
             arc_path: join_arc(&dest, &name),
             size: std::fs::metadata(&src).map(|m| m.len()).unwrap_or(0),
+            mtime: mtime_epoch(&src),
             is_dir: false,
         }])
     } else if src.is_dir() {
@@ -67,6 +84,7 @@ fn gather_dir(src: &Path, dest: &str) -> Result<Vec<CollectedFile>> {
                 fs_path: entry.path().to_path_buf(),
                 arc_path: arc,
                 size: 0,
+                mtime: 0,
                 is_dir: true,
             });
         } else {
@@ -74,6 +92,7 @@ fn gather_dir(src: &Path, dest: &str) -> Result<Vec<CollectedFile>> {
                 fs_path: entry.path().to_path_buf(),
                 arc_path: arc,
                 size: entry.metadata().map(|m| m.len()).unwrap_or(0),
+                mtime: mtime_epoch(entry.path()),
                 is_dir: false,
             });
         }
@@ -139,6 +158,7 @@ fn gather_wildcard(source: &str, dest: &str, base_dir: &Path) -> Result<Vec<Coll
                     fs_path: entry.path().to_path_buf(),
                     arc_path: arc,
                     size: 0,
+                    mtime: 0,
                     is_dir: true,
                 });
             }
@@ -147,6 +167,7 @@ fn gather_wildcard(source: &str, dest: &str, base_dir: &Path) -> Result<Vec<Coll
                 fs_path: entry.path().to_path_buf(),
                 arc_path: arc,
                 size: entry.metadata().map(|m| m.len()).unwrap_or(0),
+                mtime: mtime_epoch(entry.path()),
                 is_dir: false,
             });
         }

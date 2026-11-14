@@ -5,7 +5,8 @@ use crate::pkg::Package;
 use anyhow::{Context as _, Result};
 use eframe::egui;
 use miedit_core::archive::ArchiveReader;
-use std::collections::HashSet;
+use miedit_core::overwrite::{decide, OverwriteDecision, OverwriteMode};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -199,6 +200,24 @@ fn run_install(
     let mut dirs: Vec<String> = Vec::new();
     let mut seen_dirs = HashSet::new();
 
+    // NSIS SetOverwrite：包内源文件修改时间（FileRef::mtime，编译器写入）
+    let mode = OverwriteMode::parse(&pkg.config.install.overwrite);
+    push_log(
+        st,
+        match mode {
+            OverwriteMode::On => "覆盖策略: overwrite = on（总是覆盖）".to_string(),
+            OverwriteMode::Off => "覆盖策略: overwrite = off（已存在则跳过）".to_string(),
+            OverwriteMode::Try => "覆盖策略: overwrite = try（失败忽略）".to_string(),
+            OverwriteMode::IfNewer => "覆盖策略: overwrite = ifnewer（仅源更新时覆盖）".to_string(),
+        },
+    );
+    let mut mtime_map: HashMap<String, u64> = HashMap::new();
+    for rule in &pkg.config.files_map {
+        for fr in rule {
+            mtime_map.entry(fr.path.clone()).or_insert(fr.mtime);
+        }
+    }
+
     while let Some(entry) = reader.next_entry().context("读取归档条目失败")? {
         if !miedit_core::files::is_safe_arc_path(&entry.path) {
             anyhow::bail!("归档包含不安全路径: {}", entry.path);
@@ -233,11 +252,46 @@ fn run_install(
                 }
             }
         }
-        let mut out = BufWriter::new(fs::File::create(&target).with_context(|| {
-            format!("创建文件失败: {}", target.display())
-        })?);
-        out.write_all(&data)?;
-        out.flush()?;
+
+        // NSIS SetOverwrite：按覆盖策略决定写入行为
+        let target_mtime = target
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let new_mtime = mtime_map.get(&rel).copied().unwrap_or(0);
+        let decision = decide(mode, target.exists(), target_mtime, new_mtime);
+        if decision == OverwriteDecision::Skip {
+            push_log(st, format!("已存在，跳过: {rel}（overwrite = off/ifnewer）"));
+            continue;
+        }
+
+        let wr = (|| -> Result<()> {
+            let mut out = BufWriter::new(fs::File::create(&target).with_context(|| {
+                format!("创建文件失败: {}", target.display())
+            })?);
+            out.write_all(&data)?;
+            out.flush()?;
+            Ok(())
+        })();
+        if let Err(e) = wr {
+            if decision == OverwriteDecision::WriteIgnoreErrors {
+                push_log(
+                    st,
+                    format!("警告: 覆盖失败已忽略: {rel}（overwrite = try）: {e:#}"),
+                );
+                continue;
+            }
+            return Err(e);
+        }
+        // 保留源文件修改时间（NSIS 做法；保证 ifnewer 升级比较正确）
+        if new_mtime > 0 {
+            if let Err(e) = miedit_core::winutil::set_file_mtime(&target, new_mtime) {
+                push_log(st, format!("提示: 设置文件时间失败: {rel}: {e:#}"));
+            }
+        }
         files.push(target.display().to_string());
 
         {
@@ -262,6 +316,34 @@ fn run_install(
         c.request_repaint();
     }
     finalize::finalize_install(pkg, dest, &files, &dirs, st)?;
+
+    // NSIS LogSet 风格：安装日志落盘到 $INSTDIR\install.log（可用 install.write_log 关闭）
+    if pkg.config.install.write_log {
+        let log_text = {
+            let s = st.lock().unwrap();
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let mut t = format!(
+                "MIEdit 安装日志\r\n应用: {} {}\r\n目标目录: {}\r\n时间戳: {} (Unix)\r\n\r\n",
+                pkg.config.app.name,
+                pkg.config.app.version,
+                dest.display(),
+                ts
+            );
+            for line in &s.log {
+                t.push_str(line);
+                t.push_str("\r\n");
+            }
+            t
+        };
+        let log_path = dest.join("install.log");
+        match fs::write(&log_path, log_text) {
+            Ok(()) => push_log(st, format!("已写入安装日志: {}", log_path.display())),
+            Err(e) => push_log(st, format!("警告: 写入安装日志失败: {e}")),
+        }
+    }
     Ok(())
 }
 
@@ -272,9 +354,9 @@ mod tests {
     fn test_component_filter_mapping() {
         use miedit_core::config::FileRef;
         let files_map = vec![
-            vec![FileRef { path: "a.exe".into(), size: 1 }],
-            vec![FileRef { path: "docs/x.md".into(), size: 1 }],
-            vec![FileRef { path: "data/c.json".into(), size: 1 }],
+            vec![FileRef { path: "a.exe".into(), size: 1, mtime: 0 }],
+            vec![FileRef { path: "docs/x.md".into(), size: 1, mtime: 0 }],
+            vec![FileRef { path: "data/c.json".into(), size: 1, mtime: 0 }],
         ];
         let rules = std::collections::HashSet::from([0usize, 2]);
         let mut allowed = std::collections::HashSet::new();

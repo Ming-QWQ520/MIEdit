@@ -40,6 +40,11 @@
 | 升级检测 | 发现旧版本记录版本号并静默卸载后升级（`InstallDirRegKey` 式目录记忆） |
 | 权限 | `per_machine = true` 启动时自动 UAC 提权重启 |
 | 静默模式 | 安装器/卸载器均支持 `--silent`（NSIS `/S` 风格）与 `--dir=`，可自动化测试 |
+| **覆盖策略** | NSIS `SetOverwrite` 对齐：`on / off / try / ifnewer`；安装后保留源文件时间戳，`ifnewer` 仅在源更新时覆盖 |
+| **重启删除** | NSIS `Delete /REBOOTOK` 对齐：卸载时被占用的文件 `MoveFileEx` 计划重启删除，完成页/静默日志提示 |
+| **卸载运行检测** | 卸载确认页检测主程序占用（可重新检测），静默模式记录警告后继续 |
+| **QuietUninstallString** | 卸载注册表写入静默卸载入口（ARP 自动化 / NSIS 风格） |
+| **install.log** | NSIS `LogSet` 风格安装日志落盘到 `$INSTDIR\install.log`（`install.write_log` 可关） |
 | 压缩 | `deflate`（条目级）或 `solid`（整包 Deflate，NSIS solid 风格，体积更小） |
 | Unicode | 中文路径 / 文件名 / UI 全支持 |
 | 纯 Rust | 无 C 构建链依赖（egui / flate2 / walkdir / winreg / windows-rs） |
@@ -91,8 +96,10 @@ icon = "app.ico"              # 可选；缺省使用内置 modern-install.ico
 per_machine = false           # true = 每机器（HKLM + 公共开始菜单 + UAC）
 
 [install]
-dir_template = "{autopf}\\{app_name}"      # 占位符：{autopf} {localappdata} {appdata} {desktop} {docs} {app_name}
+dir_template = "{autopf}\\{app_name}"      # 占位符：{autopf} {autopf86} {localappdata} {appdata} {desktop} {docs} {app_name}
 compression = "deflate"                    # deflate（条目级）| solid（整包 Deflate，体积更小）
+overwrite = "on"                           # NSIS SetOverwrite：on（默认）| off | try | ifnewer
+write_log = true                           # 安装日志写入 $INSTDIR\\install.log（NSIS LogSet 风格）
 user_data_dirs = ["{appdata}\\{app_name}"] # 卸载时可勾选删除
 uninstall_icon = "uninstall.ico"           # 可选；缺省使用内置 modern-uninstall.ico
 

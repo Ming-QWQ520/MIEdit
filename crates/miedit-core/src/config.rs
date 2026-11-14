@@ -37,6 +37,9 @@ pub struct Config {
 pub struct FileRef {
     pub path: String,
     pub size: u64,
+    /// 源文件修改时间（Unix 秒）；旧包缺省为 0（未知），`ifnewer` 按需覆盖
+    #[serde(default)]
+    pub mtime: u64,
 }
 
 impl Config {
@@ -101,6 +104,10 @@ pub struct InstallConfig {
     pub user_data_dirs: Vec<String>,
     /// 压缩方式：`deflate`（条目级）或 `solid`（NSIS 风格整包压缩）
     pub compression: String,
+    /// 文件覆盖策略（NSIS SetOverwrite）：`on`（默认）| `off` | `try` | `ifnewer`
+    pub overwrite: String,
+    /// 是否在安装目录写入 install.log（NSIS LogSet 风格），默认开启
+    pub write_log: bool,
     /// 卸载程序图标（.ico，可选；缺省使用 app.icon）
     pub uninstall_icon: Option<String>,
 }
@@ -113,6 +120,8 @@ impl Default for InstallConfig {
             run_tasks: Vec::new(),
             user_data_dirs: Vec::new(),
             compression: "deflate".into(),
+            overwrite: "on".into(),
+            write_log: true,
             uninstall_icon: None,
         }
     }
