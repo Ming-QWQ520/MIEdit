@@ -1,0 +1,20 @@
+[package]
+name = "miedit-builder"
+version.workspace = true
+edition.workspace = true
+description = "MIEdit 安装包制作工具（GUI）：可视化配置并实时预览，一键构建安装包"
+
+[[bin]]
+name = "miedit-builder"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+eframe = "=0.29.1"
+image = { version = "0.25", default-features = false, features = [
+    "png", "jpeg", "ico", "bmp", "webp", "gif", "tga", "tiff",
+] }
+rfd = "0.15"
+toml = "0.8"
+miedit-core = { path = "../miedit-core" }
+miedit-compiler = { path = "../miedit-compiler" }

@@ -1,0 +1,16 @@
+[package]
+name = "miedit-uninstaller"
+version.workspace = true
+edition.workspace = true
+description = "MIEdit 现代化 GUI 卸载器"
+
+[[bin]]
+name = "miedit-uninstaller"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+eframe = "=0.29.1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "ico", "bmp", "webp", "gif", "tga", "tiff"] }
+serde_json = "1"
+miedit-core = { path = "../miedit-core" }

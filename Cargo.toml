@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/miedit-core",
+    "crates/miedit-compiler",
+    "crates/miedit-installer",
+    "crates/miedit-uninstaller",
+    "crates/miedit-builder",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+opt-level = 3

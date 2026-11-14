@@ -1,0 +1,18 @@
+# Rust
+target/
+
+# 构建与测试产物
+out/
+
+# 参考源码（NSIS / Inno Setup，不入库）
+references/
+
+# 自删除临时文件
+*.deleting
+*.tmp.exe
+
+# 系统杂项
+Thumbs.db
+examples/**/*.exe
+examples/demo-payload/*.pdb
+!examples/demo-payload/MIEditDemo.exe

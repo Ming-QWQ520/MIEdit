@@ -1,0 +1,23 @@
+[package]
+name = "miedit-compiler"
+version.workspace = true
+edition.workspace = true
+description = "MIEdit 安装包编译器：读取 .miedit.toml 脚本产出自解压安装包 EXE"
+
+[[bin]]
+name = "miedit-compiler"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+flate2 = "1"
+toml = "0.8"
+serde_json = "1"
+miedit-core = { path = "../miedit-core" }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+] }

@@ -1,0 +1,20 @@
+[package]
+name = "miedit-installer"
+version.workspace = true
+edition.workspace = true
+description = "MIEdit 自解压安装器 Stub（现代化 GUI 向导，支持全窗口图片背景）"
+
+[[bin]]
+name = "miedit-installer"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+flate2 = "1"
+eframe = "=0.29.1"
+image = { version = "0.25", default-features = false, features = [
+    "png", "jpeg", "ico", "bmp", "webp", "gif", "tga", "tiff",
+] }
+rfd = "0.15"
+serde_json = "1"
+miedit-core = { path = "../miedit-core" }
