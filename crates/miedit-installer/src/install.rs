@@ -78,11 +78,13 @@ fn wait_file_error_choice(
 
 /// 启动后台安装线程，返回共享进度状态。
 /// `selected_rules`：组件过滤后允许安装的 `[[files]]` 规则索引；None = 全部安装。
+/// `language`：选中语言索引（步骤 15 多语言；None = 无语言包，文案用英文默认）。
 pub fn spawn(
     pkg: Arc<Package>,
     dest: PathBuf,
     ctx: Option<egui::Context>,
     selected_rules: Option<std::collections::HashSet<usize>>,
+    language: Option<usize>,
 ) -> Arc<Mutex<ProgressState>> {
     let st = Arc::new(Mutex::new(ProgressState {
         phase: Phase::Extracting,
@@ -95,7 +97,7 @@ pub fn spawn(
     std::thread::Builder::new()
         .name("mris-install".into())
         .spawn(move || {
-            let res = run_install(&pkg, &dest, &st2, ctx.as_ref(), selected_rules.as_ref());
+            let res = run_install(&pkg, &dest, &st2, ctx.as_ref(), selected_rules.as_ref(), language);
             let mut s = st2.lock().unwrap();
             match res {
                 Ok(()) => {
@@ -141,6 +143,7 @@ fn run_install(
     st: &Mutex<ProgressState>,
     ctx: Option<&egui::Context>,
     selected_rules: Option<&std::collections::HashSet<usize>>,
+    language: Option<usize>,
 ) -> Result<()> {
     // 1. 旧版本检测（升级提示 + 静默卸载旧版）：新版为内嵌清单，旧版兼容 uninstall.json
     let old_exe = dest.join("uninstall.exe");
@@ -408,7 +411,7 @@ fn run_install(
     if let Some(c) = ctx {
         c.request_repaint();
     }
-    finalize::finalize_install(pkg, dest, &files, &dirs, st)?;
+    finalize::finalize_install(pkg, dest, &files, &dirs, st, language)?;
 
     // NSIS LogSet 风格：安装日志落盘到 $INSTDIR\install.log（可用 install.write_log 关闭）
     if pkg.config.install.write_log {

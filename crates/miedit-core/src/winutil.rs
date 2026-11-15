@@ -750,6 +750,22 @@ pub fn schedule_self_delete(exe: &Path, extra_dirs: &[PathBuf]) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 系统语言（多语言框架，路线图步骤 15）
+// ---------------------------------------------------------------------------
+
+/// 当前用户默认 UI 语言的 Windows LANGID（非 Windows 平台返回 en-US 以便测试）。
+pub fn user_default_ui_language() -> u16 {
+    #[cfg(windows)]
+    unsafe {
+        windows::Win32::Globalization::GetUserDefaultUILanguage()
+    }
+    #[cfg(not(windows))]
+    {
+        0x0409
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

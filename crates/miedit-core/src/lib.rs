@@ -9,6 +9,7 @@ pub mod crc32;
 pub mod fileerror;
 pub mod files;
 pub mod installtypes;
+pub mod langs;
 pub mod manifest;
 pub mod overwrite;
 pub mod sysreq;

@@ -41,7 +41,15 @@ license_scroll_required = true
 show_components_page = true
 show_dir_page = true
 
-[ui.text]
+# 多语言框架（NSIS MUI2 `MUI_LANGUAGE` 对齐，路线图步骤 15）：
+# 定义 >1 个语言时，欢迎页前显示语言选择页；启动时按系统 UI 语言自动预选
+# （language_auto_detect = true 默认开启）。未覆盖的文案键由内置语言包补全
+# （内置 zh-CN 为完整中文、en-US 为英文默认）；[ui.text] 仍是最高优先级单键覆盖。
+[[ui.languages]]
+id = "zh-CN"
+name = "简体中文"
+
+[ui.languages.text]
 app_running_body = "{app} 似乎正在运行。请先关闭它后点击「重试检测」，或点击「仍然继续」忽略。"
 app_running_title = "检测到程序正在运行"
 back = "上一步"
@@ -85,6 +93,10 @@ welcome_body = """
 建议在继续之前关闭其他正在运行的程序。"""
 welcome_chip = "欢 迎"
 window_title = "{app} 安装向导"
+
+[[ui.languages]]
+id = "en-US"
+name = "English"
 
 [shortcuts]
 start_menu = true

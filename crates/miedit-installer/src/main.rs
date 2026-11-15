@@ -94,7 +94,9 @@ fn real_main(silent: bool, ncrc: bool, dir_arg: Option<String>, args: &[String])
     };
 
     if silent {
-        let st = install::spawn(pkg.clone(), dest, None, None);
+        // 静默模式无语言选择页：按系统语言自动预选（NSIS /S 语义）
+        let language = miedit_core::langs::initial_language(cfg);
+        let st = install::spawn(pkg.clone(), dest, None, None, language);
         // 等待安装线程结束（join handle 未暴露，轮询即可）
         loop {
             {

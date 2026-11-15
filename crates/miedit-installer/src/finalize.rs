@@ -3,7 +3,6 @@
 use crate::install::{push_log, ProgressState};
 use crate::pkg::Package;
 use anyhow::{Context as _, Result};
-use miedit_core::config::ui_text;
 use miedit_core::manifest::UninstallManifest;
 use miedit_core::winutil::{self, RegValue};
 use std::fs;
@@ -17,13 +16,17 @@ pub fn finalize_install(
     files: &[String],
     dirs: &[String],
     st: &Mutex<ProgressState>,
+    language: Option<usize>,
 ) -> Result<UninstallManifest> {
     let cfg = &pkg.config;
     let per_machine = cfg.app.per_machine;
     let app_id = cfg.app_id_or_slug();
 
-    // 1. 释放卸载器
-    push_log(st, ui_text(cfg, "finalizing"));
+    // 1. 释放卸载器（文案按选中语言解析，步骤 15 多语言）
+    push_log(
+        st,
+        miedit_core::config::resolved_text(cfg, language, "finalizing"),
+    );
     let mut f = fs::File::open(&pkg.path).context("打开安装包失败")?;
     f.seek(SeekFrom::Start(pkg.trailer.uninstaller.off))?;
     let mut un_bytes = vec![0u8; pkg.trailer.uninstaller.len as usize];

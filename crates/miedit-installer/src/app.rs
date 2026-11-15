@@ -13,6 +13,8 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Page {
+    /// 语言选择页（NSIS MUI 语义：定义了多个语言时显示，欢迎页前）
+    Language,
     Welcome,
     License,
     Components,
@@ -30,6 +32,8 @@ pub struct InstallerApp {
     dir_text: String,
     state: Arc<Mutex<ProgressState>>,
     page: Page,
+    /// 当前选中语言索引（cfg.ui.languages 下标；None = 无语言包，旧包行为）
+    language: Option<usize>,
     license_accepted: bool,
     license_scrolled: bool,
     component_checked: Vec<bool>,
@@ -50,8 +54,10 @@ pub struct InstallerApp {
 
 pub fn run_gui(pkg: Arc<Package>, default_dest: PathBuf) -> anyhow::Result<()> {
     let cfg = &pkg.config;
+    // 启动语言预选（NSIS MUI：多语言时预选系统语言，单语言直接使用，无语言包保持旧行为）
+    let language = miedit_core::langs::initial_language(cfg);
     let title = miedit_core::config::fill_template(
-        &miedit_core::config::ui_text(cfg, "window_title"),
+        &miedit_core::config::resolved_text(cfg, language, "window_title"),
         &cfg.app.name,
         &cfg.app.version,
     );
@@ -112,12 +118,19 @@ pub fn run_gui(pkg: Arc<Package>, default_dest: PathBuf) -> anyhow::Result<()> {
                 .unwrap_or_else(|| pkg.config.components.iter().map(|_| true).collect()),
                 None => pkg.config.components.iter().map(|_| true).collect(),
             };
+            // NSIS MUI 语义：定义了多个语言 → 首页为语言选择页
+            let page = if pkg.config.ui.languages.len() > 1 {
+                Page::Language
+            } else {
+                Page::Welcome
+            };
             Ok(Box::new(InstallerApp {
                 pkg,
                 dest: default_dest.clone(),
                 dir_text: default_dest.display().to_string(),
                 state: Arc::new(Mutex::new(ProgressState::default())),
-                page: Page::Welcome,
+                page,
+                language,
                 license_accepted: false,
                 license_scrolled: false,
                 component_checked,
@@ -220,12 +233,14 @@ impl InstallerApp {
         }
 
         let rules = self.selected_rules();
-        self.state = install::spawn(self.pkg.clone(), dest, Some(ctx.clone()), rules);
+        self.state =
+            install::spawn(self.pkg.clone(), dest, Some(ctx.clone()), rules, self.language);
         self.page = Page::Install;
     }
 
     fn next(&mut self, ctx: &egui::Context) {
         match self.page {
+            Page::Language => self.page = Page::Welcome,
             Page::Welcome => {
                 if self.has_license() {
                     self.page = Page::License;
@@ -329,7 +344,7 @@ impl InstallerApp {
             return Vec::new();
         }
         let name = miedit_core::config::fill_template(
-            &miedit_core::config::ui_text(cfg, "run_app"),
+            &txt(cfg, self.language, "run_app"),
             &cfg.app.name,
             &cfg.app.version,
         );
@@ -340,7 +355,7 @@ impl InstallerApp {
 
     fn primary_action(&mut self, ctx: &egui::Context) {
         match self.page {
-            Page::Welcome | Page::License | Page::Components | Page::Dir => {
+            Page::Language | Page::Welcome | Page::License | Page::Components | Page::Dir => {
                 let enabled = match self.page {
                     Page::License => self.license_accepted,
                     Page::Dir => match self.disk_free() {
@@ -388,8 +403,41 @@ impl InstallerApp {
     fn content(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
         let cfg = &self.pkg.config;
         match self.page {
+            // 步骤 15：语言选择页（NSIS MUI 语义：欢迎页前，选中后文案立即切换）
+            Page::Language => {
+                ui.heading(
+                    egui::RichText::new(txt(cfg, self.language, "language_title"))
+                        .color(self.theme.text)
+                        .size(28.0)
+                        .strong(),
+                );
+                ui.label(
+                    egui::RichText::new(txt(cfg, self.language, "language_desc"))
+                        .color(self.theme.text_dim)
+                        .size(14.0),
+                );
+                ui.add_space(10.0);
+                let mut lang_next = self.language;
+                egui::Frame::none()
+                    .fill(self.theme.field)
+                    .rounding(10.0)
+                    .stroke(Stroke::new(1.0, self.theme.card_stroke))
+                    .inner_margin(egui::Margin::same(14.0))
+                    .show(ui, |ui| {
+                        for (i, l) in cfg.ui.languages.iter().enumerate() {
+                            ui.radio_value(
+                                &mut lang_next,
+                                Some(i),
+                                egui::RichText::new(&l.name)
+                                    .color(self.theme.text)
+                                    .size(15.0),
+                            );
+                        }
+                    });
+                self.language = lang_next;
+            }
             Page::Welcome => {
-                let chip = miedit_core::config::ui_text(cfg, "welcome_chip");
+                let chip = txt(cfg, self.language, "welcome_chip");
                 ui.add_space(6.0);
                 chip_label(ui, &chip, self.theme.accent);
                 ui.add_space(14.0);
@@ -413,17 +461,20 @@ impl InstallerApp {
                 });
                 ui.add_space(6.0);
                 ui.label(
-                    egui::RichText::new(format!(
-                        "版本 {} · {}",
-                        cfg.app.version,
-                        if cfg.app.publisher.is_empty() { "—" } else { &cfg.app.publisher }
-                    ))
+                    egui::RichText::new(
+                        txt(cfg, self.language, "version_line")
+                            .replace("{version}", &cfg.app.version)
+                            .replace(
+                                "{publisher}",
+                                if cfg.app.publisher.is_empty() { "—" } else { &cfg.app.publisher },
+                            ),
+                    )
                     .color(self.theme.text_dim)
                     .size(15.0),
                 );
                 ui.add_space(16.0);
                 let body = miedit_core::config::fill_template(
-                    &miedit_core::config::ui_text(cfg, "welcome_body"),
+                    &txt(cfg, self.language, "welcome_body"),
                     &cfg.app.name,
                     &cfg.app.version,
                 );
@@ -431,13 +482,13 @@ impl InstallerApp {
             }
             Page::License => {
                 ui.heading(
-                    egui::RichText::new(miedit_core::config::ui_text(cfg, "license_title"))
+                    egui::RichText::new(txt(cfg, self.language, "license_title"))
                         .color(self.theme.text)
                         .size(28.0)
                         .strong(),
                 );
                 ui.label(
-                    egui::RichText::new(miedit_core::config::ui_text(cfg, "license_desc"))
+                    egui::RichText::new(txt(cfg, self.language, "license_desc"))
                         .color(self.theme.text_dim)
                         .size(14.0),
                 );
@@ -480,14 +531,14 @@ impl InstallerApp {
                 ui.add_enabled_ui(can_accept, |ui| {
                     ui.checkbox(
                         &mut self.license_accepted,
-                        egui::RichText::new(miedit_core::config::ui_text(cfg, "license_accept"))
+                        egui::RichText::new(txt(cfg, self.language, "license_accept"))
                             .color(if can_accept { self.theme.text } else { self.theme.text_dim })
                             .size(14.0),
                     );
                 });
                 if scroll_required && !self.license_scrolled {
                     ui.label(
-                        egui::RichText::new("（请先将许可协议滚动到底部）")
+                        egui::RichText::new(txt(cfg, self.language, "license_scroll_hint"))
                             .color(self.theme.text_dim)
                             .size(12.0),
                     );
@@ -495,14 +546,14 @@ impl InstallerApp {
             }
             Page::Components => {
                 ui.heading(
-                    egui::RichText::new(miedit_core::config::ui_text(cfg, "components_title"))
+                    egui::RichText::new(txt(cfg, self.language, "components_title"))
                         .color(self.theme.text)
                         .size(28.0)
                         .strong(),
                 );
                 ui.label(
                     egui::RichText::new(miedit_core::config::fill_template(
-                        &miedit_core::config::ui_text(cfg, "components_desc"),
+                        &txt(cfg, self.language, "components_desc"),
                         &cfg.app.name,
                         &cfg.app.version,
                     ))
@@ -520,10 +571,7 @@ impl InstallerApp {
                     let mut type_next = self.install_type.min(custom_index);
                     ui.horizontal(|ui| {
                         ui.label(
-                            egui::RichText::new(miedit_core::config::ui_text(
-                                cfg,
-                                "components_type_title",
-                            ))
+                            egui::RichText::new(txt(cfg, self.language, "components_type_title"))
                             .color(self.theme.text_dim)
                             .size(13.0),
                         );
@@ -539,10 +587,7 @@ impl InstallerApp {
                         ui.radio_value(
                             &mut type_next,
                             custom_index,
-                            egui::RichText::new(miedit_core::config::ui_text(
-                                cfg,
-                                "components_type_custom",
-                            ))
+                            egui::RichText::new(txt(cfg, self.language, "components_type_custom"))
                             .color(self.theme.text)
                             .size(13.5),
                         );
@@ -558,7 +603,7 @@ impl InstallerApp {
                 ui.horizontal(|ui| {
                     if ui
                         .add(theme::secondary_button(
-                            &miedit_core::config::ui_text(cfg, "components_select_all"),
+                            &txt(cfg, self.language, "components_select_all"),
                             &self.theme,
                         ))
                         .clicked()
@@ -569,7 +614,7 @@ impl InstallerApp {
                     }
                     if ui
                         .add(theme::secondary_button(
-                            &miedit_core::config::ui_text(cfg, "components_reset"),
+                            &txt(cfg, self.language, "components_reset"),
                             &self.theme,
                         ))
                         .clicked()
@@ -631,7 +676,7 @@ impl InstallerApp {
                                 if comp.required {
                                     chip_small(
                                         ui,
-                                        miedit_core::config::ui_text(cfg, "components_required"),
+                                        txt(cfg, self.language, "components_required"),
                                         self.theme.accent,
                                     );
                                 }
@@ -666,10 +711,7 @@ impl InstallerApp {
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.label(
-                                egui::RichText::new(miedit_core::config::ui_text(
-                                    cfg,
-                                    "components_desc_panel",
-                                ))
+                                egui::RichText::new(txt(cfg, self.language, "components_desc_panel"))
                                 .color(self.theme.text_dim)
                                 .size(12.0)
                                 .strong(),
@@ -678,7 +720,7 @@ impl InstallerApp {
                                 if c.required {
                                     chip_small(
                                         ui,
-                                        miedit_core::config::ui_text(cfg, "components_required"),
+                                        txt(cfg, self.language, "components_required"),
                                         self.theme.accent,
                                     );
                                 }
@@ -686,7 +728,7 @@ impl InstallerApp {
                         });
                         let text = match sel_comp {
                             Some(c) if has_desc => c.description.clone(),
-                            _ => miedit_core::config::ui_text(cfg, "components_desc_empty"),
+                            _ => txt(cfg, self.language, "components_desc_empty"),
                         };
                         ui.label(
                             egui::RichText::new(text)
@@ -706,14 +748,14 @@ impl InstallerApp {
             }
             Page::Dir => {
                 ui.heading(
-                    egui::RichText::new(miedit_core::config::ui_text(cfg, "dir_title"))
+                    egui::RichText::new(txt(cfg, self.language, "dir_title"))
                         .color(self.theme.text)
                         .size(28.0)
                         .strong(),
                 );
                 ui.add_space(4.0);
                 let desc = miedit_core::config::fill_template(
-                    &miedit_core::config::ui_text(cfg, "dir_desc"),
+                    &txt(cfg, self.language, "dir_desc"),
                     &cfg.app.name,
                     &cfg.app.version,
                 );
@@ -737,13 +779,13 @@ impl InstallerApp {
                         });
                     if ui
                         .add(theme::secondary_button(
-                            &miedit_core::config::ui_text(cfg, "browse"),
+                            &txt(cfg, self.language, "browse"),
                             &self.theme,
                         ))
                         .clicked()
                     {
                         if let Some(dir) = rfd::FileDialog::new()
-                            .set_title(miedit_core::config::ui_text(cfg, "dir_title"))
+                            .set_title(txt(cfg, self.language, "dir_title"))
                             .pick_folder()
                         {
                             self.dir_text = dir.display().to_string();
@@ -754,10 +796,10 @@ impl InstallerApp {
                 ui.add_space(6.0);
                 let need = self.selected_bytes();
                 let space =
-                    miedit_core::config::ui_text(cfg, "disk_space").replace("{size}", &miedit_core::util::human_size(need));
+                    txt(cfg, self.language, "disk_space").replace("{size}", &miedit_core::util::human_size(need));
                 ui.label(egui::RichText::new(space).color(self.theme.text_dim).size(13.0));
                 if let Some(free) = self.disk_free() {
-                    let free_s = miedit_core::config::ui_text(cfg, "free_space")
+                    let free_s = txt(cfg, self.language, "free_space")
                         .replace("{free}", &miedit_core::util::human_size(free));
                     let insufficient = free < need.saturating_mul(2);
                     ui.label(
@@ -780,7 +822,7 @@ impl InstallerApp {
                         if non_empty {
                             ui.add_space(2.0);
                             ui.label(
-                                egui::RichText::new("注意：目标目录已存在且非空，其中的文件将被覆盖或合并。")
+                                egui::RichText::new(txt(cfg, self.language, "dir_exists_warning"))
                                     .color(Color32::from_rgb(0xF5, 0xA5, 0x24))
                                     .size(12.5),
                             );
@@ -791,7 +833,7 @@ impl InstallerApp {
             Page::Install => {
                 ui.heading(
                     egui::RichText::new(miedit_core::config::fill_template(
-                        &miedit_core::config::ui_text(cfg, "installing"),
+                        &txt(cfg, self.language, "installing"),
                         &cfg.app.name,
                         &cfg.app.version,
                     ))
@@ -832,9 +874,9 @@ impl InstallerApp {
                         ui.label(
                             egui::RichText::new(match phase {
                                 Phase::Extracting | Phase::Idle => {
-                                    miedit_core::config::ui_text(cfg, "preparing")
+                                    txt(cfg, self.language, "preparing")
                                 }
-                                _ => miedit_core::config::ui_text(cfg, "finalizing"),
+                                _ => txt(cfg, self.language, "finalizing"),
                             })
                             .color(self.theme.text_dim)
                             .size(13.5),
@@ -846,7 +888,7 @@ impl InstallerApp {
                 if !cur.is_empty() {
                     ui.label(
                         egui::RichText::new(
-                            miedit_core::config::ui_text(cfg, "extracting").replace("{file}", &cur),
+                            txt(cfg, self.language, "extracting").replace("{file}", &cur),
                         )
                         .color(self.theme.text_dim)
                         .size(12.5),
@@ -860,20 +902,24 @@ impl InstallerApp {
                         format!("{:.0} KB/s", speed_mb * 1024.0)
                     };
                     ui.label(
-                        egui::RichText::new(format!(
-                            "已写入 {} / {} 个文件 · {} · {}",
-                            done_f,
-                            total_f,
-                            miedit_core::util::human_size(done_b),
-                            speed_s
-                        ))
+                        egui::RichText::new(
+                            txt(cfg, self.language, "progress_stats")
+                                .replace("{done}", &done_f.to_string())
+                                .replace("{total}", &total_f.to_string())
+                                .replace("{bytes}", &miedit_core::util::human_size(done_b))
+                                .replace("{speed}", &speed_s),
+                        )
                         .color(self.theme.text_dim)
                         .size(12.5),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let label = if self.details_open { "隐藏细节" } else { "显示细节" };
+                        let label = if self.details_open {
+                            txt(cfg, self.language, "details_hide")
+                        } else {
+                            txt(cfg, self.language, "details_show")
+                        };
                         if ui
-                            .add(theme::secondary_button(label, &self.theme))
+                            .add(theme::secondary_button(&label, &self.theme))
                             .clicked()
                         {
                             self.details_open = !self.details_open;
@@ -909,14 +955,14 @@ impl InstallerApp {
                 draw_badge(ui, Color32::from_rgb(0x3D, 0xD6, 0x8C), "√", 34.0);
                 ui.add_space(10.0);
                 ui.heading(
-                    egui::RichText::new(miedit_core::config::ui_text(cfg, "finish_title"))
+                    egui::RichText::new(txt(cfg, self.language, "finish_title"))
                         .color(self.theme.text)
                         .size(34.0)
                         .strong(),
                 );
                 ui.add_space(4.0);
                 let body = miedit_core::config::fill_template(
-                    &miedit_core::config::ui_text(cfg, "finish_body"),
+                    &txt(cfg, self.language, "finish_body"),
                     &cfg.app.name,
                     &cfg.app.version,
                 );
@@ -946,7 +992,7 @@ impl InstallerApp {
                             ui.set_min_width(ui.available_width());
                             ui.label(
                                 egui::RichText::new(
-                                    miedit_core::config::ui_text(cfg, "finish_reboot_required")
+                                    txt(cfg, self.language, "finish_reboot_required")
                                         .replace("{count}", &pending_reboot.len().to_string()),
                                 )
                                 .color(amber)
@@ -963,10 +1009,10 @@ impl InstallerApp {
                             }
                             if pending_reboot.len() > 4 {
                                 ui.label(
-                                    egui::RichText::new(format!(
-                                        "等共 {} 个文件（详见 install.log）",
-                                        pending_reboot.len()
-                                    ))
+                                    egui::RichText::new(
+                                        txt(cfg, self.language, "finish_reboot_more")
+                                            .replace("{count}", &pending_reboot.len().to_string()),
+                                    )
                                     .color(self.theme.text_dim)
                                     .size(12.0),
                                 );
@@ -1005,14 +1051,14 @@ impl InstallerApp {
                 draw_badge(ui, Color32::from_rgb(0xF5, 0xA5, 0x24), "!", 34.0);
                 ui.add_space(10.0);
                 ui.heading(
-                    egui::RichText::new(miedit_core::config::ui_text(cfg, "app_running_title"))
+                    egui::RichText::new(txt(cfg, self.language, "app_running_title"))
                         .color(self.theme.text)
                         .size(30.0)
                         .strong(),
                 );
                 ui.add_space(6.0);
                 let body = miedit_core::config::fill_template(
-                    &miedit_core::config::ui_text(cfg, "app_running_body"),
+                    &txt(cfg, self.language, "app_running_body"),
                     &cfg.app.name,
                     &cfg.app.version,
                 );
@@ -1023,7 +1069,7 @@ impl InstallerApp {
                 draw_badge(ui, self.theme.accent, "!", 34.0);
                 ui.add_space(10.0);
                 ui.heading(
-                    egui::RichText::new(miedit_core::config::ui_text(cfg, "error_title"))
+                    egui::RichText::new(txt(cfg, self.language, "error_title"))
                         .color(self.theme.text)
                         .size(30.0)
                         .strong(),
@@ -1050,22 +1096,23 @@ impl InstallerApp {
 
     fn buttons(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let cfg = self.pkg.config.clone();
-        let t_next = miedit_core::config::ui_text(&cfg, "next");
-        let t_back = miedit_core::config::ui_text(&cfg, "back");
-        let t_cancel = miedit_core::config::ui_text(&cfg, "cancel");
-        let t_install = miedit_core::config::ui_text(&cfg, "install_now");
-        let t_done = miedit_core::config::ui_text(&cfg, "done_btn");
-        let t_retry = miedit_core::config::ui_text(&cfg, "retry");
-        let t_continue = miedit_core::config::ui_text(&cfg, "continue_anyway");
+        let t_next = txt(&cfg, self.language, "next");
+        let t_back = txt(&cfg, self.language, "back");
+        let t_cancel = txt(&cfg, self.language, "cancel");
+        let t_install = txt(&cfg, self.language, "install_now");
+        let t_done = txt(&cfg, self.language, "done_btn");
+        let t_retry = txt(&cfg, self.language, "retry");
+        let t_continue = txt(&cfg, self.language, "continue_anyway");
 
         ui.horizontal(|ui| {
             match self.page {
-                Page::Welcome | Page::License | Page::Components | Page::Dir => {
+                Page::Language | Page::Welcome | Page::License | Page::Components | Page::Dir => {
                     if ui.add(theme::secondary_button(&t_cancel, &self.theme)).clicked() {
                         ctx.send_viewport_cmd(ViewportCommand::Close);
                     }
                     ui.add_space(4.0);
-                    if self.page != Page::Welcome {
+                    // 语言页为首页，不显示返回（NSIS 语言选择不可回退）
+                    if !matches!(self.page, Page::Welcome | Page::Language) {
                         if ui.add(theme::secondary_button(&t_back, &self.theme)).clicked() {
                             self.back();
                         }
@@ -1084,6 +1131,7 @@ impl InstallerApp {
                         Page::License => !self.has_components() && !self.has_dir_page(),
                         Page::Components => !self.has_dir_page(),
                         Page::Welcome => !self.has_license() && !self.has_components() && !self.has_dir_page(),
+                        Page::Language => false,
                         _ => false,
                     };
                     let label: &str = if is_last { &t_install } else { &t_next };
@@ -1105,8 +1153,13 @@ impl InstallerApp {
                         let dest = PathBuf::from(self.dir_text.trim().trim_matches('"'));
                         self.dest = dest.clone();
                         let rules = self.selected_rules();
-                        self.state =
-                            install::spawn(self.pkg.clone(), dest, Some(ctx.clone()), rules);
+                        self.state = install::spawn(
+                            self.pkg.clone(),
+                            dest,
+                            Some(ctx.clone()),
+                            rules,
+                            self.language,
+                        );
                         self.page = Page::Install;
                     }
                     ui.add_space(4.0);
@@ -1122,6 +1175,11 @@ impl InstallerApp {
             }
         });
     }
+}
+
+/// 文案解析（步骤 15 多语言）：`ui.text` 覆盖 > 语言包 `text` > 内置包 > 英文默认。
+fn txt(cfg: &miedit_core::config::Config, lang: Option<usize>, key: &str) -> String {
+    miedit_core::config::resolved_text(cfg, lang, key)
 }
 
 fn chip_small(ui: &mut egui::Ui, text: String, accent: Color32) {
@@ -1168,6 +1226,19 @@ impl eframe::App for InstallerApp {
         }
         if enter && self.page != Page::Install {
             self.primary_action(ctx);
+        }
+        // 步骤 15：语言切换后同步窗口标题（NSIS 标题栏跟随语言）
+        let new_title = {
+            let cfg = &self.pkg.config;
+            miedit_core::config::fill_template(
+                &txt(cfg, self.language, "window_title"),
+                &cfg.app.name,
+                &cfg.app.version,
+            )
+        };
+        if new_title != self.title {
+            self.title = new_title.clone();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(new_title));
         }
         self.poll_state();
 
@@ -1302,7 +1373,7 @@ impl eframe::App for InstallerApp {
                             draw_badge(ui, Color32::from_rgb(0xF5, 0xA5, 0x24), "!", 30.0);
                             ui.add_space(6.0);
                             ui.heading(
-                                egui::RichText::new(miedit_core::config::ui_text(&cfg, "file_error_title"))
+                                egui::RichText::new(txt(&cfg, self.language, "file_error_title"))
                                     .color(self.theme.text)
                                     .size(22.0)
                                     .strong(),
@@ -1310,7 +1381,7 @@ impl eframe::App for InstallerApp {
                             ui.add_space(4.0);
                             ui.label(
                                 egui::RichText::new(
-                                    miedit_core::config::ui_text(&cfg, "file_error_body")
+                                    txt(&cfg, self.language, "file_error_body")
                                         .replace("{file}", &path)
                                         .replace("{error}", &error),
                                 )
@@ -1319,7 +1390,7 @@ impl eframe::App for InstallerApp {
                             );
                             ui.add_space(4.0);
                             ui.label(
-                                egui::RichText::new(miedit_core::config::ui_text(&cfg, "file_error_hint"))
+                                egui::RichText::new(txt(&cfg, self.language, "file_error_hint"))
                                     .color(self.theme.text_dim)
                                     .size(12.5),
                             );
@@ -1327,7 +1398,7 @@ impl eframe::App for InstallerApp {
                             ui.horizontal(|ui| {
                                 if ui
                                     .add(theme::secondary_button(
-                                        &miedit_core::config::ui_text(&cfg, "file_error_abort"),
+                                        &txt(&cfg, self.language, "file_error_abort"),
                                         &self.theme,
                                     ))
                                     .clicked()
@@ -1336,7 +1407,7 @@ impl eframe::App for InstallerApp {
                                 }
                                 if ui
                                     .add(theme::secondary_button(
-                                        &miedit_core::config::ui_text(&cfg, "file_error_ignore"),
+                                        &txt(&cfg, self.language, "file_error_ignore"),
                                         &self.theme,
                                     ))
                                     .clicked()
@@ -1345,7 +1416,7 @@ impl eframe::App for InstallerApp {
                                 }
                                 if ui
                                     .add(theme::primary_button(
-                                        &miedit_core::config::ui_text(&cfg, "retry"),
+                                        &txt(&cfg, self.language, "retry"),
                                         &self.theme,
                                     ))
                                     .clicked()

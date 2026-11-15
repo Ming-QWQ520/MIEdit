@@ -196,3 +196,36 @@
    cfg(windows) 错误在 Linux 沙箱完全不可见，`cargo check --workspace
    --target x86_64-pc-windows-msvc`（不链接、无需 MinGW）已两次在提交前拦下
    真实错误，列为每次迭代的固定验证步骤。
+
+## 十一、落地清单 · 第八批（NSIS 对齐 #7，v0.8.0）
+
+1. **多语言的"内置包打底"而非"全量复制"**（NSIS MUI2 `MUI_LANGUAGE` 的
+   落地形态）：NSIS 每个 `LangString` 都要逐语言写全，缺一个运行期显示空。
+   MIEdit 反过来——内置 zh-CN 包（56 键全量中文）与 en-US 包（英文默认表）
+   常驻编译进安装器，脚本 `[[ui.languages]]` 只需写 `id` + 显示名即可获得
+   完整文案，`text` 表只写想改的键。id 按精确/别名（`zh`、`zh-Hans` 均命中
+   zh-CN）匹配内置包；未知 id（如自定义 `fr-FR`）键值逐级回退英文默认，
+   不会出现空文案。键集一致性由单测锁定（zh-CN 包必须覆盖英文默认表全部键）。
+2. **`ui.text` 保持最高优先级是向后兼容的关键**：旧脚本靠 `ui.text` 做
+   单键覆盖（demo 的整套中文），多语言引入后如果语言包优先级更高，旧包
+   行为就会突变。解析链定为 `ui.text` > 语言包 `text` > 内置包 > 英文默认，
+   `ui_text(cfg, key)` 旧入口等价 `resolved_text(cfg, None, key)`——无语言包
+   的旧安装包逐字节同行为。代价：`ui.text` 的覆盖是语言无关的（对所有
+   语言生效），多语言脚本应把差异文案写进各语言包而不是 `ui.text`。
+3. **语言选择页的 NSIS 语义对齐**：NSIS 多语言弹 `LangDLL` 对话框、
+   单语言静默；MIEdit 用向导首页 `Page::Language`（>1 语言才出现，单向
+   不可回退），预选逻辑 = 精确 id 匹配 > 主标签匹配 > 第一个，预选来源
+   `GetUserDefaultUILanguage`（LANGID→BCP 47 映射表：精确表 + 主语言回退，
+   完全未知返回 None 走第一个）。静默模式 `/S` 无 UI，直接按自动检测结果
+   渲染日志。语言切换后 window_title 需要手动发 `ViewportCommand::Title`。
+4. **文案化的最后一公里**：内置英文默认表里残留 5 个中文键（file_error_*、
+   finish_reboot_required）与 UI 里 7 处硬编码中文（版本行、许可滚动提示、
+   目录非空警告、进度统计、细节开关、重启剩余计数）让双语包永远无法自洽，
+   本轮全部文案化并修正为全英文基调（中文值移入内置 zh-CN 包）。教训：
+   新增 UI 文案必须走文案表，硬编码字符串会同时污染两个语言包的键集。
+5. **安装后台线程也要拿到语言**：`install::spawn` 线程里 finalize 的
+   "写入卸载程序与快捷方式..." 日志行原走 `ui_text`（无语言上下文），本轮
+   把 `language: Option<usize>` 一路传到 `finalize_install`（GUI 从
+   `InstallerApp.language`、静默从 `initial_language`），保证日志与 UI
+   同语言。语言索引是配置下标，解析仍走 `resolved_text(cfg, lang, key)`，
+   不复制文案字符串，避免快照与配置漂移。

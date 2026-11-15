@@ -257,6 +257,40 @@ pub fn build_package(
         }
     }
 
+    // 5.4 校验语言包定义（NSIS MUI2 MUI_LANGUAGE 对齐，路线图步骤 15）
+    for (i, l) in cfg.ui.languages.iter().enumerate() {
+        if l.id.trim().is_empty() {
+            bail!("[[ui.languages]] #{} 缺少 id（BCP 47 风格，如 zh-CN / en-US）", i + 1);
+        }
+        if l.name.trim().is_empty() {
+            bail!("语言包 \"{}\" 缺少 name（语言选择页显示名）", l.id);
+        }
+        let id_ok = {
+            let id = l.id.trim();
+            let mut parts = id.split('-');
+            let primary = parts.next().unwrap_or("");
+            !primary.is_empty()
+                && primary.len() <= 8
+                && primary.chars().all(|c| c.is_ascii_alphabetic())
+                && parts.all(|p| !p.is_empty() && p.len() <= 8 && p.chars().all(|c| c.is_ascii_alphanumeric()))
+        };
+        if !id_ok {
+            bail!(
+                "语言包 id \"{}\" 无效（BCP 47 风格示例: zh-CN / en-US / pt-BR）",
+                l.id
+            );
+        }
+    }
+    {
+        let mut seen_ids: std::collections::BTreeMap<String, usize> = Default::default();
+        for (i, l) in cfg.ui.languages.iter().enumerate() {
+            let key = l.id.trim().to_ascii_lowercase();
+            if let Some(first) = seen_ids.insert(key, i) {
+                bail!("语言包 id \"{}\" 重复定义（#{} 与 #{}）", l.id, first + 1, i + 1);
+            }
+        }
+    }
+
     // 6. 收集文件（记录每条规则展开出的文件引用，供组件过滤与进度计算）
     let mut collected: Vec<files::CollectedFile> = Vec::new();
     let mut seen = BTreeMap::new();

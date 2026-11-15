@@ -46,6 +46,7 @@
 | **覆盖策略** | NSIS `SetOverwrite` 对齐：`on / off / try / ifnewer`；安装后保留源文件时间戳，`ifnewer` 仅在源更新时覆盖 |
 | **快捷方式增强** | Inno `[Icons]` 对齐：`[[shortcuts.entries]]` 自定义名称/子目录/参数/图标/工作目录/描述，位置多选（开始菜单/桌面/快速启动栏），与简单开关叠加兼容 |
 | **最小系统版本门槛** | Inno `MinVersion` 对齐：`install.min_version`，RtlGetVersion 取真实版本（不受兼容性垫片影响），低于门槛启动即拒 |
+| **多语言向导** | NSIS MUI2 `MUI_LANGUAGE` 对齐：`[[ui.languages]]` 语言包（id + 显示名 + 文案覆盖），内置 zh-CN / en-US 双语包，>1 语言时欢迎页前显示语言选择页，按系统 UI 语言自动预选；`ui.text` 仍是最高优先级单键覆盖 |
 | **卸载统计** | NSIS 卸载完成统计对齐：完成页展示已删除文件数/目录数/释放空间（含用户数据目录递归统计） |
 | **覆盖失败重试交互** | NSIS 文件错误对话框对齐：安装中文件被占用写不进时弹出「重试 / 忽略 / 中止」模态卡片——重试循环、忽略记录日志并继续、中止说明已写入文件去向；静默模式自动忽略并计划重启替换 |
 | **安装期重启替换** | NSIS `SetRebootFlag` / Inno `restartreplace` 对齐：被占用文件先改名腾位立即写入新内容，旧文件调度重启删除（`PendingFileRenameOperations`）；完成页琥珀提示“需要重启以完成安装”并列出文件 |
@@ -126,7 +127,18 @@ accent = "#3B82F6"
 license = "LICENSE.txt"
 license_scroll_required = true
 show_components_page = true
-[ui.text]                     # UI 文案覆盖（键见下表），支持 {app} {version} {file} {size} {free}
+[ui.text]                     # UI 文案覆盖（键见下表），支持 {app} {version} {file} {size} {free}；优先级最高
+language_auto_detect = true   # 按系统 UI 语言自动预选（默认 true）
+
+[[ui.languages]]              # NSIS MUI2 MUI_LANGUAGE 风格语言包（可选，>1 个时显示语言选择页）
+id = "zh-CN"                  # BCP 47 风格 id；与内置包匹配时缺键自动补全
+name = "简体中文"             # 语言选择页显示名
+[ui.languages.text]           # 该语言的文案覆盖（未覆盖键由内置 zh-CN 包补全）
+next = "下一步"
+
+[[ui.languages]]
+id = "en-US"
+name = "English"
 
 [shortcuts]
 start_menu = true             # 自动含“卸载”快捷方式
@@ -187,7 +199,7 @@ crates/
 ## 测试
 
 ```bash
-cargo test --workspace    # 50 个单元测试：归档/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/文件错误决策与提示信箱/重启替换/安装类型状态机/系统版本门槛/目录统计/组件过滤映射/slug
+cargo test --workspace    # 57 个单元测试：归档/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/文件错误决策与提示信箱/重启替换/安装类型状态机/系统版本门槛/目录统计/组件过滤映射/slug/语言匹配与 LANGID 映射/多语言文案解析链
 ```
 
 已在 Windows 10 x64 实机验证：CLI 与 GUI 构建链路、静默安装/卸载全清理、组件过滤生效、

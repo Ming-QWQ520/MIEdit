@@ -231,8 +231,37 @@ pub struct UiConfig {
     pub show_components_page: Option<bool>,
     /// 是否显示安装目录选择页
     pub show_dir_page: bool,
-    /// UI 文案覆盖（键值见 README）
+    /// 语言包定义（NSIS MUI2 `MUI_LANGUAGE` 对齐，路线图步骤 15）；
+    /// 空 = 沿用英文默认文案（旧包行为不变）；多于一个时欢迎页前显示语言选择页
+    pub languages: Vec<LanguageSpec>,
+    /// 启动时按系统 UI 语言自动预选（默认 true）
+    pub language_auto_detect: bool,
+    /// UI 文案覆盖（键值见 README；语言无关的作者强制覆盖，优先级高于语言包）
     pub text: BTreeMap<String, String>,
+}
+
+/// 语言包定义（NSIS `MUI_LANGUAGE` / Inno `[Languages]` 风格）。
+/// `id` 与内置包（`miedit_core::langs`）匹配时缺键由内置包补齐；
+/// `text` 中出现的键覆盖内置包。`ui.text` 仍是最高优先级覆盖。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LanguageSpec {
+    /// 语言 id（BCP 47 风格，如 zh-CN / en-US；与内置包 id/别名匹配时自动补全缺键）
+    pub id: String,
+    /// 语言选择页显示名（如 "简体中文" / "English"）
+    pub name: String,
+    /// 该语言的文案覆盖键值表
+    pub text: BTreeMap<String, String>,
+}
+
+impl Default for LanguageSpec {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            text: BTreeMap::new(),
+        }
+    }
 }
 
 impl Default for UiConfig {
@@ -249,6 +278,8 @@ impl Default for UiConfig {
             license_scroll_required: false,
             show_components_page: None,
             show_dir_page: true,
+            languages: Vec::new(),
+            language_auto_detect: true,
             text: BTreeMap::new(),
         }
     }
@@ -337,9 +368,35 @@ pub struct RegistrySpec {
 }
 
 /// 读取 UI 文案：优先使用脚本覆盖，否则使用内置英文默认值。
+/// （多语言请用 [`resolved_text`]；本函数等价于未选择语言时的行为，旧代码不变。）
 pub fn ui_text(cfg: &Config, key: &str) -> String {
+    resolved_text(cfg, None, key)
+}
+
+/// 按选中语言解析 UI 文案（路线图步骤 15，NSIS MUI 语义）。
+///
+/// 优先级（高 → 低）：
+/// 1. `ui.text` 单键覆盖（作者强制，语言无关，兼容旧行为）
+/// 2. 选中语言包的 `text` 表（`cfg.ui.languages[lang]`）
+/// 3. 内置语言包（`miedit_core::langs`，按语言 id/别名匹配）
+/// 4. 英文默认表 [`default_text`]
+///
+/// `lang` 越界/为 None 时跳过 2、3（3 仅在语言 id 能匹配内置包时生效）。
+pub fn resolved_text(cfg: &Config, lang: Option<usize>, key: &str) -> String {
     if let Some(v) = cfg.ui.text.get(key) {
         return v.clone();
+    }
+    if let Some(i) = lang {
+        if let Some(spec) = cfg.ui.languages.get(i) {
+            if let Some(v) = spec.text.get(key) {
+                return v.clone();
+            }
+            if let Some(builtin) = crate::langs::builtin_language_for_id(&spec.id) {
+                if let Some((_, v)) = builtin.texts.iter().find(|(k, _)| *k == key) {
+                    return (*v).to_string();
+                }
+            }
+        }
     }
     match default_text(key) {
         Some(s) => s.to_string(),
@@ -347,9 +404,17 @@ pub fn ui_text(cfg: &Config, key: &str) -> String {
     }
 }
 
-/// 内置默认 UI 文案表（英文）；未知键返回 None。
+/// 内置默认 UI 文案表（英文基调）；未知键返回 None。
+/// 公开供 `langs` 模块做键集一致性检查。
 pub fn default_text(key: &str) -> Option<&'static str> {
-    const DEFAULT_TEXTS: &[(&str, &str)] = &[
+    DEFAULT_TEXT_KEYS
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, v)| *v)
+}
+
+/// 内置英文默认文案表（`pub` 供键集一致性测试）。
+pub static DEFAULT_TEXT_KEYS: &[(&str, &str)] = &[
         ("window_title", "{app} Setup"),
         ("welcome_chip", "WELCOME"),
         ("welcome_body", "Setup will install {app} {version} on your computer.\nIt is recommended to close other applications before continuing."),
@@ -392,25 +457,37 @@ pub fn default_text(key: &str) -> Option<&'static str> {
         ("continue_anyway", "Continue Anyway"),
         ("upgrade_notice", "Found installed version {old}; it will be upgraded to {new}."),
         // 步骤 8：文件写入错误模态（NSIS 文件错误对话框：重试/忽略/中止）
-        ("file_error_title", "写入文件失败"),
-        ("file_error_body", "无法写入以下文件：\n{file}\n\n{error}"),
+        //（英文基调修正：原中文值移入内置 zh-CN 语言包）
+        ("file_error_title", "Failed to Write File"),
+        ("file_error_body", "Unable to write the following file:\n{file}\n\n{error}"),
         (
             "file_error_hint",
-            "请关闭正在使用该文件的程序后选择「重试」；选择「忽略」将跳过该文件并在系统重启后替换；选择「中止」将停止安装（已写入的文件保留）。",
+            "Close programs using this file and choose Retry; Ignore skips it and replaces it after reboot; Abort stops the installation (files already written are kept).",
         ),
-        ("file_error_ignore", "忽略"),
-        ("file_error_abort", "中止"),
+        ("file_error_ignore", "Ignore"),
+        ("file_error_abort", "Abort"),
         // 步骤 9：完成页"需要重启"琥珀提示
         (
             "finish_reboot_required",
-            "需要重启以完成安装：{count} 个文件将在系统重启后替换。",
+            "A restart is required to finish installation: {count} file(s) will be replaced after reboot.",
         ),
+        // 步骤 15：多语言框架新增键 + 原硬编码 UI 字符串文案化
+        ("language_title", "Select Language"),
+        ("language_desc", "Please select the language used by this installer."),
+        ("version_line", "Version {version} · {publisher}"),
+        (
+            "license_scroll_hint",
+            "Please scroll the license agreement to the bottom first.",
+        ),
+        (
+            "dir_exists_warning",
+            "Note: the target folder already exists and is not empty. Files inside will be overwritten or merged.",
+        ),
+        ("progress_stats", "Extracted {done} / {total} files · {bytes} · {speed}"),
+        ("details_show", "Show details"),
+        ("details_hide", "Hide details"),
+        ("finish_reboot_more", "and {count} files in total (see install.log)"),
     ];
-    DEFAULT_TEXTS
-        .iter()
-        .find(|(k, _)| *k == key)
-        .map(|(_, v)| *v)
-}
 
 /// 将文案中的 `{app}` / `{version}` 替换为实际值。
 pub fn fill_template(s: &str, app: &str, version: &str) -> String {

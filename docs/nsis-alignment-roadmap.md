@@ -23,7 +23,7 @@
 | 12 | 最小系统版本门槛 | Inno `MinVersion`/`OnlyBelowVersion` | **已完成**（v0.7.0） |
 | 13 | 快捷方式增强：快速启动栏、独立 lnk 任务 | Inno `[Icons]` | **已完成**（v0.7.0） |
 | 14 | 卸载完成页统计（文件数/回收空间） | NSIS 卸载统计 | **已完成**（v0.7.0） |
-| 15 | 多语言框架（MUI 式语言选择 + 文案包） | NSIS MUI2 | 待办 |
+| 15 | 多语言框架（MUI 式语言选择 + 文案包） | NSIS MUI2 | **已完成**（v0.8.0） |
 | 16 | zstd 压缩档 | Inno `Compression.Zstd.pas`（等纯 Rust 编码器成熟） | 待办 |
 | 17 | ARP ModifyPath/修复入口评估 | NSIS/Inno 卸载注册表扩展 | 评估中 |
 
@@ -108,6 +108,23 @@
 6. **版本号**：功能对齐批次完成后递增 `Cargo.toml` workspace version。
 
 ## 变更日志
+
+- v0.8.0（步骤 15）：**多语言框架**（NSIS MUI2 `MUI_LANGUAGE` 对齐）：
+  `[[ui.languages]]`（id + 语言选择页显示名 + 文案覆盖键值表），内置
+  **zh-CN（完整中文 56 键）/ en-US（英文默认）** 双语包，按 id/别名
+  （`zh`/`zh-Hans`→zh-CN）匹配补全缺键；文案解析链下沉
+  `miedit_core::config::resolved_text`（`ui.text` 单键覆盖 > 语言包
+  `text` > 内置包 > 英文默认，`ui_text` 旧入口等价 `resolved_text(None)`，
+  旧包行为不变）；定义 >1 个语言时欢迎页前显示**语言选择页**（NSIS
+  语言选择语义，单向不可回退），启动按系统 UI 语言自动预选
+  (`ui.language_auto_detect`，默认开启：Windows `GetUserDefaultUILanguage`
+  LANGID→BCP 47 映射表，非 Windows 解析 `LC_ALL`/`LANG`；精确匹配优先，
+  其次主标签匹配，否则第一个），单语言直接使用；语言切换后窗口标题同步。
+  原 UI 硬编码中文文案（版本行/许可滚动提示/目录非空警告/进度统计/
+  细节开关等）全部文案化，英文默认表修正为全英文基调（原中文键值移入
+  内置 zh-CN 包）；安装后台线程（finalize 日志）与静默模式按选中语言渲染。
+  编译器校验语言包 id 格式/空 name/重复 id；8 项单测（解析链优先级、
+  内置包键集一致性、LANGID 映射、环境变量解析、语言匹配、启动预选）。
 
 - v0.7.0（步骤 12–14）：**最小系统版本门槛 + 快捷方式增强 + 卸载完成页统计**
   （Inno `MinVersion` / `[Icons]`、NSIS 卸载统计对齐）：
