@@ -602,8 +602,8 @@ pub fn set_file_mtime(path: &Path, epoch_secs: u64) -> Result<()> {
     }
     #[cfg(windows)]
     {
-        use windows::Win32::Foundation::HANDLE;
-        use windows::Win32::Storage::FileSystem::{SetFileTime, FILETIME};
+        use windows::Win32::Foundation::{FILETIME, HANDLE};
+        use windows::Win32::Storage::FileSystem::SetFileTime;
         use std::os::windows::io::AsRawHandle;
         let f = std::fs::OpenOptions::new()
             .write(true)
