@@ -3,7 +3,8 @@
 //! 启动时读取自身 EXE 尾部的包数据：
 //! 1. 若脚本声明每机器安装而当前非管理员 → 通过 UAC 提权重启自身；
 //! 2. `--silent` 模式直接安装到默认目录（或 `--dir=` 指定目录）并写日志；
-//! 3. 否则进入现代化 GUI 安装向导。
+//! 3. `--repair` 模式进入修复确认页（ARP ModifyPath 入口，路线图步骤 17）；
+//! 4. 否则进入现代化 GUI 安装向导。
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -21,12 +22,16 @@ fn main() {
     let mut dir: Option<String> = None;
     // NSIS CRCCheck 语义：`--ncrc` / `/ncrc` 跳过包完整性 CRC32 校验
     let mut ncrc = false;
+    // ARP 修复入口（路线图步骤 17）：`--repair` / `/repair` 进入修复模式
+    let mut repair = false;
     for a in &args {
         let low = a.to_ascii_lowercase();
         if low == "--silent" || low == "/s" || low == "-s" {
             silent = true;
         } else if low == "--ncrc" || low == "/ncrc" {
             ncrc = true;
+        } else if low == miedit_core::repair::REPAIR_ARG || low == "/repair" {
+            repair = true;
         } else if let Some(rest) = a.strip_prefix("--dir=") {
             dir = Some(rest.trim_matches('"').to_string());
         } else if low.starts_with("/d=") {
@@ -34,7 +39,7 @@ fn main() {
         }
     }
 
-    match real_main(silent, ncrc, dir, &args) {
+    match real_main(silent, ncrc, repair, dir, &args) {
         Ok(code) => std::process::exit(code),
         Err(e) => {
             miedit_core::winutil::message_box_error("MIEdit 安装程序", &format!("{e:#}"));
@@ -43,7 +48,13 @@ fn main() {
     }
 }
 
-fn real_main(silent: bool, ncrc: bool, dir_arg: Option<String>, args: &[String]) -> Result<i32> {
+fn real_main(
+    silent: bool,
+    ncrc: bool,
+    repair: bool,
+    dir_arg: Option<String>,
+    args: &[String],
+) -> Result<i32> {
     let pkg = pkg::load_self_package(ncrc)?;
     let cfg = &pkg.config;
 
@@ -94,7 +105,8 @@ fn real_main(silent: bool, ncrc: bool, dir_arg: Option<String>, args: &[String])
     };
 
     if silent {
-        // 静默模式无语言选择页：按系统语言自动预选（NSIS /S 语义）
+        // 静默模式无语言选择页：按系统语言自动预选（NSIS /S 语义）。
+        // 静默修复（--silent --repair）与静默安装行为一致：全量重装即静默修复。
         let language = miedit_core::langs::initial_language(cfg);
         let st = install::spawn(pkg.clone(), dest, None, None, language);
         // 等待安装线程结束（join handle 未暴露，轮询即可）
@@ -117,7 +129,7 @@ fn real_main(silent: bool, ncrc: bool, dir_arg: Option<String>, args: &[String])
         write_silent_log(&log);
         Ok(0)
     } else {
-        app::run_gui(pkg, dest)?;
+        app::run_gui(pkg, dest, repair)?;
         Ok(0)
     }
 }

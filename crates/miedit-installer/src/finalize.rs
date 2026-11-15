@@ -113,7 +113,7 @@ pub fn finalize_install(
     // 2.5 快捷方式条目（Inno [Icons] 对齐，路线图步骤 13）：
     // 自定义名称/子目录/参数/图标/工作目录/描述，位置可多选
     // （start_menu / desktop / quick_launch）；单个条目失败不阻断安装。
-    for (i, e) in cfg.shortcuts.entries.iter().enumerate() {
+    for e in cfg.shortcuts.entries.iter() {
         let name = e.name.trim();
         // 目标：空 = 主程序；目标不存在时警告并跳过（不阻断安装）
         let target = if e.exe.trim().is_empty() {
@@ -214,7 +214,17 @@ pub fn finalize_install(
             "UninstallString".into(),
             RegValue::Str(format!("\"{}\"", uninst_path.display())),
         ),
-        ("NoModify".into(), RegValue::Dword(1)),
+        // 步骤 17（Inno ModifyPath 对齐）：写修复入口，替代旧的 NoModify=1 ——
+        // 控制面板「更改/修复」按钮执行安装器 --repair，全量重装文件并重建
+        // 快捷方式/注册表。安装器路径异常时回退指向卸载器（保守降级）；
+        // 保留 NoRepair=1（无独立修复按钮语义，「更改」即修复入口）。
+        (
+            "ModifyPath".into(),
+            RegValue::Str(miedit_core::repair::modify_path_value(
+                &pkg.path.display().to_string(),
+            )
+            .unwrap_or_else(|| uninst_path.display().to_string())),
+        ),
         ("NoRepair".into(), RegValue::Dword(1)),
         ("EstimatedSize".into(), RegValue::Dword(total_kb)),
         // NSIS 对齐：静默卸载入口（Add/Remove Programs 自动化使用）

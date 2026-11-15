@@ -24,8 +24,8 @@
 | 13 | 快捷方式增强：快速启动栏、独立 lnk 任务 | Inno `[Icons]` | **已完成**（v0.7.0） |
 | 14 | 卸载完成页统计（文件数/回收空间） | NSIS 卸载统计 | **已完成**（v0.7.0） |
 | 15 | 多语言框架（MUI 式语言选择 + 文案包） | NSIS MUI2 | **已完成**（v0.8.0） |
-| 16 | zstd 压缩档 | Inno `Compression.Zstd.pas`（等纯 Rust 编码器成熟） | 待办 |
-| 17 | ARP ModifyPath/修复入口评估 | NSIS/Inno 卸载注册表扩展 | 评估中 |
+| 16 | zstd 压缩档 | Inno `Compression.Zstd.pas`（等纯 Rust 编码器成熟） | **阻塞**（依赖待成熟，见步骤 16 定义） |
+| 17 | ARP ModifyPath/修复入口 | Inno `ModifyPath`/修复向导 | **已完成**（v0.9.0） |
 
 ## 迭代步骤定义
 
@@ -91,10 +91,18 @@
 ### 步骤 16：zstd 压缩档
 - **做什么**：待纯 Rust zstd 编码器成熟后接入（当前 lzma-rs 编码器为存根，见 lessons 文档）；
   `install.compression = "zstd"`，Installer 解压对应支持。
+- **阻塞说明**（2026-11-16 记录）：纯 Rust 生态中 `ruzstd` 仅有**解码器**，
+  无成熟 zstd 编码器实现；官方 `zstd` crate 是 C 绑定（cc 构建 libzstd），
+  违反工程约束 1（不引入 C 构建链）。待纯 Rust 编码器（如 zstd-rs 类项目）
+  发布稳定版本后再接入。转向步骤 17 继续。
 
-### 步骤 17：ARP ModifyPath/修复入口
-- **做什么**：评估在卸载注册表键写 `ModifyPath`（启动安装器向导到修复模式）的可行性；
-  涉及安装器"修复模式"（重解压 + 重建快捷方式/注册表），规模较大，先出设计再实现。
+### 步骤 17：ARP ModifyPath/修复入口（已实现，v0.9.0）
+- **设计**：卸载注册表键写 `ModifyPath = "<安装器路径>" --repair`；安装器解析
+  修复开关后跳过全部向导页直达修复确认页（含修复摘要统计），确认后
+  全量重装文件 + 重建快捷方式/注册表，完成页切换修复文案。
+- **实现**：`miedit_core::repair`（modify_path_value / repair_selection /
+  summarize）+ installer `--repair`/`/repair` 解析 + `Page::RepairConfirm`
+  + finalize 注册表写入；静默修复等同静默安装。
 
 ## 工程约束（每次迭代都要遵守）
 
@@ -108,6 +116,21 @@
 6. **版本号**：功能对齐批次完成后递增 `Cargo.toml` workspace version。
 
 ## 变更日志
+
+- v0.9.0（步骤 17）：**ARP ModifyPath 修复入口 + 修复模式**（Inno `ModifyPath`
+  / 修复向导对齐）：卸载注册表键不再写 `NoModify=1`，改写 **`ModifyPath` =
+  `"<安装器路径>" --repair`**（控制面板「更改/修复」按钮启动安装器修复；
+  `NoRepair=1` 保留，路径异常时保守回退指向卸载器）；安装器解析
+  `--repair` / `/repair` 开关，跳过全部向导页直达**修复确认页**（标题/
+  正文/安装目录 + 修复摘要统计：文件规则/快捷方式/注册表值个数），
+  确认后全量恢复组件选择（`repair_selection` 全选，install_type 归
+  Custom）重走常规安装流程（重解压全部文件 + 重建快捷方式/注册表），
+  完成页切换为「修复完成」文案；静默修复（`--silent --repair`）等同
+  静默安装语义；文案新增 6 键（repair_title/body/summary/now/
+  finish_title/finish_body，内置 zh-CN + 英文默认双包同步）；核心逻辑
+  下沉 `miedit_core::repair`（modify_path_value 引号拼装、repair_selection、
+  summarize 统计口径与 finalize 实际行为对齐），5 项单测。向后兼容：
+  旧包无新字段、修复入口由运行期生成，旧安装包重新安装后即获得修复入口。
 
 - v0.8.0（步骤 15）：**多语言框架**（NSIS MUI2 `MUI_LANGUAGE` 对齐）：
   `[[ui.languages]]`（id + 语言选择页显示名 + 文案覆盖键值表），内置

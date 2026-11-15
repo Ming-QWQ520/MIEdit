@@ -487,6 +487,19 @@ pub static DEFAULT_TEXT_KEYS: &[(&str, &str)] = &[
         ("details_show", "Show details"),
         ("details_hide", "Hide details"),
         ("finish_reboot_more", "and {count} files in total (see install.log)"),
+        // 步骤 17：ARP 修复入口 / 修复模式确认页与完成页
+        ("repair_title", "Repair Installation"),
+        (
+            "repair_body",
+            "Setup is ready to repair {app} {version}.\nAll program files will be re-extracted, and shortcuts and registry entries will be rebuilt.\nInstall folder: {dir}",
+        ),
+        (
+            "repair_summary",
+            "File rules: {files} · Shortcuts: {shortcuts} · Registry values: {registry}",
+        ),
+        ("repair_now", "Repair"),
+        ("repair_finish_title", "Repair Complete"),
+        ("repair_finish_body", "{app} {version} has been repaired at:"),
     ];
 
 /// 将文案中的 `{app}` / `{version}` 替换为实际值。

@@ -229,3 +229,33 @@
    `InstallerApp.language`、静默从 `initial_language`），保证日志与 UI
    同语言。语言索引是配置下标，解析仍走 `resolved_text(cfg, lang, key)`，
    不复制文案字符串，避免快照与配置漂移。
+
+## 十二、落地清单 · 第九批（NSIS 对齐 #8，v0.9.0）
+
+**ARP ModifyPath 修复入口 + 修复模式**（步骤 17，Inno `ModifyPath`/修复向导对齐）。
+
+1. **修复入口的核心是注册表三值协同**（ARP 协议）：`UninstallString`（卸载）、
+   `QuietUninstallString`（静默卸载）、`ModifyPath`（更改/修复）。此前写死
+   `NoModify=1` 等于主动放弃修复入口；对齐 Inno 后改为写
+   `ModifyPath = "<安装器路径>" --repair`，`NoRepair=1` 保留（无独立修复按钮
+   语义，「更改」即修复入口）。路径异常时保守回退指向卸载器，绝不让
+   ModifyPath 指向不存在的文件。
+2. **修复模式复用安装流程而非另写一套**：Inno 修复 = 重解压全部文件 +
+   重建快捷方式/注册表。MIEdit 的 `Page::RepairConfirm` 确认页只做一件事——
+   把组件选择恢复为全选（`repair_selection`），然后走既有 `start_install`
+   流程。修复与安装共享同一条代码路径，不存在"修复遗漏了安装期修复项"
+   的分叉风险。install_type 归位 Custom（全选态）与组件页状态机自洽。
+3. **统计口径要与实际行为一致**（确认页 `summarize` 的教训）：修复摘要
+   展示"将重建 N 个快捷方式"——统计口径照抄 `finalize` 的真实创建逻辑：
+   开始菜单组固定有卸载 lnk（+1），有主程序才有程序 lnk（+1）、桌面依赖
+   主程序存在；自定义条目按 locations 声明数计（目标无效运行期会跳过，
+   静态统计允许少量虚高）。首个单测断言就抓出少算 1 个卸载 lnk 的口径错。
+4. **GUI 入口测试的盲区仍在启动参数解析**：`--repair` 解析加进 main 后
+   忘了把标志传入 `real_main`，Linux `cargo check` 的输出被 tail 截断漏看
+   了 E0425，Windows 交叉检查第一遍就抓住。教训重申：`real_main` 参数
+   演进时同步改两处（调用点 + 签名）；验证命令必须全量 grep `^error`，
+   不能只看尾部几行。
+5. **步骤 16（zstd）维持阻塞并记录在案**：纯 Rust 生态 `ruzstd` 仅有解码器，
+   无成熟 zstd 编码器；官方 `zstd` crate 为 C 绑定（cc 构建链），违反纯
+   Rust 约束。按协议在路线图记录阻塞说明后转向步骤 17，不空转不硬塞
+   不合格依赖。

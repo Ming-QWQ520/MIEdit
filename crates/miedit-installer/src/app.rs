@@ -1,6 +1,7 @@
 //! 安装向导 UI：欢迎 → 许可 → 组件 → 目录 → 安装中 → 完成/失败。
 //! 无边框窗口 + 全窗口图片背景 + 半透明卡片，现代化视觉。
-//! 功能对齐 Inno Setup：组件选择、磁盘空间检查、许可强制滚动、[Run] 任务、升级检测、运行中检测。
+//! 功能对齐 Inno Setup：组件选择、磁盘空间检查、许可强制滚动、[Run] 任务、升级检测、运行中检测、
+//! ARP 修复入口（--repair 确认页，路线图步骤 17）。
 
 use crate::install::{self, Phase, ProgressState};
 use crate::pkg::Package;
@@ -19,6 +20,9 @@ enum Page {
     License,
     Components,
     Dir,
+    /// 修复模式确认页（ARP ModifyPath 入口，路线图步骤 17；
+    /// Inno 修复向导语义：确认后全量重装 + 重建快捷方式/注册表）
+    RepairConfirm,
     Install,
     Finish,
     AppRunning,
@@ -50,9 +54,12 @@ pub struct InstallerApp {
     /// 安装页“显示细节”开关（默认展开）
     details_open: bool,
     title: String,
+    /// 修复模式（ARP ModifyPath 启动，路线图步骤 17）：
+    /// 跳过向导页直接确认 → 全量重装，完成页切换为修复文案
+    repair: bool,
 }
 
-pub fn run_gui(pkg: Arc<Package>, default_dest: PathBuf) -> anyhow::Result<()> {
+pub fn run_gui(pkg: Arc<Package>, default_dest: PathBuf, repair: bool) -> anyhow::Result<()> {
     let cfg = &pkg.config;
     // 启动语言预选（NSIS MUI：多语言时预选系统语言，单语言直接使用，无语言包保持旧行为）
     let language = miedit_core::langs::initial_language(cfg);
@@ -118,8 +125,11 @@ pub fn run_gui(pkg: Arc<Package>, default_dest: PathBuf) -> anyhow::Result<()> {
                 .unwrap_or_else(|| pkg.config.components.iter().map(|_| true).collect()),
                 None => pkg.config.components.iter().map(|_| true).collect(),
             };
-            // NSIS MUI 语义：定义了多个语言 → 首页为语言选择页
-            let page = if pkg.config.ui.languages.len() > 1 {
+            // NSIS MUI 语义：定义了多个语言 → 首页为语言选择页；
+            // 修复模式跳过全部向导页，直接进入修复确认页
+            let page = if repair {
+                Page::RepairConfirm
+            } else if pkg.config.ui.languages.len() > 1 {
                 Page::Language
             } else {
                 Page::Welcome
@@ -143,6 +153,7 @@ pub fn run_gui(pkg: Arc<Package>, default_dest: PathBuf) -> anyhow::Result<()> {
                 icon_tex,
                 details_open: true,
                 title,
+                repair,
             }))
         }),
     )
@@ -236,6 +247,14 @@ impl InstallerApp {
         self.state =
             install::spawn(self.pkg.clone(), dest, Some(ctx.clone()), rules, self.language);
         self.page = Page::Install;
+    }
+
+    /// 修复模式（路线图步骤 17）：全量恢复组件选择后走常规安装流程
+    /// （重解压全部文件 + 重建快捷方式/注册表，与 Inno 修复语义一致）。
+    fn start_repair(&mut self, ctx: &egui::Context) {
+        self.component_checked = miedit_core::repair::repair_selection(self.pkg.config.components.len());
+        self.install_type = self.pkg.config.install_types.len(); // Custom（全选态）
+        self.start_install(ctx);
     }
 
     fn next(&mut self, ctx: &egui::Context) {
@@ -393,6 +412,7 @@ impl InstallerApp {
                     self.start_install(ctx);
                 }
             }
+            Page::RepairConfirm => self.start_repair(ctx),
             Page::Error => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Page::Install => {}
         }
@@ -435,6 +455,44 @@ impl InstallerApp {
                         }
                     });
                 self.language = lang_next;
+            }
+            // 步骤 17：修复确认页（ARP ModifyPath 入口，Inno 修复向导语义）
+            Page::RepairConfirm => {
+                ui.add_space(6.0);
+                draw_badge(ui, Color32::from_rgb(0x4C, 0xA8, 0xF0), "R", 34.0);
+                ui.add_space(10.0);
+                ui.heading(
+                    egui::RichText::new(txt(cfg, self.language, "repair_title"))
+                        .color(self.theme.text)
+                        .size(30.0)
+                        .strong(),
+                );
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(
+                        miedit_core::config::fill_template(
+                            &txt(cfg, self.language, "repair_body"),
+                            &cfg.app.name,
+                            &cfg.app.version,
+                        )
+                        .replace("{dir}", &self.dest_display()),
+                    )
+                    .color(self.theme.text_dim)
+                    .size(15.0),
+                );
+                ui.add_space(10.0);
+                let s = miedit_core::repair::summarize(cfg);
+                ui.label(
+                    egui::RichText::new(
+                        txt(cfg, self.language, "repair_summary")
+                            .replace("{files}", &s.file_rules.to_string())
+                            .replace("{shortcuts}", &s.shortcuts.to_string())
+                            .replace("{registry}", &s.registry_values.to_string()),
+                    )
+                    .color(self.theme.text)
+                    .size(13.5)
+                    .strong(),
+                );
             }
             Page::Welcome => {
                 let chip = txt(cfg, self.language, "welcome_chip");
@@ -954,15 +1012,18 @@ impl InstallerApp {
                 ui.add_space(4.0);
                 draw_badge(ui, Color32::from_rgb(0x3D, 0xD6, 0x8C), "√", 34.0);
                 ui.add_space(10.0);
+                // 修复模式完成页文案切换（步骤 17：修复完成 ≠ 安装完成）
+                let finish_title_key = if self.repair { "repair_finish_title" } else { "finish_title" };
+                let finish_body_key = if self.repair { "repair_finish_body" } else { "finish_body" };
                 ui.heading(
-                    egui::RichText::new(txt(cfg, self.language, "finish_title"))
+                    egui::RichText::new(txt(cfg, self.language, finish_title_key))
                         .color(self.theme.text)
                         .size(34.0)
                         .strong(),
                 );
                 ui.add_space(4.0);
                 let body = miedit_core::config::fill_template(
-                    &txt(cfg, self.language, "finish_body"),
+                    &txt(cfg, self.language, finish_body_key),
                     &cfg.app.name,
                     &cfg.app.version,
                 );
@@ -1143,6 +1204,16 @@ impl InstallerApp {
                     }
                 }
                 Page::Install => {}
+                Page::RepairConfirm => {
+                    let t_repair = txt(&cfg, self.language, "repair_now");
+                    if ui.add(theme::secondary_button(&t_cancel, &self.theme)).clicked() {
+                        ctx.send_viewport_cmd(ViewportCommand::Close);
+                    }
+                    ui.add_space(4.0);
+                    if ui.add(theme::primary_button(&t_repair, &self.theme)).clicked() {
+                        self.primary_action(ctx);
+                    }
+                }
                 Page::Finish => {
                     if ui.add(theme::primary_button(&t_done, &self.theme)).clicked() {
                         self.primary_action(ctx);

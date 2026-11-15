@@ -53,6 +53,7 @@
 | **重启删除** | NSIS `Delete /REBOOTOK` 对齐：卸载时被占用的文件 `MoveFileEx` 计划重启删除，完成页/静默日志提示 |
 | **卸载运行检测** | 卸载确认页检测主程序占用（可重新检测），静默模式记录警告后继续 |
 | **QuietUninstallString** | 卸载注册表写入静默卸载入口（ARP 自动化 / NSIS 风格） |
+| **修复模式** | Inno `ModifyPath` 对齐：卸载注册表写 `ModifyPath`，控制面板「更改/修复」按钮启动安装器 `--repair` 修复向导——跳过向导页直达确认页（含文件/快捷方式/注册表统计），确认后全量重装文件并重建快捷方式/注册表 |
 | **install.log** | NSIS `LogSet` 风格安装日志落盘到 `$INSTDIR\install.log`（`install.write_log` 可关） |
 | **包完整性校验** | NSIS `CRCCheck` 对齐：安装包尾写入 payload/config/uninstaller 三分区 CRC32（MIEDPKG3），启动时流式校验，损坏包报"安装包已损坏"；`--ncrc` / `/ncrc` 跳过；旧格式包仍可安装 |
 | 压缩 | `deflate`（条目级）或 `solid`（整包 Deflate，NSIS solid 风格，体积更小） |
@@ -199,7 +200,7 @@ crates/
 ## 测试
 
 ```bash
-cargo test --workspace    # 57 个单元测试：归档/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/文件错误决策与提示信箱/重启替换/安装类型状态机/系统版本门槛/目录统计/组件过滤映射/slug/语言匹配与 LANGID 映射/多语言文案解析链
+cargo test --workspace    # 63 个单元测试：归档/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/文件错误决策与提示信箱/重启替换/安装类型状态机/系统版本门槛/目录统计/组件过滤映射/slug/语言匹配与 LANGID 映射/多语言文案解析链/修复入口与修复统计
 ```
 
 已在 Windows 10 x64 实机验证：CLI 与 GUI 构建链路、静默安装/卸载全清理、组件过滤生效、

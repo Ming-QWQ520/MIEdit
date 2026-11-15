@@ -109,6 +109,19 @@ pub static ZH_CN: BuiltinLanguage = BuiltinLanguage {
         ),
         ("language_title", "选择安装语言"),
         ("language_desc", "请选择安装向导使用的语言。"),
+        // 步骤 17：ARP 修复入口 / 修复模式确认页与完成页
+        ("repair_title", "修复安装"),
+        (
+            "repair_body",
+            "安装向导已准备修复 {app} {version}。\n将重新解压全部程序文件，并重建快捷方式与注册表项。\n安装目录：{dir}",
+        ),
+        (
+            "repair_summary",
+            "文件规则：{files} 条 · 快捷方式：{shortcuts} 个 · 注册表值：{registry} 个",
+        ),
+        ("repair_now", "立即修复"),
+        ("repair_finish_title", "修复完成"),
+        ("repair_finish_body", "{app} {version} 已修复完成："),
     ],
 };
 
