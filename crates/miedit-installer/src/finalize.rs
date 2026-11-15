@@ -72,15 +72,19 @@ pub fn finalize_install(
             .unwrap_or(0),
     };
 
-    // 2. 快捷方式
+    // 2. 快捷方式（简单开关 + Inno [Icons] 风格条目，路线图步骤 13）
+    // created_dirs 去重：同一目录只记录一次（卸载时清理），桌面/快速启动栏等系统目录不记录
     let sc_name = cfg
         .shortcuts
         .name
         .clone()
         .unwrap_or_else(|| cfg.app.name.clone());
+    let mut created_dirs: std::collections::BTreeSet<std::path::PathBuf> =
+        std::collections::BTreeSet::new();
     if cfg.shortcuts.start_menu {
         let dir = winutil::start_menu_dir(per_machine).join(&sc_name);
         fs::create_dir_all(&dir).context("创建开始菜单目录失败")?;
+        created_dirs.insert(dir.clone());
         manifest.shortcut_dirs.push(dir.display().to_string());
         if let Some(exe) = &exe_abs {
             let lnk = dir.join(format!("{sc_name}.lnk"));
@@ -100,6 +104,98 @@ pub fn finalize_install(
             winutil::create_shortcut(&lnk, exe, &cfg.shortcuts.run_args, dest, Some(exe), &cfg.app.name)?;
             manifest.shortcuts.push(lnk.display().to_string());
             push_log(st, format!("桌面快捷方式: {}", lnk.display()));
+        }
+    }
+
+    // 2.5 快捷方式条目（Inno [Icons] 对齐，路线图步骤 13）：
+    // 自定义名称/子目录/参数/图标/工作目录/描述，位置可多选
+    // （start_menu / desktop / quick_launch）；单个条目失败不阻断安装。
+    for (i, e) in cfg.shortcuts.entries.iter().enumerate() {
+        let name = e.name.trim();
+        // 目标：空 = 主程序；目标不存在时警告并跳过（不阻断安装）
+        let target = if e.exe.trim().is_empty() {
+            match &exe_abs {
+                Some(p) => p.clone(),
+                None => {
+                    push_log(
+                        st,
+                        format!("警告: 快捷方式 \"{name}\" 未指定 exe 且应用无主程序，已跳过"),
+                    );
+                    continue;
+                }
+            }
+        } else {
+            let p = dest.join(e.exe.trim());
+            if !p.exists() {
+                push_log(
+                    st,
+                    format!(
+                        "警告: 快捷方式 \"{name}\" 目标不存在，已跳过: {}（安装后再创建的条目请指向已安装文件）",
+                        p.display()
+                    ),
+                );
+                continue;
+            }
+            p
+        };
+        // 工作目录：空 = 目标所在目录；支持 {install_dir} 模板
+        let workdir = {
+            let w = e.working_dir.trim().replace("{install_dir}", &dest.display().to_string());
+            let p = std::path::PathBuf::from(w);
+            if p.is_absolute() {
+                p
+            } else {
+                dest.join(p)
+            }
+        };
+        // 图标：包内相对路径（安装后文件），缺失时回退目标自身图标
+        let icon = if e.icon.trim().is_empty() {
+            None
+        } else {
+            let p = dest.join(e.icon.trim());
+            if p.exists() { Some(p) } else { None }
+        };
+        let desc = if e.comment.trim().is_empty() {
+            cfg.app.name.clone()
+        } else {
+            e.comment.trim().to_string()
+        };
+        for loc in &e.locations {
+            let (base, use_sub) = match loc.trim().to_ascii_lowercase().as_str() {
+                "start_menu" => (winutil::start_menu_dir(per_machine), true),
+                "desktop" => (winutil::desktop_dir(per_machine), false),
+                "quick_launch" => (winutil::quick_launch_dir(), false),
+                _ => {
+                    push_log(st, format!("警告: 快捷方式 \"{name}\" 未知位置 \"{loc}\"，已跳过"));
+                    continue;
+                }
+            };
+            // 子目录仅对开始菜单生效（Inno {group} 语义）；空 = 应用名分组目录
+            let dir = if use_sub && !e.subfolder.trim().is_empty() {
+                base.join(e.subfolder.trim())
+            } else if use_sub {
+                base.join(&sc_name)
+            } else {
+                base.clone()
+            };
+            if use_sub {
+                if created_dirs.insert(dir.clone()) {
+                    let _ = fs::create_dir_all(&dir);
+                    manifest.shortcut_dirs.push(dir.display().to_string());
+                }
+            } else {
+                let _ = fs::create_dir_all(&dir);
+            }
+            let lnk = dir.join(format!("{name}.lnk"));
+            match winutil::create_shortcut(&lnk, &target, &e.args, &workdir, icon.as_deref(), &desc) {
+                Ok(()) => {
+                    manifest.shortcuts.push(lnk.display().to_string());
+                    push_log(st, format!("快捷方式: {}", lnk.display()));
+                }
+                Err(err) => {
+                    push_log(st, format!("警告: 快捷方式创建失败（{}）: {err:#}", lnk.display()));
+                }
+            }
         }
     }
 

@@ -20,9 +20,9 @@
 | 9 | 安装期被占用文件重启替换 + "需要重启"完成页 | NSIS `SetRebootFlag` / Inno `restartreplace` | **已完成**（v0.5.0） |
 | 10 | InstallTypes 安装类型（Typical/Full/Minimal/Custom） | NSIS `InstallTypes` / Inno `[Types]` | **已完成**（v0.6.0） |
 | 11 | 组件页描述侧栏（组件联动描述面板） | NSIS `components.c` 描述框 | **已完成**（v0.6.0） |
-| 12 | 最小系统版本门槛 | Inno `MinVersion`/`OnlyBelowVersion` | 待办 |
-| 13 | 快捷方式增强：快速启动栏、独立 lnk 任务 | Inno `[Icons]` | 待办 |
-| 14 | 卸载完成页统计（文件数/回收空间） | NSIS 卸载统计 | 待办 |
+| 12 | 最小系统版本门槛 | Inno `MinVersion`/`OnlyBelowVersion` | **已完成**（v0.7.0） |
+| 13 | 快捷方式增强：快速启动栏、独立 lnk 任务 | Inno `[Icons]` | **已完成**（v0.7.0） |
+| 14 | 卸载完成页统计（文件数/回收空间） | NSIS 卸载统计 | **已完成**（v0.7.0） |
 | 15 | 多语言框架（MUI 式语言选择 + 文案包） | NSIS MUI2 | 待办 |
 | 16 | zstd 压缩档 | Inno `Compression.Zstd.pas`（等纯 Rust 编码器成熟） | 待办 |
 | 17 | ARP ModifyPath/修复入口评估 | NSIS/Inno 卸载注册表扩展 | 评估中 |
@@ -108,6 +108,24 @@
 6. **版本号**：功能对齐批次完成后递增 `Cargo.toml` workspace version。
 
 ## 变更日志
+
+- v0.7.0（步骤 12–14）：**最小系统版本门槛 + 快捷方式增强 + 卸载完成页统计**
+  （Inno `MinVersion` / `[Icons]`、NSIS 卸载统计对齐）：
+  ① `install.min_version`（如 "6.1"/"10.0.19045"）安装器启动时用 ntdll
+  `RtlGetVersion` 取真实版本比对（手工 extern 声明，避开 GetVersionEx 兼容性
+  垫片谎报与 windows-rs 0.58 未导出问题），低于门槛 GUI 弹错退出、静默写日志
+  返回 1；解析/比较纯函数下沉 `miedit_core::sysreq`（3 项单测），编译器拒绝
+  无效门槛。
+  ② `[[shortcuts.entries]]`（Inno [Icons]）：自定义名称/目标/参数/子目录/图标/
+  工作目录/描述，位置多选（start_menu / desktop / quick_launch，新增
+  `winutil::quick_launch_dir`），与 start_menu/desktop 简单开关叠加兼容；
+  目录去重记录进卸载清单，卸载时快捷方式目录按深度先删（支持嵌套子目录）；
+  单条目失败仅告警不阻断安装；编译器校验 name/locations。
+  ③ 卸载完成页统计（NSIS 卸载统计）：RunState 新增已删除文件数/目录数/
+  释放字节数（删除前取 metadata；用户数据目录删除前递归统计
+  `util::dir_file_stats`，含真实临时目录单测），完成页与静默日志展示；
+  卸载器还修复了原快捷方式目录删除顺序问题（父目录先删导致失败报错）。
+  旧包/旧脚本无新字段时行为不变（serde default）。
 
 - v0.6.0（步骤 10–11）：**InstallTypes 安装类型 + 组件页描述侧栏**（NSIS
   `InstallTypes` / `components.c` 描述框对齐）：`[[install_types]]`

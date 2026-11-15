@@ -11,6 +11,7 @@ pub mod files;
 pub mod installtypes;
 pub mod manifest;
 pub mod overwrite;
+pub mod sysreq;
 pub mod trailer;
 pub mod util;
 pub mod versioninfo;

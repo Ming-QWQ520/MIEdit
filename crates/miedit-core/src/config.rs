@@ -112,6 +112,9 @@ pub struct InstallConfig {
     pub write_log: bool,
     /// 卸载程序图标（.ico，可选；缺省使用 app.icon）
     pub uninstall_icon: Option<String>,
+    /// 最小系统版本门槛（如 "6.1" = Windows 7，"10.0" = Windows 10）；
+    /// 空 = 不检查。低于门槛时安装器启动即报错退出（Inno MinVersion 对齐）
+    pub min_version: String,
 }
 
 impl Default for InstallConfig {
@@ -125,6 +128,7 @@ impl Default for InstallConfig {
             overwrite: "on".into(),
             write_log: true,
             uninstall_icon: None,
+            min_version: String::new(),
         }
     }
 }
@@ -259,6 +263,9 @@ pub struct ShortcutsConfig {
     pub name: Option<String>,
     /// 主程序启动参数
     pub run_args: String,
+    /// 快捷方式条目（Inno [Icons] 风格，路线图步骤 13）；
+    /// 与上方简单开关叠加生效，旧脚本无此字段保持兼容
+    pub entries: Vec<ShortcutEntry>,
 }
 
 impl Default for ShortcutsConfig {
@@ -268,6 +275,45 @@ impl Default for ShortcutsConfig {
             desktop: false,
             name: None,
             run_args: String::new(),
+            entries: Vec::new(),
+        }
+    }
+}
+
+/// 单条快捷方式（Inno `[Icons]` 条目风格）。
+/// `locations` 取值：`start_menu` / `desktop` / `quick_launch`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ShortcutEntry {
+    /// 快捷方式名称（不含 .lnk 后缀）
+    pub name: String,
+    /// 目标：包内相对路径；空 = 主程序 `app.exe`
+    pub exe: String,
+    /// 启动参数
+    pub args: String,
+    /// 开始菜单子目录（空 = 应用名分组目录，随卸载一并清除）
+    pub subfolder: String,
+    /// 图标：包内相对路径（安装后的文件）；空 = 目标自身图标
+    pub icon: String,
+    /// 工作目录；空 = 目标所在目录；支持 {install_dir} 模板
+    pub working_dir: String,
+    /// 快捷方式描述（鼠标悬停提示）
+    pub comment: String,
+    /// 创建位置列表（start_menu / desktop / quick_launch）
+    pub locations: Vec<String>,
+}
+
+impl Default for ShortcutEntry {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            exe: String::new(),
+            args: String::new(),
+            subfolder: String::new(),
+            icon: String::new(),
+            working_dir: String::new(),
+            comment: String::new(),
+            locations: vec!["start_menu".into()],
         }
     }
 }

@@ -85,6 +85,20 @@ pub fn resolve_path_template(tpl: &str, app_name: &str) -> PathBuf {
     PathBuf::from(tpl.replace("{app_name}", app_name))
 }
 
+/// 递归统计目录下的文件数与总字节数（卸载完成页统计用，路线图步骤 14）。
+/// 尽力而为：无权限/消失的子项跳过；`path` 不存在返回 `(0, 0)`。
+pub fn dir_file_stats(path: &std::path::Path) -> (usize, u64) {
+    let (mut files, mut bytes) = (0usize, 0u64);
+    let walk = walkdir::WalkDir::new(path).follow_links(false).into_iter();
+    for entry in walk.flatten() {
+        if entry.file_type().is_file() {
+            files += 1;
+            bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
+        }
+    }
+    (files, bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +123,21 @@ mod tests {
         assert_eq!(human_size(500), "500 B");
         assert_eq!(human_size(2048), "2.0 KB");
         assert_eq!(human_size(3 * 1024 * 1024), "3.0 MB");
+    }
+
+    #[test]
+    fn test_dir_file_stats() {
+        let base = std::env::temp_dir().join(format!("miedit-stats-test-{}", std::process::id()));
+        let sub = base.join("nested");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(base.join("a.txt"), [0u8; 100]).unwrap();
+        std::fs::write(sub.join("b.bin"), [0u8; 50]).unwrap();
+        let (files, bytes) = dir_file_stats(&base);
+        assert_eq!(files, 2,"应统计到两个文件");
+        assert_eq!(bytes, 150);
+        // 不存在的目录返回 (0, 0)
+        let (f2, b2) = dir_file_stats(&base.join("missing"));
+        assert_eq!((f2, b2), (0, 0));
+        std::fs::remove_dir_all(&base).ok();
     }
 }

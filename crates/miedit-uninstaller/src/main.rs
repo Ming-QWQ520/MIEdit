@@ -39,6 +39,10 @@ struct RunState {
     errors: Vec<String>,
     /// 已计划重启后删除的文件数（NSIS Delete /REBOOTOK）
     reboot_scheduled: usize,
+    /// 卸载统计（NSIS 卸载完成统计对齐，路线图步骤 14）：已删除文件数/目录数/释放字节数
+    files_removed: usize,
+    dirs_removed: usize,
+    bytes_freed: u64,
 }
 
 struct UninstallerApp {
@@ -183,6 +187,8 @@ fn do_uninstall(
     // 1. 文件（NSIS Delete /REBOOTOK 对齐：占用中的文件转入重启删除，不算失败）
     for f in &m.files {
         let p = PathBuf::from(f);
+        // 统计释放空间（尽力而为；删除失败则不计入）
+        let sz = std::fs::metadata(&p).map(|md| md.len()).unwrap_or(0);
         if let Err(e) = winutil::remove_file_quiet(&p) {
             match winutil::schedule_delete_on_reboot(&p) {
                 Ok(()) => {
@@ -200,6 +206,11 @@ fn do_uninstall(
                 Err(re) => errors.push(format!("删除失败: {e:#}；且无法计划重启删除: {re:#}")),
             }
         } else {
+            {
+                let mut r = run.lock().unwrap();
+                r.files_removed += 1;
+                r.bytes_freed += sz;
+            }
             tick(run, format!("删除 {}", p.display()), ctx);
         }
     }
@@ -209,22 +220,41 @@ fn do_uninstall(
     dirs.sort_by_key(|d| std::cmp::Reverse(d.split('/').count()));
     for d in dirs {
         let p = m.install_dir.trim_end_matches(['\\', '/']).to_string() + "\\" + d;
-        if let Err(e) = winutil::remove_dir_quiet(Path::new(&p)) {
-            errors.push(format!("{e:#}"));
+        let removed = match winutil::remove_dir_quiet(Path::new(&p)) {
+            Ok(()) => true,
+            Err(e) => {
+                errors.push(format!("{e:#}"));
+                false
+            }
+        };
+        if removed {
+            let mut r = run.lock().unwrap();
+            r.dirs_removed += 1;
         }
         tick(run, format!("移除目录 {d}"), ctx);
     }
 
-    // 3. 快捷方式与快捷方式目录
+    // 3. 快捷方式与快捷方式目录（最深先删，子目录嵌套时避免父目录先删失败）
     for s in &m.shortcuts {
-        if let Err(e) = winutil::remove_file_quiet(Path::new(s)) {
-            errors.push(format!("{e:#}"));
+        let p = Path::new(s);
+        let sz = std::fs::metadata(p).map(|md| md.len()).unwrap_or(0);
+        if winutil::remove_file_quiet(p).is_ok() {
+            let mut r = run.lock().unwrap();
+            r.files_removed += 1;
+            r.bytes_freed += sz;
+        } else {
+            errors.push(format!("删除快捷方式失败: {s}"));
         }
         tick(run, format!("移除快捷方式 {s}"), ctx);
     }
-    for sd in &m.shortcut_dirs {
-        if let Err(e) = winutil::remove_dir_quiet(Path::new(sd)) {
-            errors.push(format!("{e:#}"));
+    let mut sdirs: Vec<&String> = m.shortcut_dirs.iter().collect();
+    sdirs.sort_by_key(|d| std::cmp::Reverse(d.split(['\\', '/']).count()));
+    for sd in sdirs {
+        if winutil::remove_dir_quiet(Path::new(sd)).is_ok() {
+            let mut r = run.lock().unwrap();
+            r.dirs_removed += 1;
+        } else {
+            errors.push(format!("删除快捷方式目录失败: {sd}"));
         }
         tick(run, format!("移除目录 {sd}"), ctx);
     }
@@ -235,8 +265,15 @@ fn do_uninstall(
         ud.sort_by_key(|d| std::cmp::Reverse(d.split(['\\', '/']).count()));
         for d in ud {
             let p = PathBuf::from(d);
+            // 删除前递归统计（文件数/字节数，NSIS 卸载统计对齐）
+            let (uf, ub) = miedit_core::util::dir_file_stats(&p);
             if let Err(e) = winutil::remove_dir_all_quiet(&p) {
                 errors.push(format!("{e:#}"));
+            } else {
+                let mut r = run.lock().unwrap();
+                r.files_removed += uf;
+                r.bytes_freed += ub;
+                r.dirs_removed += 1;
             }
             tick(run, format!("删除用户数据 {}", p.display()), ctx);
         }
@@ -258,6 +295,12 @@ fn do_uninstall(
 
     let mut r = run.lock().unwrap();
     r.finished = true;
+    // 卸载统计（NSIS 卸载完成统计对齐，路线图步骤 14）
+    let (fr, dr, bf) = (r.files_removed, r.dirs_removed, r.bytes_freed);
+    r.log.push(format!(
+        "已删除 {fr} 个文件、{dr} 个目录，释放 {}",
+        miedit_core::util::human_size(bf)
+    ));
     if errors.is_empty() {
         r.log.push("卸载完成".into());
     } else {
@@ -587,6 +630,21 @@ impl UninstallerApp {
                 egui::RichText::new("关闭窗口后，卸载程序将自动清理自身文件。")
                     .color(TEXT_DIM)
                     .size(14.0),
+            );
+            // 卸载统计（NSIS 卸载完成统计对齐，路线图步骤 14）
+            let (fr, dr, bf) = {
+                let r = self.run.lock().unwrap();
+                (r.files_removed, r.dirs_removed, r.bytes_freed)
+            };
+            ui.label(
+                egui::RichText::new(format!(
+                    "已删除 {} 个文件、{} 个目录，释放 {}",
+                    fr,
+                    dr,
+                    miedit_core::util::human_size(bf)
+                ))
+                .color(TEXT_DIM)
+                .size(13.5),
             );
             // NSIS /REBOOTOK 对齐：占用文件已计划重启删除
             let reboot = self.run.lock().unwrap().reboot_scheduled;

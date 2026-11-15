@@ -91,6 +91,19 @@ start_menu = true
 desktop = true
 run_args = ""
 
+# 快捷方式条目（Inno [Icons] 风格，路线图步骤 13）：与上方简单开关叠加生效
+[[shortcuts.entries]]
+name = "使用指南"
+exe = "docs/guide.md"         # 包内相对路径，空 = 主程序
+comment = "查看 MIEdit Demo 使用指南"
+locations = ["desktop"]       # start_menu / desktop / quick_launch
+
+[[shortcuts.entries]]
+name = "数据工具"
+exe = ""
+subfolder = "工具"            # 开始菜单子目录（空 = 应用名分组目录）
+locations = ["start_menu"]
+
 [[files]]
 source = "demo-payload/*"
 dest = ""

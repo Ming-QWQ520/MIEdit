@@ -51,6 +51,29 @@ fn real_main(silent: bool, ncrc: bool, dir_arg: Option<String>, args: &[String])
         return Err(anyhow!("安装包配置缺少应用名称"));
     }
 
+    // 最小系统版本门槛（Inno MinVersion / NSIS 对齐，路线图步骤 12）：
+    // 用 RtlGetVersion 取真实版本，低于门槛直接退出（GUI 弹错误框，静默写日志返回 1）
+    let minv = cfg.install.min_version.trim();
+    if !minv.is_empty() {
+        match miedit_core::sysreq::version_at_least(miedit_core::winutil::windows_version(), minv) {
+            Ok(true) => {}
+            Ok(false) => {
+                let msg = format!(
+                    "此程序需要 Windows {} 或更高版本，当前系统版本无法安装。",
+                    minv
+                );
+                if silent {
+                    eprintln!("{msg}");
+                    write_silent_log(&msg);
+                    return Ok(1);
+                }
+                return Err(anyhow!("{msg}"));
+            }
+            // 门槛格式无效：编译期已校验，运行期宽容忽略（不阻断安装）
+            Err(_) => {}
+        }
+    }
+
     // 每机器安装需要管理员权限：通过 UAC 重启自身
     if cfg.app.per_machine && !miedit_core::winutil::is_admin() {
         if miedit_core::winutil::relaunch_elevated(args)? {

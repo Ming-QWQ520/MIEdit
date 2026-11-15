@@ -218,6 +218,45 @@ pub fn build_package(
         bail!("最多只能有一个安装类型标记 default = true");
     }
 
+    // 5.2 校验最小系统版本门槛（Inno MinVersion 对齐，路线图步骤 12）
+    if !cfg.install.min_version.trim().is_empty()
+        && miedit_core::sysreq::parse_version3(cfg.install.min_version.trim()).is_none()
+    {
+        bail!(
+            "install.min_version = \"{}\" 不是有效版本门槛（示例: 6.1 / 10.0 / 10.0.19045）",
+            cfg.install.min_version
+        );
+    }
+
+    // 5.3 校验快捷方式条目（Inno [Icons] 对齐，路线图步骤 13）
+    const SHORTCUT_LOCATIONS: [&str; 3] = ["start_menu", "desktop", "quick_launch"];
+    for (i, e) in cfg.shortcuts.entries.iter().enumerate() {
+        if e.name.trim().is_empty() {
+            bail!("[[shortcuts.entries]] #{} 缺少 name", i + 1);
+        }
+        if e.name.contains('/') || e.name.contains('\\') {
+            bail!(
+                "[[shortcuts.entries]] \"{}\" 的 name 不能包含路径分隔符（子目录请用 subfolder）",
+                e.name
+            );
+        }
+        if e.locations.is_empty() {
+            bail!(
+                "[[shortcuts.entries]] \"{}\" 缺少 locations（可选: start_menu / desktop / quick_launch）",
+                e.name
+            );
+        }
+        for loc in &e.locations {
+            let l = loc.trim().to_ascii_lowercase();
+            if !SHORTCUT_LOCATIONS.contains(&l.as_str()) {
+                bail!(
+                    "[[shortcuts.entries]] \"{}\" 的位置 \"{loc}\" 无效（可选: start_menu / desktop / quick_launch）",
+                    e.name
+                );
+            }
+        }
+    }
+
     // 6. 收集文件（记录每条规则展开出的文件引用，供组件过滤与进度计算）
     let mut collected: Vec<files::CollectedFile> = Vec::new();
     let mut seen = BTreeMap::new();

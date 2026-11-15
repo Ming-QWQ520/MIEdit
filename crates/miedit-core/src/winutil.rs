@@ -256,6 +256,68 @@ pub fn desktop_dir(per_machine: bool) -> PathBuf {
     }
 }
 
+/// 快速启动栏目录（Inno `{userquicklaunch}` 对齐）。
+/// 系统无公共快速启动栏，per_machine 安装时写入当前用户目录（Inno 同样约束）。
+pub fn quick_launch_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        let base = std::env::var("APPDATA")
+            .unwrap_or_else(|_| "C:\\Users\\Public\\AppData\\Roaming".to_string());
+        PathBuf::from(base).join("Microsoft\\Internet Explorer\\Quick Launch")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("quick-launch")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 系统版本（RtlGetVersion，路线图步骤 12 最小系统版本门槛）
+// ---------------------------------------------------------------------------
+
+/// 当前 Windows 版本 `[major, minor, build]`。
+///
+/// 手工声明 ntdll `RtlGetVersion`（windows-rs 0.58 未导出该函数）：
+/// `GetVersionEx` 在无清单声明的进程里会被兼容性垫片谎报为 6.2（Windows 8），
+/// 无法做真实的版本门槛判断，必须走 RtlGetVersion。
+/// 非 Windows 目标返回 `[10, 0, 0]`（沙箱/CI 下不触发门槛拒绝路径）。
+#[cfg(windows)]
+pub fn windows_version() -> [u32; 3] {
+    /// OSVERSIONINFOW 的最小手写镜像（RtlGetVersion 只依赖前 5 个字段）
+    #[repr(C)]
+    struct OsVersionInfoW {
+        dw_os_version_info_size: u32,
+        dw_major_version: u32,
+        dw_minor_version: u32,
+        dw_build_number: u32,
+        dw_platform_id: u32,
+        sz_csd_version: [u16; 128],
+    }
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn RtlGetVersion(info: *mut OsVersionInfoW) -> i32;
+    }
+    let mut vi = OsVersionInfoW {
+        dw_os_version_info_size: std::mem::size_of::<OsVersionInfoW>() as u32,
+        dw_major_version: 0,
+        dw_minor_version: 0,
+        dw_build_number: 0,
+        dw_platform_id: 0,
+        sz_csd_version: [0; 128],
+    };
+    // STATUS_SUCCESS = 0
+    if unsafe { RtlGetVersion(&mut vi) } == 0 {
+        [vi.dw_major_version, vi.dw_minor_version, vi.dw_build_number]
+    } else {
+        [0, 0, 0]
+    }
+}
+
+#[cfg(not(windows))]
+pub fn windows_version() -> [u32; 3] {
+    [10, 0, 0]
+}
+
 // ---------------------------------------------------------------------------
 // 注册表（winreg）
 // ---------------------------------------------------------------------------

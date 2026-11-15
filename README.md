@@ -44,6 +44,9 @@
 | 权限 | `per_machine = true` 启动时自动 UAC 提权重启 |
 | 静默模式 | 安装器/卸载器均支持 `--silent`（NSIS `/S` 风格）与 `--dir=`，可自动化测试 |
 | **覆盖策略** | NSIS `SetOverwrite` 对齐：`on / off / try / ifnewer`；安装后保留源文件时间戳，`ifnewer` 仅在源更新时覆盖 |
+| **快捷方式增强** | Inno `[Icons]` 对齐：`[[shortcuts.entries]]` 自定义名称/子目录/参数/图标/工作目录/描述，位置多选（开始菜单/桌面/快速启动栏），与简单开关叠加兼容 |
+| **最小系统版本门槛** | Inno `MinVersion` 对齐：`install.min_version`，RtlGetVersion 取真实版本（不受兼容性垫片影响），低于门槛启动即拒 |
+| **卸载统计** | NSIS 卸载完成统计对齐：完成页展示已删除文件数/目录数/释放空间（含用户数据目录递归统计） |
 | **覆盖失败重试交互** | NSIS 文件错误对话框对齐：安装中文件被占用写不进时弹出「重试 / 忽略 / 中止」模态卡片——重试循环、忽略记录日志并继续、中止说明已写入文件去向；静默模式自动忽略并计划重启替换 |
 | **安装期重启替换** | NSIS `SetRebootFlag` / Inno `restartreplace` 对齐：被占用文件先改名腾位立即写入新内容，旧文件调度重启删除（`PendingFileRenameOperations`）；完成页琥珀提示“需要重启以完成安装”并列出文件 |
 | **重启删除** | NSIS `Delete /REBOOTOK` 对齐：卸载时被占用的文件 `MoveFileEx` 计划重启删除，完成页/静默日志提示 |
@@ -109,6 +112,7 @@ overwrite = "on"                           # NSIS SetOverwrite：on（默认）|
 write_log = true                           # 安装日志写入 $INSTDIR\\install.log（NSIS LogSet 风格）
 user_data_dirs = ["{appdata}\\{app_name}"] # 卸载时可勾选删除
 uninstall_icon = "uninstall.ico"           # 可选；缺省使用内置 modern-uninstall.ico
+min_version = "6.1"                        # 可选；最低系统版本门槛（如 6.1 = Win7，10.0 = Win10）
 
 [[install.run_tasks]]         # Inno [Run] 风格：完成页复选框
 name = "运行 {app}"
@@ -127,6 +131,15 @@ show_components_page = true
 [shortcuts]
 start_menu = true             # 自动含“卸载”快捷方式
 desktop = true
+
+[[shortcuts.entries]]         # Inno [Icons] 风格快捷方式条目（可选，与上方开关叠加）
+name = "使用指南"             # 快捷方式名称
+exe = "docs/guide.md"        # 目标（包内相对路径，空 = 主程序）
+subfolder = "工具"            # 开始菜单子目录（空 = 应用名分组目录）
+icon = "docs/icon.ico"       # 图标（包内相对路径，空 = 目标自身）
+working_dir = ""              # 工作目录（空 = 目标所在目录，支持 {install_dir}）
+comment = "查看使用指南"      # 悬停提示
+locations = ["desktop"]       # 位置多选：start_menu / desktop / quick_launch
 
 [[files]]                     # 文件 / 目录 / 通配符（支持 ** 递归）
 source = "payload/*"
@@ -174,7 +187,7 @@ crates/
 ## 测试
 
 ```bash
-cargo test --workspace    # 46 个单元测试：归档/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/文件错误决策与提示信箱/重启替换/安装类型状态机/组件过滤映射/slug
+cargo test --workspace    # 50 个单元测试：归档/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/文件错误决策与提示信箱/重启替换/安装类型状态机/系统版本门槛/目录统计/组件过滤映射/slug
 ```
 
 已在 Windows 10 x64 实机验证：CLI 与 GUI 构建链路、静默安装/卸载全清理、组件过滤生效、

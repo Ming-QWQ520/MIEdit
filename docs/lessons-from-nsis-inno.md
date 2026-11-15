@@ -169,3 +169,30 @@
    CI 跑 `windows-latest` + `workflow_dispatch` 手动触发即可，不需要 PR/推送
    自动构建；zip 用 `Compress-Archive` 打平（`$stage\*` 而非 `$stage`），
    保证解包一层直接见到 exe，不做 Release 发布（版本化发布留给后续里程碑）。
+
+## 十、落地清单 · 第七批（NSIS 对齐 #6，v0.7.0）
+
+1. **真实 Windows 版本必须走 RtlGetVersion**（Inno MinVersion / `OnlyBelowVersion`
+   的前置）：`GetVersionEx` 在没有 manifest 声明的进程里被兼容性垫片谎报为
+   6.2（Win8），无清单的 stub EXE 正中此坑。windows-rs 0.58 未导出
+   `RtlGetVersion`（SystemInformation 只有类型没有函数），改为手工
+   `#[link(name = "ntdll")] extern "system"` + 最小 `OSVERSIONINFOW` 镜像
+   （5 个 u32 + 128 个 u16），跨 windows-rs 版本零风险，也免去多开一个 feature。
+   门槛解析/比较（`sysreq`）是纯函数下沉 core 并单测，编译期拒绝无效写法，
+   运行期对旧包宽容忽略。
+2. **快捷方式条目与清单的目录去重**（Inno `[Icons]`）：`[[shortcuts.entries]]`
+   与旧 `start_menu/desktop` 开关叠加生效——同一开始菜单分组目录可能被两路
+   代码各记一次，卸载时第二次删除必然报错。用 BTreeSet 去重后才写进
+   `shortcut_dirs`；卸载器同时改为**深度优先**删快捷方式目录（原实现按记录
+   顺序删，嵌套子目录时父目录先删必然失败）。quick_launch 没有公共目录变体
+   （Inno `{userquicklaunch}` 同样只有用户级），per_machine 安装写入当前用户
+   目录，系统级目录一律不记入清单（只删 lnk 不删容器）。
+3. **卸载统计的实现取舍**（NSIS 卸载统计）：字节数在删除**前**取
+   `metadata().len()`（删除后就取不到了）；删除失败/重启删除的文件不计入
+   "已释放"，避免虚报。用户数据目录用 `dir_file_stats` 递归统计（walkdir，
+   真实临时目录单测）。GUI 完成页与静默日志共用同一组 RunState 计数，
+   两条路径数字一致。
+4. **windows-msvc 交叉检查进入常规流程**：本轮 `RtlGetVersion`、FILETIME 类
+   cfg(windows) 错误在 Linux 沙箱完全不可见，`cargo check --workspace
+   --target x86_64-pc-windows-msvc`（不链接、无需 MinGW）已两次在提交前拦下
+   真实错误，列为每次迭代的固定验证步骤。
