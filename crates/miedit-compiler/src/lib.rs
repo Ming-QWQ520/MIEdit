@@ -198,6 +198,26 @@ pub fn build_package(
         }
     }
 
+    // 5.1 校验安装类型引用（NSIS InstallTypes 对齐，路线图步骤 10）
+    for (i, t) in cfg.install_types.iter().enumerate() {
+        if t.name.trim().is_empty() {
+            bail!("安装类型 #{} 缺少 name", i + 1);
+        }
+        for &ci in &t.components {
+            if ci >= cfg.components.len() {
+                bail!(
+                    "安装类型 \"{}\" 引用了不存在的组件索引 {}（共有 {} 个组件）",
+                    t.name,
+                    ci,
+                    cfg.components.len()
+                );
+            }
+        }
+    }
+    if cfg.install_types.iter().filter(|t| t.default).count() > 1 {
+        bail!("最多只能有一个安装类型标记 default = true");
+    }
+
     // 6. 收集文件（记录每条规则展开出的文件引用，供组件过滤与进度计算）
     let mut collected: Vec<files::CollectedFile> = Vec::new();
     let mut seen = BTreeMap::new();

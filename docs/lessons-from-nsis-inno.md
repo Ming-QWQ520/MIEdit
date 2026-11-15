@@ -144,3 +144,28 @@
    画半透明黑并吞掉模态外点击；模态卡片置于 `Order::Foreground`。
 
 > 对齐路线图见 [nsis-alignment-roadmap.md](nsis-alignment-roadmap.md)，按步骤持续迭代。
+
+## 九、落地清单 · 第六批（NSIS 对齐 #5，v0.6.0）
+
+1. **InstallTypes 状态机**（NSIS `InstallTypes` / `SectionSetFlags`）：
+   MIEdit 用「类型 → 勾选快照」+「勾选 → 类型反查」两个纯函数构成互逆状态机
+   （`miedit_core::installtypes`，单测验证往返自洽）。NSIS 的 Custom 是下拉里
+   最后一个固定项；MIEdit 同样把 Custom 作为 `types.len()` 伪索引渲染在单选行
+   末尾，手动改动任意组件 → `matching_type` 不再命中 → 自动落回 Custom。
+   必装组件的勾选在两个方向上都被强制归一化（NSIS 必选 Section 语义），
+   因此「Full + 取消必装」不会污染类型匹配。类型定义里越界的组件索引宽容忽略
+   （旧脚本/手写脚本容错），编译器则直接报错（两层防线）。
+2. **`default = true` 的语义**：NSIS 默认选第一个 InstType；
+   MIEdit 允许显式标记默认类型（编译器拒绝多个 default），未标记时同样回退
+   第一个。启动时组件页直接按默认类型初始化勾选，而不是全选——与 NSIS
+   进入组件页时的状态一致；旧包（无 `[[install_types]]`）保持全选兼容。
+3. **组件描述框**（NSIS `components.c` 描述框 / Inno TypesDescription）：
+   NSIS 的描述跟随鼠标悬停（WM_MOUSEMOVE 轮询 section 矩形），Inno 则是
+   点击选中更新。MIEdit 两者都做：悬停或点击组件行 → 下方描述面板跟随。
+   必装组件的复选框处于禁用态，egui 禁用控件的 Response 不含 hovered，
+   因此用整行 `ui.interact(rect, id, Sense::hover())` 作为悬停面兜底。
+   原逐条内嵌描述文本移除，避免与描述面板重复；空描述显示占位文案。
+4. **CI 形态取舍**：产物面向 Windows（PE 资源替换 / UAC / lnk），
+   CI 跑 `windows-latest` + `workflow_dispatch` 手动触发即可，不需要 PR/推送
+   自动构建；zip 用 `Compress-Archive` 打平（`$stage\*` 而非 `$stage`），
+   保证解包一层直接见到 exe，不做 Release 发布（版本化发布留给后续里程碑）。

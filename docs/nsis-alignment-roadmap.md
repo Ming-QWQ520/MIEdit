@@ -18,8 +18,8 @@
 | 7 | 包完整性 CRC32 校验 + `--ncrc` 开关 | NSIS `CRCCheck`（fileform.h firstheader CRC） | **已完成**（v0.4.0） |
 | 8 | 覆盖失败重试交互（安装期文件被占用） | NSIS Retry/Ignore/Abort 文件对话框 | **已完成**（v0.5.0） |
 | 9 | 安装期被占用文件重启替换 + "需要重启"完成页 | NSIS `SetRebootFlag` / Inno `restartreplace` | **已完成**（v0.5.0） |
-| 10 | InstallTypes 安装类型（Typical/Full/Minimal/Custom） | NSIS `InstallTypes` / Inno `[Types]` | 待办 |
-| 11 | 组件页描述侧栏（组件联动描述面板） | NSIS `components.c` 描述框 | 待办 |
+| 10 | InstallTypes 安装类型（Typical/Full/Minimal/Custom） | NSIS `InstallTypes` / Inno `[Types]` | **已完成**（v0.6.0） |
+| 11 | 组件页描述侧栏（组件联动描述面板） | NSIS `components.c` 描述框 | **已完成**（v0.6.0） |
 | 12 | 最小系统版本门槛 | Inno `MinVersion`/`OnlyBelowVersion` | 待办 |
 | 13 | 快捷方式增强：快速启动栏、独立 lnk 任务 | Inno `[Icons]` | 待办 |
 | 14 | 卸载完成页统计（文件数/回收空间） | NSIS 卸载统计 | 待办 |
@@ -108,6 +108,21 @@
 6. **版本号**：功能对齐批次完成后递增 `Cargo.toml` workspace version。
 
 ## 变更日志
+
+- v0.6.0（步骤 10–11）：**InstallTypes 安装类型 + 组件页描述侧栏**（NSIS
+  `InstallTypes` / `components.c` 描述框对齐）：`[[install_types]]`
+  （name + 默认勾选的组件索引 + default 标记）在组件页顶部渲染类型单选行，
+  末尾自动附带 **Custom**；选中类型 → 组件勾选重置为该类型定义（必装强制勾选、
+  越界索引宽容忽略），手动改动任意组件不再命中任何类型时自动跳到 Custom
+  （NSIS 语义）；「重置」按钮在有类型时回到默认类型；启动时按默认类型初始化
+  勾选（旧包无类型时保持全选兼容）。类型状态机下沉
+  `miedit_core::installtypes` 纯函数（`selection_for_type` / `matching_type` /
+  `default_type_index`，含往返互逆不变量等 7 项单测），编译器校验类型引用
+  （索引越界 / 空 name / 多个 default 即报错），构建器 GUI 新增安装类型编辑区。
+  组件描述改为 NSIS 式描述框：悬停/点击组件行 → 下方描述面板跟随显示
+  `description`（必装组件带「必需」徽标，空描述显示占位文案），替代原逐条内嵌描述。
+  另新增 `.github/workflows/release.yml`：手动触发（`workflow_dispatch`）
+  编译 workspace 并上传单层 zip（产物直接位于 zip 根目录）。
 
 - v0.5.0（步骤 8–9）：**覆盖失败重试交互 + 安装期重启替换**（NSIS 文件错误对话框 /
   `SetRebootFlag` 对齐）：安装写文件失败时按覆盖策略分流——`overwrite = try`

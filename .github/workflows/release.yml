@@ -1,0 +1,55 @@
+name: Release Build
+
+# 手动触发：GitHub 仓库页面 → Actions → Release Build → Run workflow
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Build (Windows, release)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-release-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            windows-release-
+
+      - name: Core unit tests
+        run: cargo test -p miedit-core
+
+      - name: Build workspace (release)
+        run: cargo build --release --workspace
+
+      - name: Collect binaries & pack zip (产物直接位于 zip 根目录，单层)
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP "dist"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Get-ChildItem "target/release" -Filter *.exe -File | ForEach-Object {
+            Copy-Item $_.FullName -Destination $stage
+            Write-Host "artifact: $($_.Name) ($([math]::Round($_.Length/1KB)) KB)"
+          }
+          Compress-Archive -Path (Join-Path $stage "*") -DestinationPath "MIEdit-binaries.zip" -Force
+          Get-ChildItem "MIEdit-binaries.zip"
+
+      - name: Upload artifact (MIEdit-binaries.zip)
+        uses: actions/upload-artifact@v4
+        with:
+          name: MIEdit-binaries
+          path: MIEdit-binaries.zip
+          if-no-files-found: error

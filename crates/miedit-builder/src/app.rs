@@ -857,6 +857,62 @@ impl BuilderApp {
                 }
             });
 
+            // 左下：安装类型（NSIS InstallTypes，路线图步骤 10）
+            col.add_space(10.0);
+            field_label(col, "安装类型（NSIS InstallTypes，组件页顶部单选）：");
+            let mut type_remove: Option<usize> = None;
+            let mut type_set_default: Option<usize> = None;
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, true])
+                .max_height(130.0)
+                .show(col, |ui| {
+                    for (i, t) in self.cfg.install_types.iter_mut().enumerate() {
+                        egui::Frame::none()
+                            .fill(CARD)
+                            .rounding(8.0)
+                            .stroke(egui::Stroke::new(1.0, CARD_STROKE))
+                            .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    text_input(ui, &mut t.name, "Typical", inner_w - 170.0);
+                                    if ui
+                                        .checkbox(
+                                            &mut t.default,
+                                            egui::RichText::new("默认").color(TEXT_DIM).size(12.0),
+                                        )
+                                        .changed()
+                                        && t.default
+                                    {
+                                        type_set_default = Some(i);
+                                    }
+                                    if ui.small_button(egui::RichText::new("×").color(RED)).clicked() {
+                                        type_remove = Some(i);
+                                    }
+                                });
+                                let mut comps_text = rule_indices_to_string(&t.components);
+                                ui.horizontal(|ui| {
+                                    text_input(ui, &mut comps_text, "0,2", 90.0);
+                                    t.components = parse_rule_indices(&comps_text);
+                                    ui.label(egui::RichText::new("← 默认勾选的组件编号").color(Color32::from_rgb(110, 116, 130)).size(11.0));
+                                });
+                            });
+                    }
+                    if let Some(i) = type_remove {
+                        self.cfg.install_types.remove(i);
+                    }
+                });
+            if let Some(k) = type_set_default {
+                // default 互斥：标记一个后其余自动取消
+                for (j, t) in self.cfg.install_types.iter_mut().enumerate() {
+                    t.default = j == k;
+                }
+            }
+            col.horizontal(|ui| {
+                if ui.add(small_button("＋ 添加安装类型")).clicked() {
+                    self.cfg.install_types.push(miedit_core::config::InstallTypeSpec::default());
+                }
+            });
+
             // 右：文件规则
             let rcol = &mut cols[1];
             field_label(rcol, "应用程序文件（source → 包内目录）：");

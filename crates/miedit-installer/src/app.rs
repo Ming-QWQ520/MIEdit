@@ -33,6 +33,10 @@ pub struct InstallerApp {
     license_accepted: bool,
     license_scrolled: bool,
     component_checked: Vec<bool>,
+    /// 当前选中的安装类型索引（NSIS InstallTypes）；`types.len()` = Custom
+    install_type: usize,
+    /// 组件页描述面板跟随的组件索引（悬停/点击更新，NSIS 描述框语义）
+    desc_index: Option<usize>,
     run_checked: Vec<bool>,
     err_msg: String,
     theme: theme::Theme,
@@ -96,7 +100,18 @@ pub fn run_gui(pkg: Arc<Package>, default_dest: PathBuf) -> anyhow::Result<()> {
                     egui::TextureOptions::LINEAR,
                 )
             });
-            let component_checked = pkg.config.components.iter().map(|_| true).collect();
+            let types = &pkg.config.install_types;
+            let install_type = miedit_core::installtypes::default_type_index(types)
+                .unwrap_or(0); // 无类型时占位，组件页不渲染类型行
+            let component_checked = match miedit_core::installtypes::default_type_index(types) {
+                Some(i) => miedit_core::installtypes::selection_for_type(
+                    types,
+                    &pkg.config.components,
+                    i,
+                )
+                .unwrap_or_else(|| pkg.config.components.iter().map(|_| true).collect()),
+                None => pkg.config.components.iter().map(|_| true).collect(),
+            };
             Ok(Box::new(InstallerApp {
                 pkg,
                 dest: default_dest.clone(),
@@ -106,6 +121,8 @@ pub fn run_gui(pkg: Arc<Package>, default_dest: PathBuf) -> anyhow::Result<()> {
                 license_accepted: false,
                 license_scrolled: false,
                 component_checked,
+                install_type,
+                desc_index: None,
                 run_checked: Vec::new(),
                 err_msg: String::new(),
                 theme: th,
@@ -494,6 +511,50 @@ impl InstallerApp {
                 );
                 ui.add_space(8.0);
                 let mut checked_next = self.component_checked.clone();
+                let mut desc_next = self.desc_index;
+                // 步骤 10：InstallTypes 类型单选行（NSIS 组件页顶部类型语义）：
+                // 选中类型 → 组件勾选重置为该类型定义；末尾附带 Custom = 当前手动状态。
+                let types = &cfg.install_types;
+                let custom_index = types.len();
+                if !types.is_empty() {
+                    let mut type_next = self.install_type.min(custom_index);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(miedit_core::config::ui_text(
+                                cfg,
+                                "components_type_title",
+                            ))
+                            .color(self.theme.text_dim)
+                            .size(13.0),
+                        );
+                        for (i, t) in types.iter().enumerate() {
+                            ui.radio_value(
+                                &mut type_next,
+                                i,
+                                egui::RichText::new(&t.name)
+                                    .color(self.theme.text)
+                                    .size(13.5),
+                            );
+                        }
+                        ui.radio_value(
+                            &mut type_next,
+                            custom_index,
+                            egui::RichText::new(miedit_core::config::ui_text(
+                                cfg,
+                                "components_type_custom",
+                            ))
+                            .color(self.theme.text)
+                            .size(13.5),
+                        );
+                    });
+                    if type_next != self.install_type {
+                        if let Some(sel) =
+                            miedit_core::installtypes::selection_for_type(types, &cfg.components, type_next)
+                        {
+                            checked_next = sel;
+                        }
+                    }
+                }
                 ui.horizontal(|ui| {
                     if ui
                         .add(theme::secondary_button(
@@ -513,9 +574,23 @@ impl InstallerApp {
                         ))
                         .clicked()
                     {
-                        for (i, c) in self.pkg.config.components.iter().enumerate() {
-                            if let Some(v) = checked_next.get_mut(i) {
-                                *v = c.required;
+                        // 有安装类型时重置 = 回到默认类型；否则回退到仅必装
+                        match miedit_core::installtypes::default_type_index(types) {
+                            Some(i) => {
+                                if let Some(sel) = miedit_core::installtypes::selection_for_type(
+                                    types,
+                                    &cfg.components,
+                                    i,
+                                ) {
+                                    checked_next = sel;
+                                }
+                            }
+                            None => {
+                                for (i, c) in cfg.components.iter().enumerate() {
+                                    if let Some(v) = checked_next.get_mut(i) {
+                                        *v = c.required;
+                                    }
+                                }
                             }
                         }
                     }
@@ -534,43 +609,100 @@ impl InstallerApp {
                     .stroke(Stroke::new(1.0, self.theme.card_stroke))
                     .inner_margin(egui::Margin::same(14.0))
                     .show(ui, |ui| {
-                        for (i, comp) in self.pkg.config.components.iter().enumerate() {
+                        for (i, comp) in cfg.components.iter().enumerate() {
                             let checked = checked_next.get(i).copied().unwrap_or(true);
                             let mut next = checked;
-                            ui.add_enabled_ui(!comp.required, |ui| {
-                                ui.checkbox(
-                                    &mut next,
-                                    egui::RichText::new(&comp.name)
-                                        .color(self.theme.text)
-                                        .size(15.0)
-                                        .strong(),
-                                );
-                            });
-                            checked_next[i] = if comp.required { true } else { next };
-                            if !comp.description.is_empty() {
-                                ui.horizontal(|ui| {
-                                    ui.add_space(22.0);
-                                    ui.label(
-                                        egui::RichText::new(&comp.description)
-                                            .color(self.theme.text_dim)
-                                            .size(12.5),
-                                    );
-                                });
-                            }
-                            if comp.required {
-                                ui.horizontal(|ui| {
-                                    ui.add_space(22.0);
+                            let row = ui.horizontal(|ui| {
+                                let resp = ui
+                                    .add_enabled_ui(!comp.required, |ui| {
+                                        ui.checkbox(
+                                            &mut next,
+                                            egui::RichText::new(&comp.name)
+                                                .color(self.theme.text)
+                                                .size(15.0)
+                                                .strong(),
+                                        )
+                                    })
+                                    .inner;
+                                // 步骤 11：悬停/点击组件行 → 描述面板跟随（NSIS 描述框语义）
+                                if resp.hovered() || resp.clicked() {
+                                    desc_next = Some(i);
+                                }
+                                if comp.required {
                                     chip_small(
                                         ui,
                                         miedit_core::config::ui_text(cfg, "components_required"),
                                         self.theme.accent,
                                     );
-                                });
+                                }
+                            });
+                            // 整行作为悬停面（必装组件的复选框处于禁用态，其响应不含悬停）
+                            let hover = ui.interact(
+                                row.response.rect,
+                                egui::Id::new(("comp_row_hover", i)),
+                                egui::Sense::hover(),
+                            );
+                            if hover.hovered() {
+                                desc_next = Some(i);
                             }
+                            checked_next[i] = if comp.required { true } else { next };
                             ui.add_space(6.0);
                         }
                     });
+                ui.add_space(6.0);
+                // 步骤 11：组件描述面板（NSIS 组件页描述框语义；必装组件带「必需」徽标）
+                let sel_comp = match desc_next {
+                    Some(i) => cfg.components.get(i),
+                    None => None,
+                };
+                let has_desc = sel_comp
+                    .map(|c| !c.description.trim().is_empty())
+                    .unwrap_or(false);
+                egui::Frame::none()
+                    .fill(self.theme.field)
+                    .rounding(10.0)
+                    .stroke(Stroke::new(1.0, self.theme.card_stroke))
+                    .inner_margin(egui::Margin::same(12.0))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(miedit_core::config::ui_text(
+                                    cfg,
+                                    "components_desc_panel",
+                                ))
+                                .color(self.theme.text_dim)
+                                .size(12.0)
+                                .strong(),
+                            );
+                            if let Some(c) = sel_comp {
+                                if c.required {
+                                    chip_small(
+                                        ui,
+                                        miedit_core::config::ui_text(cfg, "components_required"),
+                                        self.theme.accent,
+                                    );
+                                }
+                            }
+                        });
+                        let text = match sel_comp {
+                            Some(c) if has_desc => c.description.clone(),
+                            _ => miedit_core::config::ui_text(cfg, "components_desc_empty"),
+                        };
+                        ui.label(
+                            egui::RichText::new(text)
+                                .color(if has_desc { self.theme.text } else { self.theme.text_dim })
+                                .size(13.5),
+                        );
+                    });
                 self.component_checked = checked_next;
+                self.desc_index = desc_next;
+                // 步骤 10：当前勾选状态命中已定义类型则跟随之，否则自动切到 Custom（NSIS 语义）
+                self.install_type = miedit_core::installtypes::matching_type(
+                    &cfg.install_types,
+                    &cfg.components,
+                    &self.component_checked,
+                )
+                .unwrap_or_else(|| cfg.install_types.len());
             }
             Page::Dir => {
                 ui.heading(

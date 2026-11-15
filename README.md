@@ -29,6 +29,8 @@
 | **全窗口图片背景** | `background = "bg.png"`，`cover / contain / stretch` 三种模式 |
 | 安装向导 | 欢迎 → 许可（可强制滚动到底）→ 组件选择 → 目录（**磁盘空间检测**）→ 安装进度（计数/速度/**细节开关**）→ 完成（**多任务复选**） |
 | **组件选择** | NSIS Section / Inno Components 风格：`[[components]]` + 规则引用，必装锁定、全选/重置 |
+| **安装类型** | NSIS `InstallTypes` / Inno `[Types]` 对齐：`[[install_types]]` 组件页顶部单选（Typical/Full/…），切换类型联动组件勾选；手动改动任意组件自动切到 **Custom** |
+| **组件描述侧栏** | NSIS 组件页描述框对齐：悬停/点击组件行，下方描述面板跟随显示 `description`，必装组件带「必需」徽标，空描述显示占位 |
 | **安装后任务** | Inno [Run] 风格：`[[install.run_tasks]]` 完成页复选，支持 exe 参数与文档打开 |
 | **NSIS 式卸载器** | **自包含**：清单与图标内嵌 `uninstall.exe`（MRISUNIN 尾部，无外部 json）；确认页（可勾选删除用户数据）→ 进度（细节默认收起可展开）→ 完成 |
 | **自删除** | 自身移入 %TEMP% + 分离 cmd：等待退出 → 删除自身 → `rd /s /q` 清理安装目录 → 重试 |
@@ -136,6 +138,16 @@ description = "主程序（必需）"
 required = true               # 必装：勾选锁定
 files = [0, 2]                # 引用 [[files]] 规则索引；未被引用的规则始终安装
 
+[[install_types]]             # NSIS InstallTypes / Inno [Types]（可选）
+name = "典型"
+components = [0]              # 选中该类型时默认勾选的组件索引
+default = true                # 默认选中的类型（未标记时取第一个）
+
+[[install_types]]
+name = "完整"
+components = [0, 1]
+# 手动改动任意组件勾选自动切到 Custom（组件页自动附加）
+
 [[registry]]
 key = "HKCU\\Software\\Vendor\\App"   # HKCU / HKLM 前缀
 values = { InstallPath = "{install_dir}" }
@@ -162,7 +174,7 @@ crates/
 ## 测试
 
 ```bash
-cargo test --workspace    # 39 个单元测试：归档/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/文件错误决策与提示信箱/重启替换/组件过滤映射/slug
+cargo test --workspace    # 46 个单元测试：归档/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/文件错误决策与提示信箱/重启替换/安装类型状态机/组件过滤映射/slug
 ```
 
 已在 Windows 10 x64 实机验证：CLI 与 GUI 构建链路、静默安装/卸载全清理、组件过滤生效、

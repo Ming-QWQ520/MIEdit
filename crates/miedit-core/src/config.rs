@@ -28,6 +28,8 @@ pub struct Config {
     pub registry: Vec<RegistrySpec>,
     /// 安装组件（NSIS Section / Inno Components 风格）；为空 = 不显示组件页，全部安装
     pub components: Vec<ComponentSpec>,
+    /// 安装类型（NSIS InstallTypes / Inno [Types] 风格）；为空 = 组件页不显示类型单选
+    pub install_types: Vec<InstallTypeSpec>,
     /// 编译器生成：每条 [[files]] 规则展开出的文件（安装器按组件过滤用），脚本中无需手写
     pub files_map: Vec<Vec<FileRef>>,
 }
@@ -176,6 +178,30 @@ impl Default for ComponentSpec {
     }
 }
 
+/// 安装类型（NSIS `InstallTypes` / Inno `[Types]` 风格）：
+/// 组件页顶部单选，选中时按 `components` 重置组件勾选状态；
+/// 手动改动任意组件自动切到 Custom（NSIS 语义，见 `installtypes` 模块）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InstallTypeSpec {
+    /// 类型名称（如 Typical / Full / Minimal）
+    pub name: String,
+    /// 该类型默认勾选的组件索引集合（必装组件始终勾选）
+    pub components: Vec<usize>,
+    /// 是否为默认类型（未标记时取第一个）
+    pub default: bool,
+}
+
+impl Default for InstallTypeSpec {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            components: Vec::new(),
+            default: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
@@ -307,6 +333,12 @@ pub fn default_text(key: &str) -> Option<&'static str> {
         ("components_select_all", "Select All"),
         ("components_reset", "Reset"),
         ("components_required", "Required"),
+        // 步骤 10：InstallTypes 类型单选行
+        ("components_type_title", "Type of install:"),
+        ("components_type_custom", "Custom"),
+        // 步骤 11：组件描述面板
+        ("components_desc_panel", "Component description"),
+        ("components_desc_empty", "Hover or click a component to see its description."),
         ("free_space", "Free space on drive: {free}"),
         ("app_running_title", "App Is Running"),
         ("app_running_body", "{app} appears to be running. Please close it before continuing, or retry the check."),

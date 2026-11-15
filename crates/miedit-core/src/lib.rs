@@ -8,6 +8,7 @@ pub mod config;
 pub mod crc32;
 pub mod fileerror;
 pub mod files;
+pub mod installtypes;
 pub mod manifest;
 pub mod overwrite;
 pub mod trailer;

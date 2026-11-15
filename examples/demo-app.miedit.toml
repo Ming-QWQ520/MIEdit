@@ -48,10 +48,14 @@ back = "上一步"
 browse = "浏览..."
 cancel = "取消"
 components_desc = "请选择要安装的 {app} 组件："
+components_desc_empty = "将鼠标悬停在组件上查看说明。"
+components_desc_panel = "组件说明"
 components_required = "必装"
 components_reset = "重置"
 components_select_all = "全选"
 components_title = "选择组件"
+components_type_custom = "自定义"
+components_type_title = "安装类型："
 continue_anyway = "仍然继续"
 dir_desc = """
 {app} 将安装到以下文件夹。
@@ -120,3 +124,13 @@ name = "文档"
 description = "使用指南与说明文档"
 required = false
 files = [1]
+
+[[install_types]]
+# NSIS InstallTypes：组件页顶部单选；选中后按 components 重置勾选
+name = "典型"
+components = [0]
+default = true
+
+[[install_types]]
+name = "完整"
+components = [0, 1]
