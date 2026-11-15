@@ -19,10 +19,14 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut silent = false;
     let mut dir: Option<String> = None;
+    // NSIS CRCCheck 语义：`--ncrc` / `/ncrc` 跳过包完整性 CRC32 校验
+    let mut ncrc = false;
     for a in &args {
         let low = a.to_ascii_lowercase();
         if low == "--silent" || low == "/s" || low == "-s" {
             silent = true;
+        } else if low == "--ncrc" || low == "/ncrc" {
+            ncrc = true;
         } else if let Some(rest) = a.strip_prefix("--dir=") {
             dir = Some(rest.trim_matches('"').to_string());
         } else if low.starts_with("/d=") {
@@ -30,7 +34,7 @@ fn main() {
         }
     }
 
-    match real_main(silent, dir, &args) {
+    match real_main(silent, ncrc, dir, &args) {
         Ok(code) => std::process::exit(code),
         Err(e) => {
             miedit_core::winutil::message_box_error("MIEdit 安装程序", &format!("{e:#}"));
@@ -39,8 +43,8 @@ fn main() {
     }
 }
 
-fn real_main(silent: bool, dir_arg: Option<String>, args: &[String]) -> Result<i32> {
-    let pkg = pkg::load_self_package()?;
+fn real_main(silent: bool, ncrc: bool, dir_arg: Option<String>, args: &[String]) -> Result<i32> {
+    let pkg = pkg::load_self_package(ncrc)?;
     let cfg = &pkg.config;
 
     if cfg.app.name.is_empty() {

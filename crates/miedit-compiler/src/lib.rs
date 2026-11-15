@@ -420,6 +420,9 @@ pub fn build_package(
         (icon_off + icon_len, uninstall_icon_bytes.len() as u64)
     };
 
+    // NSIS CRCCheck 对齐（路线图步骤 7）：写入 payload/config/uninstaller 三个
+    // 分区的 CRC32（MIEDPKG3 Trailer），安装器启动时流式校验，`--ncrc` 可跳过。
+    let crc = trailer::compute_crc(&payload_bytes, &cfg_json, &unp_bytes);
     let tr = Trailer {
         payload: Range { off: payload_off, len: payload_end - payload_off },
         config: Range { off: config_off, len: config_len },
@@ -427,6 +430,7 @@ pub fn build_package(
         background: Range { off: bg_off, len: bg_len },
         icon: Range { off: icon_off, len: icon_len },
         uninstall_icon: Range { off: uicon_off, len: uicon_len },
+        crc: Some(crc),
     };
     trailer::write_trailer(&mut f, &tr)?;
     f.sync_all().ok();

@@ -15,7 +15,7 @@
 | 4 | QuietUninstallString 注册表值 | NSIS / ARP 惯例 | **已完成**（v0.2.0） |
 | 5 | install.log 落盘（LogSet） | NSIS `LogSet on` | **已完成**（v0.2.0） |
 | 6 | 安装器 EXE 版本信息资源（VERSIONINFO） | NSIS `VIProductVersion`/`VIAddVersionKey` | **已完成**（v0.3.0） |
-| 7 | 包完整性 CRC32 校验 + `--ncrc` 开关 | NSIS `CRCCheck`（fileform.h firstheader CRC） | 待办 |
+| 7 | 包完整性 CRC32 校验 + `--ncrc` 开关 | NSIS `CRCCheck`（fileform.h firstheader CRC） | **已完成**（v0.4.0） |
 | 8 | 覆盖失败重试交互（安装期文件被占用） | NSIS Retry/Ignore/Abort 文件对话框 | 待办 |
 | 9 | 安装期被占用文件重启替换 + "需要重启"完成页 | NSIS `SetRebootFlag` / Inno `restartreplace` | 待办 |
 | 10 | InstallTypes 安装类型（Typical/Full/Minimal/Custom） | NSIS `InstallTypes` / Inno `[Types]` | 待办 |
@@ -109,6 +109,13 @@
 
 ## 变更日志
 
+- v0.4.0（步骤 7）：**包完整性 CRC32 校验 + `--ncrc`**（NSIS `CRCCheck` 对齐）：
+  包尾升级为 `MIEDPKG3`（116B：v2 范围表 + payload/config/uninstaller 三分区
+  CRC32）；安装器启动时流式校验，失败报"安装包已损坏"并提示分区与期望/实际值；
+  `--ncrc` / `/ncrc` 跳过（CRCCheck off/force 语义）；旧格式包（MIEDPKG2）
+  仍可读取安装（无校验直接放行）。CRC32 为 `miedit_core::crc32` 纯 Rust
+  查表实现（无新依赖，标准校验值单元测试），校验逻辑下沉 `trailer::verify_crc`
+  （含真实临时包文件的篡改回读测试：篡改一字节必报错）。
 - v0.3.0（步骤 6）：安装器与卸载器 EXE 嵌入 **VERSIONINFO 版本信息资源**
   （NSIS `VIProductVersion` / `VIAddVersionKey` 对齐）：
   ProductName / ProductVersion / FileVersion / CompanyName / FileDescription /

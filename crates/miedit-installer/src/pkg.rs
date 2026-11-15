@@ -1,4 +1,8 @@
 //! 读取自身 EXE 尾部的包数据（配置 JSON、背景图、图标）。
+//!
+//! 启动时默认流式校验 payload/config/uninstaller 三个分区的 CRC32
+//! （NSIS `CRCCheck` 对齐，MIEDPKG3 包尾）；`--ncrc` 跳过（CRCCheck off 语义）；
+//! 旧格式包（MIEDPKG2，无 CRC）直接放行，保持向后兼容。
 
 use anyhow::{anyhow, Context, Result};
 use miedit_core::config::Config;
@@ -39,11 +43,18 @@ fn read_total_bytes(f: &mut File, payload: Range) -> Result<u64> {
 }
 
 /// 加载当前 EXE 中的安装包数据。
-pub fn load_self_package() -> Result<Arc<Package>> {
+/// `ncrc = true` 时跳过 CRC32 校验（NSIS `/NCRC` 语义）。
+pub fn load_self_package(ncrc: bool) -> Result<Arc<Package>> {
     let path = std::env::current_exe().context("获取自身路径失败")?;
     let tr = trailer::read_trailer(&path)?.ok_or_else(|| {
         anyhow!("这不是有效的 MIEdit 安装包（未找到包尾标记）。请使用 miedit-compiler 生成安装包。")
     })?;
+
+    // NSIS CRCCheck 对齐：默认校验关键分区 CRC32，损坏包拒绝安装
+    if !ncrc {
+        trailer::verify_crc(&path, &tr)?;
+    }
+
     let mut f = File::open(&path).context("打开自身失败")?;
 
     let cfg_bytes = read_range(&mut f, tr.config)?;

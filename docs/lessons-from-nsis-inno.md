@@ -102,4 +102,18 @@
    版本号宽容解析：`1.2.3` → dwMS=1.2/dwLS=3.0（NSIS 严格要求 x.x.x.x，
    这里对自由格式脚本取数字前缀，超出 65535 截断）。
 
+## 七、落地清单 · 第四批（NSIS 对齐 #3，v0.4.0）
+
+1. **包完整性 CRC32 校验**（NSIS：`Source/exehead/fileform.h` firstheader 自带
+   length/ timestamp/CRC 字段，exehead 启动即校验，`CRCCheck on/off/force`
+   三态 + `/NCRC` 开关）：MIEdit 包尾升级为 **`MIEDPKG3`**（116B = v2 范围表
+   + payload/config/uninstaller 三个分区的 CRC32）；安装器 `load_self_package`
+   启动时**流式校验**（64KB 分块，不整包载入内存），失败报"安装包已损坏"
+   （含分区名与期望/实际校验值）；`--ncrc` / `/ncrc` 跳过。
+   兼容策略：CRC32 为 `miedit_core::crc32` 纯 Rust 查表实现（零新增依赖，
+   `"123456789" → 0xCBF43926` 标准校验值测试）；旧格式包（MIEDPKG2）读取时
+   自动回退、无校验直接放行——新代码兼容旧包，旧安装器不读新包（与 NSIS
+   firstheader 版本字段语义一致）。校验逻辑下沉 `trailer::verify_crc`，
+   测试用真实临时包文件做"篡改一字节必报错"的三分区回读验证。
+
 > 对齐路线图见 [nsis-alignment-roadmap.md](nsis-alignment-roadmap.md)，按步骤持续迭代。

@@ -5,6 +5,7 @@
 
 pub mod archive;
 pub mod config;
+pub mod crc32;
 pub mod files;
 pub mod manifest;
 pub mod overwrite;
