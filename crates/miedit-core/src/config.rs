@@ -313,6 +313,20 @@ pub fn default_text(key: &str) -> Option<&'static str> {
         ("retry", "Retry"),
         ("continue_anyway", "Continue Anyway"),
         ("upgrade_notice", "Found installed version {old}; it will be upgraded to {new}."),
+        // 步骤 8：文件写入错误模态（NSIS 文件错误对话框：重试/忽略/中止）
+        ("file_error_title", "写入文件失败"),
+        ("file_error_body", "无法写入以下文件：\n{file}\n\n{error}"),
+        (
+            "file_error_hint",
+            "请关闭正在使用该文件的程序后选择「重试」；选择「忽略」将跳过该文件并在系统重启后替换；选择「中止」将停止安装（已写入的文件保留）。",
+        ),
+        ("file_error_ignore", "忽略"),
+        ("file_error_abort", "中止"),
+        // 步骤 9：完成页"需要重启"琥珀提示
+        (
+            "finish_reboot_required",
+            "需要重启以完成安装：{count} 个文件将在系统重启后替换。",
+        ),
     ];
     DEFAULT_TEXTS
         .iter()

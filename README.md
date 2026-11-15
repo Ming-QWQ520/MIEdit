@@ -42,6 +42,8 @@
 | 权限 | `per_machine = true` 启动时自动 UAC 提权重启 |
 | 静默模式 | 安装器/卸载器均支持 `--silent`（NSIS `/S` 风格）与 `--dir=`，可自动化测试 |
 | **覆盖策略** | NSIS `SetOverwrite` 对齐：`on / off / try / ifnewer`；安装后保留源文件时间戳，`ifnewer` 仅在源更新时覆盖 |
+| **覆盖失败重试交互** | NSIS 文件错误对话框对齐：安装中文件被占用写不进时弹出「重试 / 忽略 / 中止」模态卡片——重试循环、忽略记录日志并继续、中止说明已写入文件去向；静默模式自动忽略并计划重启替换 |
+| **安装期重启替换** | NSIS `SetRebootFlag` / Inno `restartreplace` 对齐：被占用文件先改名腾位立即写入新内容，旧文件调度重启删除（`PendingFileRenameOperations`）；完成页琥珀提示“需要重启以完成安装”并列出文件 |
 | **重启删除** | NSIS `Delete /REBOOTOK` 对齐：卸载时被占用的文件 `MoveFileEx` 计划重启删除，完成页/静默日志提示 |
 | **卸载运行检测** | 卸载确认页检测主程序占用（可重新检测），静默模式记录警告后继续 |
 | **QuietUninstallString** | 卸载注册表写入静默卸载入口（ARP 自动化 / NSIS 风格） |
@@ -160,7 +162,7 @@ crates/
 ## 测试
 
 ```bash
-cargo test --workspace    # 28 个单元测试：归档/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/组件过滤映射/slug
+cargo test --workspace    # 39 个单元测试：归档/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/文件错误决策与提示信箱/重启替换/组件过滤映射/slug
 ```
 
 已在 Windows 10 x64 实机验证：CLI 与 GUI 构建链路、静默安装/卸载全清理、组件过滤生效、

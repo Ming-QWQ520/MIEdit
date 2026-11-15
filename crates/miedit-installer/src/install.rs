@@ -5,6 +5,9 @@ use crate::pkg::Package;
 use anyhow::{Context as _, Result};
 use eframe::egui;
 use miedit_core::archive::ArchiveReader;
+use miedit_core::fileerror::{
+    self, FileErrorChoice, PromptChannel, WriteFailurePlan,
+};
 use miedit_core::overwrite::{decide, OverwriteDecision, OverwriteMode};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -34,6 +37,10 @@ pub struct ProgressState {
     /// 开始时间（计算速度）
     pub started: Option<std::time::Instant>,
     pub log: Vec<String>,
+    /// 步骤 8：文件写入错误的「请求-应答」信箱（后台线程 ↔ UI 模态卡片）
+    pub prompt_channel: PromptChannel,
+    /// 步骤 9：已计划重启替换的文件（包内相对路径）
+    pub pending_reboot: Vec<String>,
 }
 
 /// 向安装日志追加一行（保留最近 500 条）。
@@ -43,6 +50,29 @@ pub fn push_log(st: &Mutex<ProgressState>, line: impl Into<String>) {
     let len = s.log.len();
     if len > 500 {
         s.log.drain(0..len - 500);
+    }
+}
+
+/// 打开文件错误模态并阻塞等待用户答复（NSIS 文件错误对话框为模态：
+/// 安装暂停直至用户选择重试/忽略/中止）。UI 线程每帧轮询
+/// `ProgressState::prompt_channel` 渲染卡片并写入答复。
+fn wait_file_error_choice(
+    st: &Mutex<ProgressState>,
+    ctx: &egui::Context,
+    rel: &str,
+    err: &anyhow::Error,
+) -> FileErrorChoice {
+    {
+        let mut s = st.lock().unwrap();
+        s.prompt_channel.open_request(rel, format!("{err:#}"));
+    }
+    loop {
+        ctx.request_repaint();
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        let mut s = st.lock().unwrap();
+        if let Some(choice) = s.prompt_channel.take_reply() {
+            return choice;
+        }
     }
 }
 
@@ -268,23 +298,86 @@ fn run_install(
             continue;
         }
 
-        let wr = (|| -> Result<()> {
+        // 写入；失败时进入 NSIS 文件错误处置（步骤 8 重试/忽略/中止 + 步骤 9 重启替换）
+        let do_write = || -> Result<()> {
             let mut out = BufWriter::new(fs::File::create(&target).with_context(|| {
                 format!("创建文件失败: {}", target.display())
             })?);
             out.write_all(&data)?;
             out.flush()?;
             Ok(())
-        })();
-        if let Err(e) = wr {
-            if decision == OverwriteDecision::WriteIgnoreErrors {
-                push_log(
-                    st,
-                    format!("警告: 覆盖失败已忽略: {rel}（overwrite = try）: {e:#}"),
-                );
-                continue;
+        };
+        if let Err(mut err) = do_write() {
+            loop {
+                // 按覆盖策略与运行模式决定处置计划
+                let plan = if !fileerror::needs_prompt(mode) {
+                    // overwrite = try：NSIS SetOverwrite try 语义，失败不中断；同时计划重启替换
+                    push_log(
+                        st,
+                        format!("警告: 覆盖失败已忽略: {rel}（overwrite = try）: {err:#}"),
+                    );
+                    fileerror::try_mode_plan()
+                } else if let Some(c) = ctx {
+                    // 交互模式：弹出「重试 / 忽略 / 中止」模态，阻塞等待用户选择
+                    match wait_file_error_choice(st, c, &rel, &err) {
+                        FileErrorChoice::Retry => WriteFailurePlan::RetryWrite,
+                        FileErrorChoice::Ignore => {
+                            push_log(st, format!("警告: 覆盖失败已忽略（用户选择忽略）: {rel}: {err:#}"));
+                            WriteFailurePlan::Skip { reboot_replace: true }
+                        }
+                        FileErrorChoice::Abort => WriteFailurePlan::Abort,
+                    }
+                } else {
+                    // 静默模式无 GUI：默认忽略 + 计划重启替换（设计取舍见 lessons 文档）
+                    push_log(
+                        st,
+                        format!("警告: 写入失败已忽略（静默模式，已计划重启替换）: {rel}: {err:#}"),
+                    );
+                    fileerror::silent_default_plan()
+                };
+                match plan {
+                    WriteFailurePlan::RetryWrite => {
+                        push_log(st, format!("重试写入: {rel}"));
+                        match do_write() {
+                            Ok(()) => break, // 重试成功，继续后续流程（时间戳/计数）
+                            Err(e) => err = e, // 仍失败：再次征求处置
+                        }
+                    }
+                    WriteFailurePlan::Skip { reboot_replace } => {
+                        if reboot_replace {
+                            // 步骤 9：计划重启替换（NSIS SetRebootFlag / Inno restartreplace）
+                            match miedit_core::winutil::schedule_replace_on_reboot(&target, &data) {
+                                Ok(immediate) => {
+                                    push_log(
+                                        st,
+                                        format!(
+                                            "已计划重启替换: {rel}{}",
+                                            if immediate {
+                                                "（旧文件已腾位，新内容已写入）"
+                                            } else {
+                                                "（重启后原子替换）"
+                                            },
+                                        ),
+                                    );
+                                    {
+                                        let mut s = st.lock().unwrap();
+                                        s.pending_reboot.push(rel.clone());
+                                    }
+                                    // 目标文件（重启后）会存在，登记进卸载清单保证可清理
+                                    files.push(target.display().to_string());
+                                }
+                                Err(e2) => {
+                                    push_log(st, format!("警告: 计划重启替换失败: {rel}: {e2:#}"));
+                                }
+                            }
+                        }
+                        break; // 跳过该文件继续安装
+                    }
+                    WriteFailurePlan::Abort => {
+                        return Err(anyhow::anyhow!(fileerror::abort_message(&rel, files.len())));
+                    }
+                }
             }
-            return Err(e);
         }
         // 保留源文件修改时间（NSIS 做法；保证 ifnewer 升级比较正确）
         if new_mtime > 0 {

@@ -278,6 +278,14 @@ impl InstallerApp {
         }
     }
 
+    /// 步骤 8：把用户在文件错误模态中的选择写给后台安装线程。
+    fn answer_prompt(&self, choice: miedit_core::fileerror::FileErrorChoice, ctx: &egui::Context) {
+        if let Ok(mut s) = self.state.lock() {
+            s.prompt_channel.answer(choice);
+        }
+        ctx.request_repaint();
+    }
+
     /// 完成页的任务列表（兼容旧 run_after 字段）。
     fn run_tasks(&self) -> Vec<(String, String, String)> {
         let cfg = &self.pkg.config;
@@ -787,6 +795,52 @@ impl InstallerApp {
                         .size(15.0)
                         .strong(),
                 );
+                // 步骤 9：有文件被计划重启替换时的琥珀提示（NSIS SetRebootFlag 完成页语义）
+                let pending_reboot = self
+                    .state
+                    .lock()
+                    .ok()
+                    .map(|s| s.pending_reboot.clone())
+                    .unwrap_or_default();
+                if !pending_reboot.is_empty() {
+                    ui.add_space(8.0);
+                    let amber = Color32::from_rgb(0xF5, 0xA5, 0x24);
+                    egui::Frame::none()
+                        .fill(amber.linear_multiply(0.12))
+                        .rounding(10.0)
+                        .stroke(Stroke::new(1.0, amber.linear_multiply(0.5)))
+                        .inner_margin(egui::Margin::same(10.0))
+                        .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            ui.label(
+                                egui::RichText::new(
+                                    miedit_core::config::ui_text(cfg, "finish_reboot_required")
+                                        .replace("{count}", &pending_reboot.len().to_string()),
+                                )
+                                .color(amber)
+                                .size(13.5)
+                                .strong(),
+                            );
+                            for p in pending_reboot.iter().take(4) {
+                                ui.label(
+                                    egui::RichText::new(format!("· {p}"))
+                                        .color(self.theme.text_dim)
+                                        .size(12.0)
+                                        .monospace(),
+                                );
+                            }
+                            if pending_reboot.len() > 4 {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "等共 {} 个文件（详见 install.log）",
+                                        pending_reboot.len()
+                                    ))
+                                    .color(self.theme.text_dim)
+                                    .size(12.0),
+                                );
+                            }
+                        });
+                }
                 let tasks = self.run_tasks();
                 if !tasks.is_empty() {
                     ui.add_space(10.0);
@@ -1077,5 +1131,98 @@ impl eframe::App for InstallerApp {
             .show(ctx, |ui| {
                 self.buttons(ui, ctx);
             });
+
+        // 步骤 8：文件写入错误模态（NSIS 文件错误对话框：重试/忽略/中止）。
+        // 后台线程打开请求后在此渲染遮罩 + 卡片，答复写入 PromptChannel。
+        let prompt = self.state.lock().ok().and_then(|s| {
+            if s.prompt_channel.pending() {
+                s.prompt_channel
+                    .current()
+                    .map(|p| (p.path.clone(), p.error.clone()))
+            } else {
+                None
+            }
+        });
+        if let Some((path, error)) = prompt {
+            let cfg = self.pkg.config.clone();
+            // 遮罩：压暗背景并吞掉模态外的点击（NSIS 模态语义）
+            egui::Area::new(egui::Id::new("file-error-scrim"))
+                .order(egui::Order::Foreground)
+                .anchor(Align2::LEFT_TOP, Vec2::ZERO)
+                .show(ctx, |ui| {
+                    let size = ctx.screen_rect().size();
+                    let (r, resp) = ui.allocate_exact_size(size, Sense::click());
+                    ui.painter().rect_filled(r, 0.0, Color32::from_black_alpha(150));
+                    let _ = resp;
+                });
+            egui::Area::new(egui::Id::new("file-error-modal"))
+                .order(egui::Order::Foreground)
+                .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+                .show(ctx, |ui| {
+                    let w = 480.0_f32.min(ctx.screen_rect().width() - 80.0).max(320.0);
+                    egui::Frame::none()
+                        .fill(self.theme.card)
+                        .rounding(14.0)
+                        .stroke(Stroke::new(1.0, self.theme.card_stroke))
+                        .inner_margin(egui::Margin::same(20.0))
+                        .show(ui, |ui| {
+                            ui.set_min_width(w);
+                            draw_badge(ui, Color32::from_rgb(0xF5, 0xA5, 0x24), "!", 30.0);
+                            ui.add_space(6.0);
+                            ui.heading(
+                                egui::RichText::new(miedit_core::config::ui_text(&cfg, "file_error_title"))
+                                    .color(self.theme.text)
+                                    .size(22.0)
+                                    .strong(),
+                            );
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new(
+                                    miedit_core::config::ui_text(&cfg, "file_error_body")
+                                        .replace("{file}", &path)
+                                        .replace("{error}", &error),
+                                )
+                                .color(self.theme.text_dim)
+                                .size(13.0),
+                            );
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new(miedit_core::config::ui_text(&cfg, "file_error_hint"))
+                                    .color(self.theme.text_dim)
+                                    .size(12.5),
+                            );
+                            ui.add_space(10.0);
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add(theme::secondary_button(
+                                        &miedit_core::config::ui_text(&cfg, "file_error_abort"),
+                                        &self.theme,
+                                    ))
+                                    .clicked()
+                                {
+                                    self.answer_prompt(miedit_core::fileerror::FileErrorChoice::Abort, ctx);
+                                }
+                                if ui
+                                    .add(theme::secondary_button(
+                                        &miedit_core::config::ui_text(&cfg, "file_error_ignore"),
+                                        &self.theme,
+                                    ))
+                                    .clicked()
+                                {
+                                    self.answer_prompt(miedit_core::fileerror::FileErrorChoice::Ignore, ctx);
+                                }
+                                if ui
+                                    .add(theme::primary_button(
+                                        &miedit_core::config::ui_text(&cfg, "retry"),
+                                        &self.theme,
+                                    ))
+                                    .clicked()
+                                {
+                                    self.answer_prompt(miedit_core::fileerror::FileErrorChoice::Retry, ctx);
+                                }
+                            });
+                        });
+                });
+        }
     }
 }

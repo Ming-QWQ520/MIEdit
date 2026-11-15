@@ -116,4 +116,31 @@
    firstheader 版本字段语义一致）。校验逻辑下沉 `trailer::verify_crc`，
    测试用真实临时包文件做"篡改一字节必报错"的三分区回读验证。
 
+## 八、落地清单 · 第五批（NSIS 对齐 #4，v0.5.0）
+
+1. **覆盖失败重试交互**（NSIS exehead 文件错误对话框：写入失败弹
+   重试/忽略/中止，模态、安装暂停）：MIEdit 用 egui 遮罩 + 模态卡片实现，
+   后台安装线程与 UI 线程之间以 `miedit_core::fileerror::PromptChannel`
+   「请求-应答」信箱通信（单测验证协议不变量：答复必须在有请求时才生效、
+   一次请求只消费一次、新请求清掉残留答复）。按覆盖策略分流：
+   `overwrite = try` 失败不弹窗直接跳过（NSIS SetOverwrite try 语义）；
+   `on / off / ifnewer` 失败才征求用户意见。中止不清除已写入文件（同 NSIS），
+   错误信息说明已写入 N 个文件保留、可稍后用卸载器清理。
+2. **静默模式的默认处置（设计取舍）**：静默安装无 GUI、无法弹窗征求意见，
+   取「忽略 + 计划重启替换」为默认——无人值守升级尽量完成，且每个决策都
+   落入 install.log / %TEMP% 日志可追溯。这是 MIEdit 自己的选择（并非声称
+   NSIS 静默模式同款行为），换来的是自动化场景下被占用文件不会中断升级。
+3. **安装期重启替换**（NSIS `SetRebootFlag` / Inno `restartreplace`）：
+   `winutil::schedule_replace_on_reboot` 双路径——优先把被占用旧文件**改名腾位**
+   （同卷 rename 对被占用文件通常可行，与 NSIS 处理运行中 EXE 的思路一致），
+   新内容立即写入，旧文件登记 `PendingFileRenameOperations` 重启删除；
+   改名失败（目录锁/权限）时回退旁路 `.mienew` +
+   `MoveFileExW(DELAY_UNTIL_REBOOT | REPLACE_EXISTING)` 重启时原子替换。
+   待替换文件照常记入卸载清单（卸载器后续可清理），完成页琥珀提示
+   "需要重启以完成安装"并列出文件。旧文件腾位名固定 `.miedel` 后缀、
+   旁路名 `.mienew`，先清残留再写入，避免多次升级堆积垃圾。
+4. **egui 0.29 模态实现细节**：`Area` 已无 `fixed_size`，全屏遮罩用
+   `anchor(LEFT_TOP) + allocate_exact_size(screen_rect().size(), Sense::click())`
+   画半透明黑并吞掉模态外点击；模态卡片置于 `Order::Foreground`。
+
 > 对齐路线图见 [nsis-alignment-roadmap.md](nsis-alignment-roadmap.md)，按步骤持续迭代。

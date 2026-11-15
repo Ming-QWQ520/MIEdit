@@ -524,6 +524,76 @@ pub fn schedule_delete_on_reboot(path: &Path) -> Result<()> {
     }
 }
 
+/// 安装期「重启替换」（NSIS `SetRebootFlag` / Inno `restartreplace` 语义）：
+/// 目标文件被占用写不进去时，保证升级在重启后仍能完成。做法：
+///
+/// 1. 优先路径：把被占用的旧文件**改名腾位**（同卷 rename 一般即使被占用也可行，
+///    与 NSIS 处理运行中 EXE 的做法一致）→ 立即写入新内容 → 旧文件调度重启删除
+///    （Windows 写入 `PendingFileRenameOperations`；其他平台尽力直接删除，
+///    删不掉则留下 `.miedel` 残留，不影响已替换好的目标文件）。
+/// 2. 回退路径（改名失败，如目录被锁/权限不足）：新内容写入旁路临时文件
+///    `*.mienew`，Windows 下用 `MoveFileExW(DELAY_UNTIL_REBOOT | REPLACE_EXISTING)`
+///    计划重启时原子替换；其他平台返回 Err（调用方记录警告后继续）。
+///
+/// 返回 `Ok(true)` = 本次已替换完成；`Ok(false)` = 已计划重启后替换。
+pub fn schedule_replace_on_reboot(target: &Path, data: &[u8]) -> Result<bool> {
+    let mut moved = target.as_os_str().to_os_string();
+    moved.push(".miedel");
+    let moved = PathBuf::from(moved);
+    let _ = std::fs::remove_file(&moved); // 清理上次残留
+    if std::fs::rename(target, &moved).is_ok() {
+        // 腾位成功：立即写入新内容
+        std::fs::write(target, data)
+            .with_context(|| format!("写入文件失败（旧文件已改名腾位）: {}", target.display()))?;
+        // 旧文件调度重启删除；调度不可用（非 Windows）则尽力立即清理
+        if schedule_delete_on_reboot(&moved).is_err() {
+            let _ = std::fs::remove_file(&moved);
+        }
+        return Ok(true);
+    }
+    // 回退：旁路临时文件 + 重启时原子替换（仅 Windows 支持）
+    #[cfg(windows)]
+    {
+        let mut newp = target.as_os_str().to_os_string();
+        newp.push(".mienew");
+        let newp = PathBuf::from(newp);
+        std::fs::write(&newp, data)
+            .with_context(|| format!("写入旁路临时文件失败: {}", newp.display()))?;
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::{
+            MoveFileExW, MOVEFILE_DELAY_UNTIL_REBOOT, MOVEFILE_REPLACE_EXISTING,
+        };
+        let wide = |p: &Path| -> Vec<u16> {
+            let mut v: Vec<u16> = p
+                .to_str()
+                .unwrap_or("")
+                .encode_utf16()
+                .collect();
+            v.push(0);
+            v
+        };
+        let src = wide(&newp);
+        let dst = wide(target);
+        unsafe {
+            MoveFileExW(
+                PCWSTR(src.as_ptr()),
+                PCWSTR(dst.as_ptr()),
+                MOVEFILE_DELAY_UNTIL_REBOOT | MOVEFILE_REPLACE_EXISTING,
+            )
+        }
+        .map_err(|e| anyhow!("计划重启替换失败: {} ({e})", target.display()))?;
+        Ok(false)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = data;
+        Err(anyhow!(
+            "目标文件无法腾位，且当前平台不支持重启替换: {}",
+            target.display()
+        ))
+    }
+}
+
 /// 设置文件修改时间（NSIS 保留源文件时间戳的做法，保证 `ifnewer` 升级语义）。
 /// 尽力而为：失败由调用方决定是否记录警告。
 pub fn set_file_mtime(path: &Path, epoch_secs: u64) -> Result<()> {
@@ -615,5 +685,30 @@ pub fn schedule_self_delete(exe: &Path, extra_dirs: &[PathBuf]) {
     #[cfg(not(windows))]
     {
         let _ = (exe, extra_dirs);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 步骤 9：重启替换的"腾位立即替换"路径（目标未被占用时应直接成功）
+    #[test]
+    fn test_replace_on_reboot_immediate() {
+        let dir = std::env::temp_dir().join(format!("miedit-repl-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let t = dir.join("app.dll");
+        std::fs::write(&t, b"OLD-CONTENT").unwrap();
+        let r = schedule_replace_on_reboot(&t, b"NEW-CONTENT").unwrap();
+        assert!(r, "未被占用的目标应走腾位路径立即替换");
+        assert_eq!(std::fs::read(&t).unwrap(), b"NEW-CONTENT");
+        // 非 Windows 平台：调度删除不可用，走尽力删除路径，.miedel 不应残留；
+        // Windows：.miedel 已登记 PendingFileRenameOperations，重启前仍在磁盘上
+        #[cfg(not(windows))]
+        assert!(
+            !dir.join("app.dll.miedel").exists(),
+            ".miedel 旧文件残留未清理"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

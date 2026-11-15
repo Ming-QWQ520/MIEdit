@@ -16,8 +16,8 @@
 | 5 | install.log 落盘（LogSet） | NSIS `LogSet on` | **已完成**（v0.2.0） |
 | 6 | 安装器 EXE 版本信息资源（VERSIONINFO） | NSIS `VIProductVersion`/`VIAddVersionKey` | **已完成**（v0.3.0） |
 | 7 | 包完整性 CRC32 校验 + `--ncrc` 开关 | NSIS `CRCCheck`（fileform.h firstheader CRC） | **已完成**（v0.4.0） |
-| 8 | 覆盖失败重试交互（安装期文件被占用） | NSIS Retry/Ignore/Abort 文件对话框 | 待办 |
-| 9 | 安装期被占用文件重启替换 + "需要重启"完成页 | NSIS `SetRebootFlag` / Inno `restartreplace` | 待办 |
+| 8 | 覆盖失败重试交互（安装期文件被占用） | NSIS Retry/Ignore/Abort 文件对话框 | **已完成**（v0.5.0） |
+| 9 | 安装期被占用文件重启替换 + "需要重启"完成页 | NSIS `SetRebootFlag` / Inno `restartreplace` | **已完成**（v0.5.0） |
 | 10 | InstallTypes 安装类型（Typical/Full/Minimal/Custom） | NSIS `InstallTypes` / Inno `[Types]` | 待办 |
 | 11 | 组件页描述侧栏（组件联动描述面板） | NSIS `components.c` 描述框 | 待办 |
 | 12 | 最小系统版本门槛 | Inno `MinVersion`/`OnlyBelowVersion` | 待办 |
@@ -109,6 +109,19 @@
 
 ## 变更日志
 
+- v0.5.0（步骤 8–9）：**覆盖失败重试交互 + 安装期重启替换**（NSIS 文件错误对话框 /
+  `SetRebootFlag` 对齐）：安装写文件失败时按覆盖策略分流——`overwrite = try`
+  直接跳过（同 NSIS 语义）；其余策略在 GUI 中弹出「重试 / 忽略 / 中止」模态卡片
+  （egui 遮罩 + 卡片，安装暂停等待用户选择），重试循环、忽略记录日志并继续、
+  中止提示已写入文件去向（NSIS 中止不清除已写入文件）；静默模式无 GUI，
+  默认忽略并计划重启替换（无人值守升级尽量完成，留下可追溯日志）。
+  重启替换由 `miedit_core::winutil::schedule_replace_on_reboot` 承担：优先把被占用
+  旧文件**改名腾位**（`.miedel`）→ 立即写入新内容 → 旧文件调度重启删除
+  （`PendingFileRenameOperations`）；改名失败则旁路 `.mienew` +
+  `MoveFileExW(DELAY_UNTIL_REBOOT | REPLACE_EXISTING)` 计划重启时原子替换。
+  待替换文件记入卸载清单（保证可清理）并展示在完成页琥珀提示中
+  （"需要重启以完成安装"）。决策纯函数与「请求-应答」信箱下沉
+  `miedit_core::fileerror`（PromptChannel 协议不变量、处置映射等 10 项单测）。
 - v0.4.0（步骤 7）：**包完整性 CRC32 校验 + `--ncrc`**（NSIS `CRCCheck` 对齐）：
   包尾升级为 `MIEDPKG3`（116B：v2 范围表 + payload/config/uninstaller 三分区
   CRC32）；安装器启动时流式校验，失败报"安装包已损坏"并提示分区与期望/实际值；
