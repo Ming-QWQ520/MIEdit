@@ -64,9 +64,9 @@
 | **卸载器壁纸** | `install.uninstall_background` 配置卸载向导背景图（编译期内嵌进卸载器 EXE），全窗铺满 + 半透明遮罩；缺省内置渐变 |
 | **install.log** | NSIS `LogSet` 风格安装日志落盘到 `$INSTDIR\install.log`（`install.write_log` 可关） |
 | **包完整性校验** | NSIS `CRCCheck` 对齐：安装包尾写入 payload/config/uninstaller 三分区 CRC32（MIEDPKG3），启动时流式校验，损坏包报"安装包已损坏"；`--ncrc` / `/ncrc` 跳过；旧格式包仍可安装 |
-| 压缩 | `deflate`（条目级）或 `solid`（整包 Deflate，NSIS solid 风格，体积更小） |
+| 压缩 | 六档（NSIS `SetCompressor` 对齐 + 扩展，全部纯 Rust）：`deflate`（条目级）· `solid`（整包 Deflate）· `lzma` / `lzma-solid`（NSIS 旗舰 LZMA，tukaani xz-for-java 纯 Rust 移植）· `brotli` / `brotli-solid`（现代算法）；实测 lzma-solid 体积最小 |
 | Unicode | 中文路径 / 文件名 / UI 全支持 |
-| 纯 Rust | 无 C 构建链依赖（egui / flate2 / walkdir / winreg / windows-rs） |
+| 纯 Rust | 无 C 构建链依赖（egui / flate2 / brotli / lzma-rust / walkdir / winreg / windows-rs） |
 
 ## 快速开始
 
@@ -117,7 +117,7 @@ per_machine = false           # true = 每机器（HKLM + 公共开始菜单 + U
 
 [install]
 dir_template = "{autopf}\\{app_name}"      # 占位符：{autopf} {autopf86} {localappdata} {appdata} {desktop} {docs} {app_name}
-compression = "deflate"                    # deflate（条目级）| solid（整包 Deflate，体积更小）
+compression = "deflate"                    # deflate|solid|lzma|lzma-solid|brotli|brotli-solid（NSIS SetCompressor 对齐 + 扩展）
 overwrite = "on"                           # NSIS SetOverwrite：on（默认）| off | try | ifnewer
 write_log = true                           # 安装日志写入 $INSTDIR\\install.log（NSIS LogSet 风格）
 user_data_dirs = ["{appdata}\\{app_name}"] # 卸载时可勾选删除
@@ -208,11 +208,13 @@ crates/
 ## 测试
 
 ```bash
-cargo test --workspace    # 87 个单元测试：归档/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/文件错误决策与提示信箱/重启替换/安装类型状态机/系统版本门槛/目录统计/组件过滤映射/slug/语言匹配与 LANGID 映射/多语言文案解析链/修复入口与修复统计/包尾 v4 与卸载数据新旧格式/安装目录解析与根路径校验/盘符切换空间刷新回归/内置模板色板/CLI 组件参数解析
+cargo test --workspace    # 108 个单元测试：归档（含 LZMA/Brotli 压缩算法往返）/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/文件错误决策与提示信箱/重启替换/安装类型状态机/系统版本门槛/目录统计/组件过滤映射/slug/语言匹配与 LANGID 映射/多语言文案解析链/修复入口与修复统计/包尾 v4 与卸载数据新旧格式/安装目录解析与根路径校验/盘符切换空间刷新回归/内置模板色板/CLI 组件参数解析/压缩方式别名归一化
 ```
 
 已在 Windows 10 x64 实机验证：CLI 与 GUI 构建链路、静默安装/卸载全清理、组件过滤生效、
 默认图标链路（未配置自动内嵌）、solid 压缩（592KB→103KB）、升级检测、旧格式兼容。
+Linux 无头实机验证（#13）：6 种压缩档端到端构建 + 静默安装（退出码 0、逐字节一致）
++ install.log 落盘；体积排序 lzma-solid < brotli-solid < deflate-solid。
 
 ## License
 

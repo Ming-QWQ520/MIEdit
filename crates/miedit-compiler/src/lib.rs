@@ -13,7 +13,7 @@ pub const DEFAULT_INSTALL_ICON: &[u8] = include_bytes!("../assets/default-instal
 pub const DEFAULT_UNINSTALL_ICON: &[u8] = include_bytes!("../assets/default-uninstall.ico");
 
 use anyhow::{bail, Context, Result};
-use miedit_core::archive::ArchiveWriter;
+use miedit_core::archive::{Algo, ArchiveWriter};
 use miedit_core::config::Config;
 use miedit_core::files;
 use miedit_core::trailer::{self, Range, Trailer};
@@ -462,18 +462,22 @@ pub fn build_package(
         }
     };
 
-    // 9. 压缩方式（NSIS 风格 solid 整包压缩 或 条目级 deflate）
-    //    注：纯 Rust 生态暂无成熟 LZMA 编码器（lzma-rs 0.3 的编码器为存根，见
-    //    docs/lessons-from-nsis-inno.md），solid 模式采用整包 Deflate + 条目原样存储。
-    let compression = match cfg.install.compression.trim().to_ascii_lowercase().as_str() {
-        "" | "deflate" => "deflate".to_string(),
-        "solid" | "deflate-solid" | "zlib-solid" => "solid".to_string(),
-        other => bail!(
-            "未知压缩方式 \"{}\"（支持: deflate, solid）",
-            other
-        ),
-    };
+    // 9. 压缩方式（NSIS SetCompressor 对齐：zlib/lzma(+solid)；扩展 brotli(+solid)，全部纯 Rust）
+    //    注：LZMA 用 lzma-rust（tukaani xz-for-java 纯 Rust 移植，sevenz-rust 同源），
+    //    此前评估的 lzma-rs 0.3 编码器为存根不可用（见 docs/lessons-from-nsis-inno.md）。
+    let compression =
+        miedit_core::archive::normalize_compression(&cfg.install.compression)?.to_string();
     cfg.install.compression = compression.clone();
+    // solid = 整包压缩（条目原样存储后整包压缩，NSIS solid 做法）；否则条目级压缩
+    let (solid, entry_algo): (bool, Algo) = match compression.as_str() {
+        "deflate" => (false, Algo::Deflate),
+        "solid" => (true, Algo::Deflate),
+        "lzma" => (false, Algo::Lzma),
+        "lzma-solid" => (true, Algo::Lzma),
+        "brotli" => (false, Algo::Brotli),
+        "brotli-solid" => (true, Algo::Brotli),
+        _ => unreachable!("normalize_compression 已保证规范值"),
+    };
 
     // 覆盖模式校验（NSIS SetOverwrite：on/off/try/ifnewer，默认 on）
     let overwrite = match cfg.install.overwrite.trim().to_ascii_lowercase().as_str() {
@@ -494,8 +498,7 @@ pub fn build_package(
     f.write_all(&base_bytes)?;
     let payload_off = f.stream_position()?;
 
-    // 先在内存中构建归档：deflate 模式条目级压缩；solid 模式条目原样存储、整包 Deflate 压缩
-    let solid = compression == "solid";
+    // 先在内存中构建归档：条目级模式按所选算法逐条压缩；solid 模式条目原样存储、整包压缩
     let mut archive: Vec<u8> = Vec::with_capacity((total_orig as usize).min(1 << 30));
     let archive_file_count = collected.iter().filter(|c| !c.is_dir).count() as u64;
     {
@@ -509,7 +512,7 @@ pub fn build_package(
                 if solid {
                     w.add_file_stored(&c.arc_path, &data)?;
                 } else {
-                    w.add_file(&c.arc_path, &data)?;
+                    w.add_file_with_algo(&c.arc_path, &data, entry_algo)?;
                 }
             }
         }
@@ -517,11 +520,8 @@ pub fn build_package(
     }
 
     let payload_bytes: Vec<u8> = if solid {
-        use flate2::read::DeflateEncoder;
-        use std::io::Read as _;
-        progress("压缩: Deflate solid（整包，NSIS 风格）...");
-        let mut out = Vec::new();
-        DeflateEncoder::new(&archive[..], flate2::Compression::best()).read_to_end(&mut out)?;
+        progress(&format!("压缩: {} solid（整包，NSIS 风格）...", entry_algo.label()));
+        let out = miedit_core::archive::compress_bytes(entry_algo, &archive)?;
         progress(&format!(
             "压缩完成: {} → {}（{}%）",
             miedit_core::util::human_size(archive.len() as u64),

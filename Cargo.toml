@@ -9,7 +9,8 @@ members = [
 ]
 
 [workspace.package]
-version = "0.13.0"
+# 版本固定为 0.1.0（用户指令 2026-11-18：自 #13 批次起不再随功能对齐批次递增）
+version = "0.1.0"
 edition = "2021"
 
 [profile.release]

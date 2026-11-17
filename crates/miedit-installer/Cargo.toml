@@ -10,7 +10,6 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-flate2 = "1"
 eframe = "=0.29.1"
 image = { version = "0.25", default-features = false, features = [
     "png", "jpeg", "ico", "bmp", "webp", "gif", "tga", "tiff",

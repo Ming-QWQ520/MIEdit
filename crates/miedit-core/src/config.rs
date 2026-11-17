@@ -104,7 +104,9 @@ pub struct InstallConfig {
     /// 用户数据/配置目录模板（如 `{appdata}\\{app_name}`）：
     /// 安装时解析并写入卸载清单，安装时不删除；卸载确认页可勾选删除
     pub user_data_dirs: Vec<String>,
-    /// 压缩方式：`deflate`（条目级）或 `solid`（NSIS 风格整包压缩）
+    /// 压缩方式（NSIS SetCompressor 对齐 + 扩展，全部纯 Rust）：
+    /// `deflate`（条目级）| `solid`（整包 Deflate，NSIS solid 风格）| `lzma`（条目级）| 
+    /// `lzma-solid`（整包 LZMA，NSIS 默认风格）| `brotli`（条目级）| `brotli-solid`（整包）
     pub compression: String,
     /// 文件覆盖策略（NSIS SetOverwrite）：`on`（默认）| `off` | `try` | `ifnewer`
     pub overwrite: String,

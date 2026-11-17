@@ -33,6 +33,7 @@
 | 22 | 注册表全类型 + 32/64 视图 + 卸载精确清理 | NSIS `WriteRegDWORD/WriteRegBin/WriteRegExpandStr/WriteRegMultiSz/SetRegView` | **已完成**（v0.13.0） |
 | 23 | 安装前/后 + 卸载前自定义命令（ExecWait） | NSIS `Exec`/`ExecWait` / Inno `[Run]` 前后段 | **已完成**（v0.13.0） |
 | 24 | 组件分组树（SectionGroup） | NSIS `SectionGroup`/`SectionGroupEnd` | **已完成**（v0.13.0） |
+| 25 | 压缩格式扩充：LZMA/LZMA-solid/Brotli/Brotli-solid + 版本号固定 0.1.0 | NSIS `SetCompressor` zlib/lzma(+solid) / Inno 压缩可插拔 | **已完成**（0.1.0，#13） |
 
 ## 迭代步骤定义
 
@@ -102,6 +103,11 @@
   无成熟 zstd 编码器实现；官方 `zstd` crate 是 C 绑定（cc 构建 libzstd），
   违反工程约束 1（不引入 C 构建链）。待纯 Rust 编码器（如 zstd-rs 类项目）
   发布稳定版本后再接入。转向步骤 17 继续。
+- **补充**（2026-11-18，#13）：① LZMA 侧已用 **lzma-rust 0.1.7**（tukaani
+  xz-for-java 纯 Rust 移植，sevenz-rust 同源，自带 encoder）解阻，
+  `lzma`/`lzma-solid` 已落地（步骤 25）；② **bzip2 同样阻塞**——
+  `bzip2-rs` 仅有解码器，`bzip2` crate 是 C 绑定；③ zstd 维持阻塞。
+  NSIS 三档中 zlib/lzma 已纯 Rust 对齐，仅 bzip2 待生态成熟。
 
 ### 步骤 17：ARP ModifyPath/修复入口（已实现，v0.9.0）
 - **设计**：卸载注册表键写 `ModifyPath = "<安装器路径>" --repair`；安装器解析
@@ -221,7 +227,24 @@
   builder 组件卡片加 group 输入框。
 - **验收**：建树/联动/折叠单测；双平台 check 0 error。
 
-## 工程约束（每次迭代都要遵守）
+### 步骤 25：压缩格式扩充（NSIS SetCompressor 对齐 + 扩展）+ 版本号固定
+- **做什么**：用户指令「增加更多压缩格式 + 版本固定为 0.1.0」：
+  ① `install.compression` 从 2 档扩到 6 档：`deflate` / `solid`（原有）+
+  **`lzma` / `lzma-solid`**（NSIS 旗舰 LZMA，`lzma-rust 0.1.7` 纯 Rust 编解码）+
+  **`brotli` / `brotli-solid`**（`brotli` crate 纯 Rust 编解码）；
+  ② 归档条目标志位扩展：bit2=brotli、bit3=lzma（bit0/bit1 不变，旧包兼容）；
+  ③ 压缩/解压纯函数下沉 `miedit_core::archive`（`Algo` 枚举 +
+  `compress_bytes`/`decompress_bytes` + `normalize_compression` 别名归一化），
+  编译器与安装器共用，commonly 移除两 crate 对 flate2 的直接依赖；
+  ④ builder 压缩下拉 6 选项 + 预览摘要同步；⑤ workspace 版本 0.13.0
+  → **0.1.0 固定**（协议第 6 条修订：不再随批次递增）。
+- **实现**：LZMA 用 header 自述格式（`LZMAWriter::new_use_header` 编码 ↔
+  `LZMAReader::new_mem_limit` 解码），preset 6（8MB 字典）；Brotli quality 9。
+  新增 6 项单测（三算法条目级/整包往返、压缩比对照、别名归一化、
+  旧标志位兼容锚点）。
+- **验收**：core 108 项全过；双平台 check 0 error；Linux 实机 6 档端到端
+  （构建 + 静默安装退出码 0 + payload 逐字节一致 + install.log）；
+  体积排序 lzma-solid < lzma < brotli-solid < brotli < deflate ≈ solid。
 
 1. **纯 Rust**：不引入 C 构建链；新增依赖须在 Windows/Linux 双平台可编译。
 2. **向后兼容**：旧格式安装包/卸载清单必须仍可处理（serde default / magic 回退）。
@@ -230,9 +253,30 @@
 4. **小步提交**：一次迭代一个步骤，提交信息格式
    `feat: NSIS 对齐 #N — <内容>`（作者：Ming-QWQ520 <192413597+Ming-QWQ520@users.noreply.github.com>）。
 5. **文档同步**：完成步骤后更新本文件状态表、README 特性表与 lessons 文档。
-6. **版本号**：功能对齐批次完成后递增 `Cargo.toml` workspace version。
+6. **版本号**：**固定为 0.1.0**（用户指令 2026-11-18，自 #13 批次起生效，
+   不再随功能对齐批次递增；历史批次 v0.2.0–v0.13.0 保留原版本号记录）。
 
 ## 变更日志
+
+- 0.1.0（步骤 25，#13 — 版本号自此固定）：**压缩格式扩充**（NSIS
+  `SetCompressor` 对齐 + 扩展，全部纯 Rust）：`install.compression`
+  从 2 档扩到 **6 档**——`deflate`（条目级）/ `solid`（整包 Deflate，
+  NSIS solid 风格，原有）+ **`lzma` / `lzma-solid`**（NSIS 旗舰 LZMA：
+  `lzma-rust 0.1.7`，tukaani xz-for-java 纯 Rust 移植，sevenz-rust
+  同源自带 encoder，preset 6/8MB 字典；此前评估的 lzma-rs 0.3 编码器
+  为存根不可用）+ **`brotli` / `brotli-solid`**（brotli crate 纯 Rust，
+  quality 9）。归档条目标志位扩展 bit2=brotli、bit3=lzma（bit0/bit1
+  不变，旧包兼容，未知标志报错并提示需新版安装器）；压缩/解压纯函数
+  下沉 `miedit_core::archive`（`Algo` 枚举 + `compress_bytes`/
+  `decompress_bytes` + `normalize_compression` 别名归一化，编译器与
+  安装器共用，两 crate 移除 flate2 直接依赖）；安装器 solid 解压按
+  配置分派三算法；builder 压缩下拉 6 选项 + 预览同步。新增 6 项单测
+  （三算法条目级/整包往返、压缩比对照锁定价值、别名归一化、旧标志
+  兼容锚点），core 108 项全过；双平台 check 0 error；Linux 实机 6 档
+  端到端（构建 + 静默安装退出码 0 + payload 逐字节一致 + install.log），
+  体积排序 lzma-solid < lzma < brotli-solid < brotli < deflate ≈ solid。
+  **版本号固定 0.1.0**（用户指令：自本批次起不再递增，协议第 6 条
+  已修订；`miedit_core::VERSION` 随 CARGO_PKG_VERSION 自动生效）。
 
 - v0.13.0（步骤 22–24）：**注册表全类型与精确卸载清理 + ExecWait 自定义
   命令 + 组件分组树**（NSIS 成熟度对齐批次）：
