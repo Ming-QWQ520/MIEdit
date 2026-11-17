@@ -53,6 +53,10 @@
 | **快捷方式增强** | Inno `[Icons]` 对齐：`[[shortcuts.entries]]` 自定义名称/子目录/参数/图标/工作目录/描述，位置多选（开始菜单/桌面/快速启动栏），与简单开关叠加兼容 |
 | **最小系统版本门槛** | Inno `MinVersion` 对齐：`install.min_version`，RtlGetVersion 取真实版本（不受兼容性垫片影响），低于门槛启动即拒 |
 | **多语言向导** | NSIS MUI2 `MUI_LANGUAGE` 对齐：`[[ui.languages]]` 语言包（id + 显示名 + 文案覆盖），内置 zh-CN / en-US 双语包，>1 语言时欢迎页前显示语言选择页，按系统 UI 语言自动预选；`ui.text` 仍是最高优先级单键覆盖 |
+| **卸载器多语言** | NSIS `MUI_UNPAGE_LANGUAGE` 对齐：语言包随卸载清单内嵌，>1 语言时卸载器先显示语言选择页；确认/进度/完成/日志全部随语言切换（旧包无语言包 → 保持中文，行为不变） |
+| **环境变量** | NSIS WriteEnvStr 惯例 / Inno ChangesEnvironment 对齐：`[[install.env]]` 写 HKCU/HKLM 环境区，`path_append`/`path_prepend` 按 `;` 列表去重合并，写入后广播 `WM_SETTINGCHANGE`（无需注销）；卸载精确清理：PATH 只移除本安装写入的段，直接设值还原安装前原值 |
+| **卸载器多语言** | NSIS `MUI_UNPAGE_LANGUAGE` 对齐：语言包随卸载清单内嵌，>1 语言时卸载器先显示语言选择页；确认/进度/完成/日志全部随语言切换（旧包无语言包 → 保持中文，行为不变） |
+| **环境变量** | NSIS WriteEnvStr 惯例 / Inno ChangesEnvironment 对齐：`[[install.env]]` 写 HKCU/HKLM 环境区，`path_append`/`path_prepend` 按 `;` 列表去重合并，写入后广播 `WM_SETTINGCHANGE`（无需注销）；卸载精确清理：PATH 只移除本安装写入的段，直接设值还原安装前原值 |
 | **卸载统计** | NSIS 卸载完成统计对齐：完成页展示已删除文件数/目录数/释放空间（含用户数据目录递归统计） |
 | **覆盖失败重试交互** | NSIS 文件错误对话框对齐：安装中文件被占用写不进时弹出「重试 / 忽略 / 中止」模态卡片——重试循环、忽略记录日志并继续、中止说明已写入文件去向；静默模式自动忽略并计划重启替换 |
 | **安装期重启替换** | NSIS `SetRebootFlag` / Inno `restartreplace` 对齐：被占用文件先改名腾位立即写入新内容，旧文件调度重启删除（`PendingFileRenameOperations`）；完成页琥珀提示“需要重启以完成安装”并列出文件 |
@@ -123,6 +127,18 @@ write_log = true                           # 安装日志写入 $INSTDIR\\instal
 user_data_dirs = ["{appdata}\\{app_name}"] # 卸载时可勾选删除
 uninstall_icon = "uninstall.ico"           # 可选；缺省使用内置 modern-uninstall.ico
 min_version = "6.1"                        # 可选；最低系统版本门槛（如 6.1 = Win7，10.0 = Win10）
+
+[[install.env]]               # NSIS WriteEnvStr 惯例 / Inno ChangesEnvironment（可选）
+name = "MIEDIT_HOME"          # 变量名
+value = "{install_dir}"       # 值（{install_dir} 可用）
+part = "all"                  # all 直接设值 | path_append 追加 | path_prepend 前置（";" 列表去重）
+scope = "user"                # user（HKCU，默认）| machine（HKLM，需管理员）
+
+[[install.env]]
+name = "Path"
+value = "{install_dir}"
+part = "path_append"          # 卸载时只移除本安装写入的段，不动其他软件的段
+scope = "user"
 
 [[install.run_tasks]]         # Inno [Run] 风格：完成页复选框
 name = "运行 {app}"
@@ -208,7 +224,7 @@ crates/
 ## 测试
 
 ```bash
-cargo test --workspace    # 108 个单元测试：归档（含 LZMA/Brotli 压缩算法往返）/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/文件错误决策与提示信箱/重启替换/安装类型状态机/系统版本门槛/目录统计/组件过滤映射/slug/语言匹配与 LANGID 映射/多语言文案解析链/修复入口与修复统计/包尾 v4 与卸载数据新旧格式/安装目录解析与根路径校验/盘符切换空间刷新回归/内置模板色板/CLI 组件参数解析/压缩方式别名归一化
+cargo test --workspace    # 119 个单元测试：归档（含 LZMA/Brotli 压缩算法往返）/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/文件错误决策与提示信箱/重启替换/安装类型状态机/系统版本门槛/目录统计/组件过滤映射/slug/语言匹配与 LANGID 映射/多语言文案解析链/卸载器文案键集与解析链/环境变量解析与 PATH 合并去重/卸载清单新旧兼容/修复入口与修复统计/包尾 v4 与卸载数据新旧格式/安装目录解析与根路径校验/盘符切换空间刷新回归/内置模板色板/CLI 组件参数解析/压缩方式别名归一化
 ```
 
 已在 Windows 10 x64 实机验证：CLI 与 GUI 构建链路、静默安装/卸载全清理、组件过滤生效、

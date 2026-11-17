@@ -39,6 +39,13 @@ pub struct UninstallManifest {
     pub installed_at: u64,
     /// 卸载前执行命令（步骤 23；安装器从脚本复制，卸载器删除阶段前执行）
     pub exec_before_uninstall: Vec<crate::config::RunCommandSpec>,
+    /// 语言包副本（步骤 26，NSIS un MUI 对齐）：安装器把 `ui.languages`
+    /// 随清单内嵌/落盘；多于一个时卸载器先显示语言选择页（单语言直接
+    /// 使用；旧清单无此字段 → 空 → 回退内置 zh-CN，行为不变）
+    pub languages: Vec<crate::config::LanguageSpec>,
+    /// 环境变量清理引用（步骤 27）：`created_value` = 安装时新建的值
+    /// （卸载时直接删除）；否则若 `path_segment` 非空则从列表中移除该段后回写
+    pub env_values: Vec<EnvCleanupRef>,
 }
 
 /// 单条自定义注册表值的清理引用（步骤 22）。
@@ -59,6 +66,41 @@ impl Default for RegistryValueRef {
             key: String::new(),
             name: String::new(),
             created_key: false,
+        }
+    }
+}
+
+/// 单条环境变量的清理引用（步骤 27，NSIS WriteEnvStr 惯例 / Inno
+/// ChangesEnvironment 对齐）。按写入方式二分：
+/// - `path_segment` 非空：PATH 式合并写入 → 卸载时从 `;` 列表中**移除该段**后
+///   回写（ASCII 不区分大小写，[`crate::envspec`]；只删自己的段，不误伤其他
+///   软件后来写入的段）；移除后为空且安装前不存在 → 删除整个值；
+/// - `path_segment` 为空（`all` 直接设值）：`existed = false`（安装前变量不存在，
+///   本次新建）→ 卸载时删除整个值；`existed = true` → 卸载时回写
+///   `previous_value`（还原安装前的原值）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EnvCleanupRef {
+    /// 变量名
+    pub name: String,
+    /// true = 机器级（HKLM 环境区，卸载需管理员）；false = 用户级（HKCU）
+    pub machine: bool,
+    /// PATH 式合并写入时记录的展开后路径段（`all` 写入为空）
+    pub path_segment: String,
+    /// `all` 写入时：安装前该变量是否已存在
+    pub existed: bool,
+    /// `all` 写入时安装前的原值（卸载时还原；`existed = false` 时为空并删除整个值）
+    pub previous_value: String,
+}
+
+impl Default for EnvCleanupRef {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            machine: false,
+            path_segment: String::new(),
+            existed: false,
+            previous_value: String::new(),
         }
     }
 }

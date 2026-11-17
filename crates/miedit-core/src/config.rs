@@ -132,6 +132,10 @@ pub struct InstallConfig {
     /// 卸载前执行命令（如停服务/关闭进程，路线图步骤 23）：
     /// 失败不中止卸载（占用文件走重试/重启删除路径），仅记录错误
     pub exec_before_uninstall: Vec<RunCommandSpec>,
+    /// 环境变量写入（NSIS WriteEnvStr 惯例 / Inno ChangesEnvironment 对齐，路线图
+    /// 步骤 27）：安装时写 HKCU/HKLM 环境区并广播 WM_SETTINGCHANGE，卸载时按
+    /// 清单精确清理（新建值删除、PATH 段移除回写）
+    pub env: Vec<EnvSpec>,
 }
 
 impl Default for InstallConfig {
@@ -151,6 +155,38 @@ impl Default for InstallConfig {
             exec_before: Vec::new(),
             exec_after: Vec::new(),
             exec_before_uninstall: Vec::new(),
+            env: Vec::new(),
+        }
+    }
+}
+
+/// 单条环境变量写入（NSIS WriteEnvStr 惯例 / Inno ChangesEnvironment 对齐，路线图
+/// 步骤 27）。安装时写入 Windows 环境区（用户 = HKCU\Environment，机器 =
+/// HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment），
+/// 写入后广播 WM_SETTINGCHANGE（新进程立即可见，无需注销）；卸载时按清单精确清理。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EnvSpec {
+    /// 变量名（如 `PATH` / `JAVA_HOME`，不含 `=` 或 `%`）
+    pub name: String,
+    /// 值；支持 `{install_dir}` / `{app}` 模板。`part = "all"` 时整体设值；
+    /// `path_append` / `path_prepend` 时必须是**单个路径段**（不能含 `;`）
+    pub value: String,
+    /// 写入方式：`all`（直接设值，默认）| `path_append`（追加到现有列表）|
+    /// `path_prepend`（前置到现有列表）——后两者按 `;` 列表语义去重合并
+    /// （NSIS WriteEnvStr / Inno PATH 编辑惯例）
+    pub part: String,
+    /// 作用域：`user`（HKCU，无需管理员，默认）| `machine`（HKLM，需管理员）
+    pub scope: String,
+}
+
+impl Default for EnvSpec {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            value: String::new(),
+            part: "all".into(),
+            scope: "user".into(),
         }
     }
 }
@@ -489,8 +525,18 @@ pub fn resolved_text(cfg: &Config, lang: Option<usize>, key: &str) -> String {
     if let Some(v) = cfg.ui.text.get(key) {
         return v.clone();
     }
+    resolve_lang_text(&cfg.ui.languages, lang, key)
+}
+
+/// 语言包维度的文案解析（`resolved_text` 的底层链，供安装器与卸载器共用）。
+/// `ui.text` 作者强制覆盖之外的四段链：语言包 text > 内置包 > 英文默认。
+pub fn resolve_lang_text(
+    languages: &[LanguageSpec],
+    lang: Option<usize>,
+    key: &str,
+) -> String {
     if let Some(i) = lang {
-        if let Some(spec) = cfg.ui.languages.get(i) {
+        if let Some(spec) = languages.get(i) {
             if let Some(v) = spec.text.get(key) {
                 return v.clone();
             }
@@ -505,6 +551,84 @@ pub fn resolved_text(cfg: &Config, lang: Option<usize>, key: &str) -> String {
         Some(s) => s.to_string(),
         None => key.to_string(),
     }
+}
+
+/// 卸载器文案解析（路线图步骤 26，NSIS un MUI 对齐）。
+///
+/// - 旧清单（无语言包，`languages` 为空）：回退内置 zh-CN 包——历史卸载器
+///   文案为中文硬编码，保持旧包行为完全不变；
+/// - 新清单（有语言包）：与安装器 [`resolve_lang_text`] 同链——语言包 text >
+///   按语言 id 匹配的内置包 > 英文默认表（卸载器语言跟随安装语言，NSIS 语义）。
+pub fn resolve_uninstall_text(
+    languages: &[LanguageSpec],
+    lang_idx: Option<usize>,
+    key: &str,
+) -> String {
+    if languages.is_empty() {
+        if let Some((_, v)) = crate::langs::ZH_CN.texts.iter().find(|(k, _)| *k == key) {
+            return (*v).to_string();
+        }
+    }
+    resolve_lang_text(languages, lang_idx, key)
+}
+
+/// 卸载器专用文案键（步骤 26；`default_text` 与内置 zh-CN 包均含全部键，
+/// 键集一致性测试守护）。卸载器据此构建全量文案快照。
+pub static UNINSTALL_TEXT_KEYS: &[&str] = &[
+    "un_window_title",
+    "un_confirm_title",
+    "un_confirm_body",
+    "un_running_warning",
+    "un_recheck",
+    "un_delete_user_data",
+    "un_btn_uninstall",
+    "un_btn_next",
+    "un_btn_cancel",
+    "un_btn_finish",
+    "un_btn_close",
+    "un_working_title",
+    "un_progress_items",
+    "un_summary_title",
+    "un_stats",
+    "un_reboot_note",
+    "un_done_body",
+    "un_done_reboot_body",
+    "un_failed_title",
+    "un_language_title",
+    "un_language_desc",
+    "un_error_admin",
+    "un_log_start",
+    "un_log_running_warning",
+    "un_log_reboot_pending",
+    "un_log_cmd_label",
+    "un_log_exec",
+    "un_log_cmd_failed",
+    "un_log_reboot_scheduled",
+    "un_log_delete",
+    "un_log_reboot_delete",
+    "un_log_remove_dir",
+    "un_log_del_file_failed",
+    "un_log_del_shortcut_failed",
+    "un_log_del_shortcut_dir_failed",
+    "un_log_del_user_data",
+    "un_log_reg_value",
+    "un_log_reg_key",
+    "un_log_uninstall_reg",
+    "un_log_env",
+    "un_log_env_path",
+    "un_log_done",
+    "un_log_done_errors",
+    "un_silent_stderr",
+];
+
+/// 校验卸载器文案键集完整性：UNINSTALL_TEXT_KEYS 必须被英文默认表
+/// 与内置 zh-CN 包全部覆盖（编译期防漂移，运行期不调用）。
+#[doc(hidden)]
+pub fn uninstall_text_keys_covered() -> bool {
+    UNINSTALL_TEXT_KEYS.iter().all(|k| {
+        default_text(k).is_some()
+            && crate::langs::ZH_CN.texts.iter().any(|(zk, _)| *zk == *k)
+    })
 }
 
 /// 内置默认 UI 文案表（英文基调）；未知键返回 None。
@@ -619,9 +743,182 @@ pub static DEFAULT_TEXT_KEYS: &[(&str, &str)] = &[
         ("nav_dir", "Install Location"),
         ("nav_install", "Install"),
         ("nav_finish", "Finish"),
+        // 步骤 26：卸载器多语言（NSIS un MUI 对齐）——卸载器全部 UI 与日志文案。
+        // 占位符约定：{app} 应用名 / {version} 版本 / {dir} 目录 / {exe} 主程序
+        // / {file} 文件 / {count} 数量 / {files} {dirs} {size} 卸载统计 / {done} {total}
+        // 进度 / {label} 命令标签 / {reason} 原因 / {err} {rerr} 错误 / {path} 路径
+        // / {name} 变量名 / {segment} PATH 段
+        ("un_window_title", "Uninstall {app}"),
+        ("un_confirm_title", "Uninstall {app}"),
+        (
+            "un_confirm_body",
+            "This will remove {app} {version} and all of its components from your computer.\nInstall folder: {dir}",
+        ),
+        (
+            "un_running_warning",
+            "{app} appears to be running. It is recommended to close it before uninstalling.\nFiles in use will be deleted after a reboot.",
+        ),
+        ("un_recheck", "Re-check"),
+        ("un_delete_user_data", "Also delete user data and settings"),
+        ("un_btn_uninstall", "Uninstall"),
+        ("un_btn_next", "Next"),
+        ("un_btn_cancel", "Cancel"),
+        ("un_btn_finish", "Finish"),
+        ("un_btn_close", "Close"),
+        ("un_working_title", "Uninstalling {app}"),
+        ("un_progress_items", "{done} / {total} items"),
+        ("un_summary_title", "{app} was successfully uninstalled"),
+        (
+            "un_stats",
+            "Removed {files} file(s) and {dirs} folder(s), freed {size}",
+        ),
+        ("un_reboot_note", "{count} file(s) will be deleted after the system restarts."),
+        (
+            "un_done_body",
+            "After closing this window, the uninstaller will clean up its own files.",
+        ),
+        (
+            "un_done_reboot_body",
+            "{count} file(s) were in use and are scheduled for deletion after reboot; the cleanup will finish then.",
+        ),
+        ("un_failed_title", "Uninstall Problem"),
+        ("un_language_title", "Select Uninstall Language"),
+        ("un_language_desc", "Please select the language used by this uninstaller."),
+        ("un_error_admin", "Administrator privileges are required to uninstall this installation."),
+        ("un_log_start", "Starting uninstall of {app}"),
+        (
+            "un_log_running_warning",
+            "Warning: main program {exe} may be running; locked files will be deleted after reboot",
+        ),
+        (
+            "un_log_reboot_pending",
+            "Note: {count} file(s) will be deleted after the system restarts",
+        ),
+        ("un_log_cmd_label", "pre-uninstall command #{n}"),
+        ("un_log_exec", "Running {label}: {cmd}"),
+        (
+            "un_log_cmd_failed",
+            "{label} failed: {reason} (ignored, continuing uninstall)",
+        ),
+        (
+            "un_log_reboot_scheduled",
+            "Scheduled for deletion after reboot (file in use): {file}",
+        ),
+        ("un_log_delete", "Deleting {file}"),
+        ("un_log_reboot_delete", "Reboot-delete {file}"),
+        ("un_log_remove_dir", "Removing folder {dir}"),
+        ("un_log_del_file_failed", "Delete failed: {err}; scheduling reboot deletion also failed: {rerr}"),
+        ("un_log_del_shortcut_failed", "Failed to delete shortcut: {path}"),
+        ("un_log_del_shortcut_dir_failed", "Failed to delete shortcut folder: {path}"),
+        ("un_log_del_user_data", "Deleting user data {path}"),
+        ("un_log_reg_value", "Removing registry value {key}"),
+        ("un_log_reg_key", "Removing registry key {key}"),
+        ("un_log_uninstall_reg", "Removing uninstall registry information"),
+        ("un_log_env", "Removing environment variable {name}"),
+        ("un_log_env_path", "Removing {segment} from {name}"),
+        ("un_log_done", "Uninstall complete"),
+        (
+            "un_log_done_errors",
+            "Uninstall finished with {count} item(s) that could not be removed",
+        ),
+        (
+            "un_silent_stderr",
+            "Uninstall finished with {count} error(s) (see log)",
+        ),
     ];
 
 /// 将文案中的 `{app}` / `{version}` 替换为实际值。
 pub fn fill_template(s: &str, app: &str, version: &str) -> String {
     s.replace("{app}", app).replace("{version}", version)
+}
+
+// ---------------------------------------------------------------------------
+// 测试（步骤 26/27：卸载器多语言键集、解析链、清单新旧兼容）
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod step_tests {
+    use super::*;
+    use crate::manifest::{EnvCleanupRef, UninstallManifest};
+
+    /// 卸载器专用键必须被英文默认表与内置 zh-CN 包同时覆盖（防漂移）。
+    #[test]
+    fn uninstall_text_keys_are_covered() {
+        assert!(uninstall_text_keys_covered());
+        // UNINSTALL_TEXT_KEYS 无重复
+        let mut keys: Vec<&str> = UNINSTALL_TEXT_KEYS.to_vec();
+        keys.sort();
+        let n = keys.len();
+        keys.dedup();
+        assert_eq!(keys.len(), n, "UNINSTALL_TEXT_KEYS 存在重复键");
+    }
+
+    /// 旧清单（无语言包）→ 卸载器回退内置 zh-CN（历史中文文案行为不变）。
+    #[test]
+    fn resolve_uninstall_text_falls_back_to_zh() {
+        let t = resolve_uninstall_text(&[], None, "un_confirm_title");
+        assert_eq!(t, "卸载 {app}");
+        // 未知键回退键名
+        assert_eq!(resolve_uninstall_text(&[], None, "nonexistent_key"), "nonexistent_key");
+    }
+
+    /// 解析链优先级：语言包 text > 按语言 id 匹配内置包 > 英文默认表；
+    /// zh-CN 语言包命中内置中文包。
+    #[test]
+    fn resolve_uninstall_text_chain() {
+        let mut pack = LanguageSpec::default();
+        pack.id = "en-US".into();
+        pack.name = "English".into();
+        pack.text.insert("un_confirm_title".into(), "Custom Title".into());
+        let mut zh = LanguageSpec::default();
+        zh.id = "zh-CN".into();
+        zh.name = "简体中文".into();
+        let langs = vec![pack.clone(), zh];
+        // 0. 语言包覆盖
+        assert_eq!(resolve_uninstall_text(&langs, Some(0), "un_confirm_title"), "Custom Title");
+        // 1. zh-CN 包按 id 命中内置中文包
+        assert_eq!(resolve_uninstall_text(&langs, Some(1), "un_confirm_title"), "卸载 {app}");
+        // 2. en-US 无覆盖 → 内置 en-US 空表 → 英文默认表
+        assert_eq!(resolve_uninstall_text(&langs, Some(0), "un_btn_next"), "Next");
+        // 3. 越界索引 → 回退英文默认表
+        assert_eq!(resolve_uninstall_text(&langs, Some(9), "un_btn_next"), "Next");
+    }
+
+    /// 清单新字段（languages/env_values）往返；旧 JSON（无新字段）→ serde default 兼容。
+    #[test]
+    fn manifest_new_fields_roundtrip_and_old_compat() {
+        let m = UninstallManifest {
+            app_name: "App".into(),
+            languages: vec![LanguageSpec::default()],
+            env_values: vec![EnvCleanupRef {
+                name: "Path".into(),
+                machine: false,
+                path_segment: "C:\\Apps\\App".into(),
+                existed: true,
+                previous_value: String::new(),
+            }],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        let back: UninstallManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.languages.len(), 1);
+        assert_eq!(back.env_values.len(), 1);
+        assert_eq!(back.env_values[0].path_segment, "C:\\Apps\\App");
+        // 旧清单 JSON（无 languages/env_values 字段）
+        let old = r#"{"app_name":"Old","files":[]}"#;
+        let old_m: UninstallManifest = serde_json::from_str(old).unwrap();
+        assert!(old_m.languages.is_empty());
+        assert!(old_m.env_values.is_empty());
+    }
+
+    /// EnvSpec serde default 兼容（旧脚本无 env 字段 / 缺省 part/scope）。
+    #[test]
+    fn env_spec_defaults() {
+        let e: EnvSpec = serde_json::from_str(r#"{"name":"X","value":"1"}"#).unwrap();
+        assert_eq!(e.part, "all");
+        assert_eq!(e.scope, "user");
+        let cfg_json = r#"{"app":{"name":"A"},"install":{}}"#;
+        let c: Config = serde_json::from_str(cfg_json).unwrap();
+        assert!(c.install.env.is_empty());
+    }
 }

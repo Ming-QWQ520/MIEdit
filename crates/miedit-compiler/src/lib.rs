@@ -278,6 +278,38 @@ pub fn build_package(
         }
     }
 
+    // 5.2.3 校验环境变量项（步骤 27：NSIS WriteEnvStr 惯例 / Inno
+    // ChangesEnvironment 对齐，与安装期同一套纯函数）
+    {
+        let mut seen: std::collections::BTreeSet<(String, bool)> = Default::default();
+        for (i, e) in cfg.install.env.iter().enumerate() {
+            let label = format!("[[install.env]] #{}", i + 1);
+            let entry = miedit_core::envspec::resolve_entry(e, "", "").map_err(|err| anyhow::anyhow!("{label} {err}"))?;
+            if e.name.trim().contains('=') || e.name.trim().contains('%') {
+                bail!("{label} name 不能包含 '=' 或 '%'");
+            }
+            if e.value.trim().is_empty() {
+                bail!("{label} 缺少 value");
+            }
+            if matches!(
+                entry.part,
+                miedit_core::envspec::EnvPart::PathAppend | miedit_core::envspec::EnvPart::PathPrepend
+            ) && e.value.contains(';')
+            {
+                bail!(
+                    "{label} path_append/path_prepend 的 value 必须是单个路径段（不能包含 ';'，如需多段请写多条）"
+                );
+            }
+            if !seen.insert((entry.name.clone(), entry.machine)) {
+                bail!(
+                    "{label} 变量 \"{}\"（{}作用域）重复声明；同一变量请合并为一条",
+                    entry.name,
+                    if entry.machine { "机器" } else { "用户" }
+                );
+            }
+        }
+    }
+
     // 5.3 校验快捷方式条目（Inno [Icons] 对齐，路线图步骤 13）
     const SHORTCUT_LOCATIONS: [&str; 3] = ["start_menu", "desktop", "quick_launch"];
     for (i, e) in cfg.shortcuts.entries.iter().enumerate() {

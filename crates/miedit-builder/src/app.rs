@@ -1090,6 +1090,69 @@ impl BuilderApp {
         if ui.add(small_button("＋ 添加注册表键")).clicked() {
             self.reg_rows.push(RegRow { key: String::new(), values: String::new() });
         }
+        ui.add_space(10.0);
+        // 环境变量（路线图步骤 27：NSIS WriteEnvStr 惯例 / Inno ChangesEnvironment 对齐）
+        let accent = self.accent();
+        field_label(ui, "环境变量（安装时写入并广播 WM_SETTINGCHANGE；卸载时自动还原/清理）：");
+        let mut env_remove: Option<usize> = None;
+        for (i, e) in self.cfg.install.env.iter_mut().enumerate() {
+            egui::Frame::none()
+                .fill(CARD)
+                .rounding(8.0)
+                .stroke(egui::Stroke::new(1.0, CARD_STROKE))
+                .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.monospace(egui::RichText::new(format!("#{}", i + 1)).color(accent).size(12.0));
+                        text_input(ui, &mut e.name, "变量名（如 PATH / JAVA_HOME）", 180.0);
+                        text_input(ui, &mut e.value, "值（{install_dir} 可用；PATH 模式为单个路径段）", base - 330.0);
+                        let part = e.part.clone();
+                        let part_label = match part.as_str() {
+                            "path_append" => "追加",
+                            "path_prepend" => "前置",
+                            _ => "直接设值",
+                        };
+                        egui::ComboBox::from_id_salt(format!("env-part-{i}"))
+                            .width(96.0)
+                            .selected_text(part_label)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut e.part, "all".to_string(), "直接设值");
+                                ui.selectable_value(&mut e.part, "path_append".to_string(), "追加到 PATH");
+                                ui.selectable_value(&mut e.part, "path_prepend".to_string(), "前置到 PATH");
+                            });
+                        if part != e.part {
+                            // 切换 PATH 模式时默认补一个语义化默认值提示
+                            if e.part != "all" && e.value.is_empty() {
+                                e.value = "{install_dir}".into();
+                            }
+                        }
+                        let scope = e.scope.clone();
+                        let scope_label = if scope == "machine" { "机器级" } else { "用户级" };
+                        egui::ComboBox::from_id_salt(format!("env-scope-{i}"))
+                            .width(72.0)
+                            .selected_text(scope_label)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut e.scope, "user".to_string(), "用户级");
+                                ui.selectable_value(&mut e.scope, "machine".to_string(), "机器级");
+                            });
+                        if ui.small_button(egui::RichText::new("×").color(RED)).clicked() {
+                            env_remove = Some(i);
+                        }
+                    });
+                });
+        }
+        if let Some(i) = env_remove {
+            self.cfg.install.env.remove(i);
+        }
+        if ui.add(small_button("＋ 添加环境变量")).clicked() {
+            self.cfg.install.env.push(miedit_core::config::EnvSpec::default());
+        }
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new("提示：PATH 追加/前置按 \";\" 列表去重合并（不覆盖已有内容），卸载时只移除本安装写入的段；\"直接设值\" 卸载时还原安装前的原值。")
+                .color(TEXT_DIM)
+                .size(12.0),
+        );
     }
 
     fn page_script(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {

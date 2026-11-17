@@ -6,8 +6,10 @@
 
 use anyhow::{anyhow, Context, Result};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2, ViewportCommand};
+use miedit_core::config::{resolve_uninstall_text, LanguageSpec, UNINSTALL_TEXT_KEYS};
 use miedit_core::manifest::UninstallManifest;
 use miedit_core::winutil;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -23,6 +25,9 @@ const TEXT_DIM: Color32 = Color32::from_rgb(185, 191, 203);
 
 #[derive(Debug, Clone, PartialEq)]
 enum Phase {
+    /// 语言选择页（步骤 26，NSIS `MUI_UNPAGE_LANGUAGE` 对齐）：
+    /// 仅当清单携带多个语言包时显示；单语言直接进确认页
+    Language,
     Confirm,
     Working,
     /// 卸载完成详情停留页（NSIS INSTFILES 语义，路线图步骤 18）：
@@ -30,6 +35,40 @@ enum Phase {
     Summary,
     Done,
     Failed(String),
+}
+
+/// 卸载器文案快照（步骤 26）：启动时按选中语言一次性解析全部 `un_*`
+/// 键（后台卸载线程与 UI 共用，免跨线程取锁）；占位符由调用方替换。
+#[derive(Clone)]
+struct Texts {
+    map: BTreeMap<&'static str, String>,
+}
+
+impl Texts {
+    /// 按语言包与预选索引构建全量文案快照。
+    /// 解析链（`resolve_uninstall_text`）：语言包 text > 内置包（按语言 id）
+    /// > 内置 zh-CN（旧卸载器中文基调）> 英文默认表。
+    fn build(languages: &[LanguageSpec], lang_idx: Option<usize>) -> Texts {
+        let map = UNINSTALL_TEXT_KEYS
+            .iter()
+            .map(|k| (*k, resolve_uninstall_text(languages, lang_idx, k)))
+            .collect();
+        Texts { map }
+    }
+
+    /// 取文案（未知键返回键名，便于发现漏键）。
+    fn get(&self, key: &str) -> String {
+        self.map.get(key).cloned().unwrap_or_else(|| key.to_string())
+    }
+
+    /// 取文案并替换 `{{k}}` 形式的占位符（逐对传入）。
+    fn fmt(&self, key: &str, pairs: &[(&str, &str)]) -> String {
+        let mut s = self.get(key);
+        for (k, v) in pairs {
+            s = s.replace(&format!("{{{k}}}"), v);
+        }
+        s
+    }
 }
 
 #[derive(Default)]
@@ -52,6 +91,10 @@ struct UninstallerApp {
     manifest: UninstallManifest,
     run: Arc<Mutex<RunState>>,
     phase: Phase,
+    /// 语言选择页预选索引（步骤 26；Phase::Language 时可改）
+    lang_idx: usize,
+    /// 当前文案快照（选定语言后构建；Phase::Language 期间用预选语言的临时快照）
+    texts: Texts,
     /// 是否同时删除用户数据/配置目录
     delete_user_data: bool,
     /// 应用图标纹理（内嵌于卸载器，标题栏与确认页展示）
@@ -77,6 +120,24 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+/// 按系统语言预选语言包索引（NSIS 启动预选语义，步骤 15/26 同一口径）：
+/// 精确/主标签匹配优先，否则取第一个；清单无语言包（旧清单）返回 None
+/// （后续解析链回退内置 zh-CN，与旧卸载器中文文案一致）。
+fn auto_lang_idx(languages: &[LanguageSpec]) -> Option<usize> {
+    if languages.is_empty() {
+        return None;
+    }
+    if let Some(sys) = miedit_core::langs::detect_system_language() {
+        if let Some(i) = languages
+            .iter()
+            .position(|l| miedit_core::langs::lang_matches(&l.id, &sys))
+        {
+            return Some(i);
+        }
+    }
+    Some(0)
 }
 
 fn real_main(silent: bool, args: &[String]) -> Result<i32> {
@@ -107,11 +168,16 @@ fn real_main(silent: bool, args: &[String]) -> Result<i32> {
             }
         };
 
+    // 文案快照（步骤 26）：静默模式按系统语言自动预选；GUI 多语言时在
+    // 语言选择页可改（确认后重建快照），单语言/旧清单直接用预选
+    let preselect = auto_lang_idx(&manifest.languages);
+    let texts = Texts::build(&manifest.languages, preselect);
+
     if manifest.per_machine && !winutil::is_admin() {
         if winutil::relaunch_elevated(args)? {
             return Ok(0);
         }
-        anyhow::bail!("本次安装需要管理员权限才能卸载");
+        anyhow::bail!(texts.get("un_error_admin"));
     }
 
     let run = Arc::new(Mutex::new(RunState::default()));
@@ -120,28 +186,33 @@ fn real_main(silent: bool, args: &[String]) -> Result<i32> {
         // 卸载前运行检测（NSIS un.onInit / Inno CloseApplications 对齐）：
         // 静默模式记录警告后继续，被占用文件转入重启删除
         if main_exe_running(&manifest) {
-            run.lock().unwrap().log.push(
-                format!("警告: 主程序 {} 可能正在运行，被占用的文件将在重启后删除", manifest.main_exe),
-            );
+            run.lock().unwrap().log.push(texts.fmt(
+                "un_log_running_warning",
+                &[("exe", manifest.main_exe.trim())],
+            ));
         }
-        let errors = do_uninstall(&manifest, &run, None, false);
+        let errors = do_uninstall(&manifest, &run, None, false, &texts);
         let mut log = run.lock().unwrap().log.clone();
         let reboot = run.lock().unwrap().reboot_scheduled;
         if reboot > 0 {
-            log.push(format!("注意: {reboot} 个文件将在系统重启后删除"));
+            log.push(texts.fmt("un_log_reboot_pending", &[("count", &reboot.to_string())]));
         }
         write_silent_log(&log);
         if errors.is_empty() {
             cleanup_after_uninstall(&manifest);
             Ok(0)
         } else {
-            eprintln!("卸载完成，但有 {} 个错误（详见日志）", errors.len());
+            eprintln!(
+                "{}",
+                texts.fmt("un_silent_stderr", &[("count", &errors.len().to_string())])
+            );
             cleanup_after_uninstall(&manifest);
             Ok(1)
         }
     } else {
         let app_running = main_exe_running(&manifest);
-        run_gui(manifest, icon_bytes, bg_bytes, run, app_running)
+        let multi_lang = manifest.languages.len() > 1;
+        run_gui(manifest, icon_bytes, bg_bytes, run, app_running, preselect, multi_lang)
     }
 }
 
@@ -154,10 +225,14 @@ fn main_exe_running(m: &UninstallManifest) -> bool {
 }
 
 fn write_silent_log(log: &[String]) {
-    if let Ok(tmp) = std::env::var("TEMP") {
-        let p = PathBuf::from(tmp).join("miedit-uninstall.log");
-        let _ = std::fs::write(&p, log.join("\n"));
-    }
+    // TEMP 未设置时回退 TMPDIR / /tmp（与安装器步骤 21 的 Linux CLI 适配一致）
+    let tmp = std::env::var("TEMP")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| std::env::var("TMPDIR").ok().filter(|s| !s.trim().is_empty()))
+        .unwrap_or_else(|| "/tmp".to_string());
+    let p = PathBuf::from(tmp).join("miedit-uninstall.log");
+    let _ = std::fs::write(&p, log.join("\n"));
 }
 
 // ---------------------------------------------------------------------------
@@ -169,6 +244,7 @@ fn do_uninstall(
     run: &Mutex<RunState>,
     ctx: Option<&egui::Context>,
     delete_user_data: bool,
+    t: &Texts,
 ) -> Vec<String> {
     let user_data = if delete_user_data { &m.user_data_dirs } else { &Vec::new() };
     // 步骤 22：注册表操作数（新清单用精确清理条数，旧清单回退键数）
@@ -178,11 +254,11 @@ fn do_uninstall(
         m.registry_values.len()
     };
     let total = m.files.len() + m.dirs.len() + m.shortcuts.len() + m.shortcut_dirs.len()
-        + reg_ops + user_data.len() + 1;
+        + reg_ops + m.env_values.len() + user_data.len() + 1;
     {
         let mut r = run.lock().unwrap();
         r.total = total;
-        r.log.push(format!("开始卸载 {}", m.app_name));
+        r.log.push(t.fmt("un_log_start", &[("app", m.app_name.trim())]));
     }
 
     let mut errors: Vec<String> = Vec::new();
@@ -199,17 +275,19 @@ fn do_uninstall(
     // 0. 卸载前命令（步骤 23：NSIS 卸载脚本 Exec 语义；如停服务/关闭进程）。
     //    失败不中止卸载（继续删除，被占用文件走重试/重启删除路径），仅记录错误
     for (i, spec) in m.exec_before_uninstall.iter().enumerate() {
-        let describe = format!("卸载前命令 #{}", i + 1);
-        tick(run, format!("执行{describe}: {}", spec.cmd.trim()), ctx);
+        let describe = t.fmt("un_log_cmd_label", &[("n", &(i + 1).to_string())]);
+        tick(run, t.fmt("un_log_exec", &[("label", &describe), ("cmd", spec.cmd.trim())]), ctx);
         let outcome = miedit_core::runcmd::execute(spec, Path::new(&m.install_dir));
         for line in miedit_core::runcmd::log_lines(&describe, spec, &outcome) {
             run.lock().unwrap().log.push(line);
         }
         if miedit_core::runcmd::should_abort(spec, &outcome) {
-            errors.push(format!(
-                "{} 失败: {}（已忽略，继续卸载）",
-                describe,
-                miedit_core::runcmd::abort_reason(spec, &outcome)
+            errors.push(t.fmt(
+                "un_log_cmd_failed",
+                &[
+                    ("label", &describe),
+                    ("reason", &miedit_core::runcmd::abort_reason(spec, &outcome)),
+                ],
             ));
         }
     }
@@ -225,15 +303,18 @@ fn do_uninstall(
                     let mut r = run.lock().unwrap();
                     r.reboot_scheduled += 1;
                     r.log
-                        .push(format!("已计划重启后删除（文件占用）: {}", p.display()));
-                    r.current = format!("重启删除 {}", p.display());
+                        .push(t.fmt("un_log_reboot_scheduled", &[("file", &p.display().to_string())]));
+                    r.current = t.fmt("un_log_reboot_delete", &[("file", &p.display().to_string())]);
                     r.done_count += 1;
                     drop(r);
                     if let Some(c) = ctx {
                         c.request_repaint();
                     }
                 }
-                Err(re) => errors.push(format!("删除失败: {e:#}；且无法计划重启删除: {re:#}")),
+                Err(re) => errors.push(t.fmt(
+                    "un_log_del_file_failed",
+                    &[("err", &format!("{e:#}")), ("rerr", &format!("{re:#}"))],
+                )),
             }
         } else {
             {
@@ -241,7 +322,7 @@ fn do_uninstall(
                 r.files_removed += 1;
                 r.bytes_freed += sz;
             }
-            tick(run, format!("删除 {}", p.display()), ctx);
+            tick(run, t.fmt("un_log_delete", &[("file", &p.display().to_string())]), ctx);
         }
     }
 
@@ -261,7 +342,7 @@ fn do_uninstall(
             let mut r = run.lock().unwrap();
             r.dirs_removed += 1;
         }
-        tick(run, format!("移除目录 {d}"), ctx);
+        tick(run, t.fmt("un_log_remove_dir", &[("dir", d)]), ctx);
     }
 
     // 3. 快捷方式与快捷方式目录（最深先删，子目录嵌套时避免父目录先删失败）
@@ -273,9 +354,9 @@ fn do_uninstall(
             r.files_removed += 1;
             r.bytes_freed += sz;
         } else {
-            errors.push(format!("删除快捷方式失败: {s}"));
+            errors.push(t.fmt("un_log_del_shortcut_failed", &[("path", s)]));
         }
-        tick(run, format!("移除快捷方式 {s}"), ctx);
+        tick(run, t.fmt("un_log_remove_dir", &[("dir", s)]), ctx);
     }
     let mut sdirs: Vec<&String> = m.shortcut_dirs.iter().collect();
     sdirs.sort_by_key(|d| std::cmp::Reverse(d.split(['\\', '/']).count()));
@@ -284,9 +365,9 @@ fn do_uninstall(
             let mut r = run.lock().unwrap();
             r.dirs_removed += 1;
         } else {
-            errors.push(format!("删除快捷方式目录失败: {sd}"));
+            errors.push(t.fmt("un_log_del_shortcut_dir_failed", &[("path", sd)]));
         }
-        tick(run, format!("移除目录 {sd}"), ctx);
+        tick(run, t.fmt("un_log_remove_dir", &[("dir", sd)]), ctx);
     }
 
     // 4. 用户数据/配置目录（可选，勾选后才删除）
@@ -305,7 +386,7 @@ fn do_uninstall(
                 r.bytes_freed += ub;
                 r.dirs_removed += 1;
             }
-            tick(run, format!("删除用户数据 {}", p.display()), ctx);
+            tick(run, t.fmt("un_log_del_user_data", &[("path", &p.display().to_string())]), ctx);
         }
     }
 
@@ -330,7 +411,7 @@ fn do_uninstall(
                     }
                 }
             }
-            tick(run, format!("移除注册表值 {}", r.key), ctx);
+            tick(run, t.fmt("un_log_reg_value", &[("key", &r.key)]), ctx);
         }
     } else {
         for k in &m.registry_keys {
@@ -339,26 +420,76 @@ fn do_uninstall(
                     errors.push(format!("{e:#}"));
                 }
             }
-            tick(run, format!("移除注册表键 {k}"), ctx);
+            tick(run, t.fmt("un_log_reg_key", &[("key", k)]), ctx);
         }
     }
     if let Err(e) = winutil::registry_delete_tree(m.per_machine, &m.uninstall_key) {
         errors.push(format!("{e:#}"));
     }
-    tick(run, "移除卸载注册表信息".into(), ctx);
+    tick(run, t.get("un_log_uninstall_reg"), ctx);
+
+    // 5.5 环境变量清理（步骤 27：PATH 段移除回写 / all 写入还原或删除；
+    //     非平台为桩 no-op，旧清单无 env_values 字段 → 空表跳过）
+    for e in &m.env_values {
+        if e.path_segment.is_empty() {
+            // all 直接设值的清理：新建 → 删除整个值；覆盖 → 还原安装前原值
+            if e.existed {
+                if let Err(err) = winutil::env_write(e.machine, &e.name, &e.previous_value) {
+                    errors.push(format!("{err:#}"));
+                }
+            } else if let Err(err) = winutil::env_delete(e.machine, &e.name) {
+                errors.push(format!("{err:#}"));
+            }
+            tick(run, t.fmt("un_log_env", &[("name", &e.name)]), ctx);
+        } else {
+            // PATH 式合并写入的清理：只移除本次写入的段（不误伤其他软件的段）；
+            // 移除后列表为空且安装前变量不存在 → 删除整个值
+            let cur = winutil::env_read(e.machine, &e.name);
+            if let Some(cur) = cur {
+                let items = miedit_core::envspec::split_path_list(&cur);
+                let (after, found) =
+                    miedit_core::envspec::remove_path_segment(&items, &e.path_segment);
+                if found {
+                    if after.is_empty() && !e.existed {
+                        if let Err(err) = winutil::env_delete(e.machine, &e.name) {
+                            errors.push(format!("{err:#}"));
+                        }
+                    } else if let Err(err) = winutil::env_write(
+                        e.machine,
+                        &e.name,
+                        &miedit_core::envspec::join_path_list(&after),
+                    ) {
+                        errors.push(format!("{err:#}"));
+                    }
+                }
+            }
+            tick(
+                run,
+                t.fmt("un_log_env_path", &[("name", &e.name), ("segment", &e.path_segment)]),
+                ctx,
+            );
+        }
+    }
+    if !m.env_values.is_empty() {
+        winutil::env_broadcast();
+    }
 
     let mut r = run.lock().unwrap();
     r.finished = true;
     // 卸载统计（NSIS 卸载完成统计对齐，路线图步骤 14）
     let (fr, dr, bf) = (r.files_removed, r.dirs_removed, r.bytes_freed);
-    r.log.push(format!(
-        "已删除 {fr} 个文件、{dr} 个目录，释放 {}",
-        miedit_core::util::human_size(bf)
+    r.log.push(t.fmt(
+        "un_stats",
+        &[
+            ("files", &fr.to_string()),
+            ("dirs", &dr.to_string()),
+            ("size", &miedit_core::util::human_size(bf)),
+        ],
     ));
     if errors.is_empty() {
-        r.log.push("卸载完成".into());
+        r.log.push(t.get("un_log_done"));
     } else {
-        r.log.push(format!("卸载完成，{} 项未能删除", errors.len()));
+        r.log.push(t.fmt("un_log_done_errors", &[("count", &errors.len().to_string())]));
         for e in &errors {
             r.log.push(format!("  · {e}"));
         }
@@ -451,14 +582,19 @@ fn run_gui(
     bg_bytes: Option<Vec<u8>>,
     run: Arc<Mutex<RunState>>,
     app_running: bool,
+    preselect: Option<usize>,
+    multi_lang: bool,
 ) -> Result<i32> {
     // 图标：任务栏 + 标题栏 + 确认页
     let icon_data: Option<egui::IconData> = icon_bytes.and_then(|b| decode_icon(&b));
     // 壁纸（步骤 19）：解码为 egui 纹理；有壁纸时窗口放大以充分展示
     let bg_image: Option<egui::ColorImage> = bg_bytes.and_then(|b| decode_image(&b));
     let win_size = if bg_image.is_some() { [800.0, 540.0] } else { [560.0, 420.0] };
+    // 窗口标题（步骤 26）：按预选语言解析（多语言页确认后同步更新）
+    let texts = Texts::build(&manifest.languages, preselect);
+    let title = texts.fmt("un_window_title", &[("app", manifest.app_name.trim())]);
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title(format!("卸载 {}", manifest.app_name))
+        .with_title(title)
         .with_inner_size(win_size)
         .with_resizable(false)
         .with_decorations(false);
@@ -469,10 +605,13 @@ fn run_gui(
         viewport,
         ..Default::default()
     };
+    let phase = if multi_lang { Phase::Language } else { Phase::Confirm };
     let app = UninstallerApp {
         manifest,
         run,
-        phase: Phase::Confirm,
+        phase,
+        lang_idx: preselect.unwrap_or(0),
+        texts,
         delete_user_data: false,
         icon_tex: None,
         bg_tex: None,
@@ -530,6 +669,15 @@ fn decode_image(bytes: &[u8]) -> Option<egui::ColorImage> {
 }
 
 impl UninstallerApp {
+    /// 确认语言选择（语言选择页「确定」）：重建文案快照 + 同步窗口标题
+    fn apply_language(&mut self, ctx: &egui::Context) {
+        self.texts = Texts::build(&self.manifest.languages, Some(self.lang_idx));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(
+            self.texts.fmt("un_window_title", &[("app", self.manifest.app_name.trim())]),
+        ));
+        self.phase = Phase::Confirm;
+    }
+
     /// 开始卸载（确认页「卸载」按钮 / Enter 的公共入口）
     fn start_uninstall(&mut self, ctx: &egui::Context) {
         self.phase = Phase::Working;
@@ -537,14 +685,16 @@ impl UninstallerApp {
         let manifest = self.manifest.clone();
         let ctx2 = ctx.clone();
         let del = self.delete_user_data;
+        let texts = self.texts.clone();
         std::thread::spawn(move || {
-            do_uninstall(&manifest, &run, Some(&ctx2), del);
+            do_uninstall(&manifest, &run, Some(&ctx2), del, &texts);
         });
     }
 
     /// 主操作（NSIS：Enter 触发默认按钮 / Esc 取消）
     fn primary_action(&mut self, ctx: &egui::Context) {
         match self.phase {
+            Phase::Language => self.apply_language(ctx),
             Phase::Confirm => self.start_uninstall(ctx),
             // 步骤 18：详情停留页「下一步」→ 完成总结页（NSIS INSTFILES → FINISH）
             Phase::Summary => self.phase = Phase::Done,
@@ -608,6 +758,7 @@ impl UninstallerApp {
 
     fn content(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
         match self.phase.clone() {
+            Phase::Language => self.page_language(ui),
             Phase::Confirm => self.page_confirm(ui),
             Phase::Working => self.page_working(ui),
             Phase::Summary => self.page_summary(ui),
@@ -616,15 +767,73 @@ impl UninstallerApp {
         }
     }
 
+    /// 语言选择页（步骤 26，NSIS `MUI_UNPAGE_LANGUAGE` 对齐）：
+    /// 清单携带多个语言包时显示；预选系统语言，Enter/「确定」确认。
+    fn page_language(&mut self, ui: &mut egui::Ui) {
+        let t = self.texts.clone();
+        ui.vertical_centered(|ui| {
+            ui.add_space(4.0);
+            ui.heading(
+                egui::RichText::new(t.get("un_language_title"))
+                    .color(TEXT)
+                    .size(24.0)
+                    .strong(),
+            );
+            ui.add_space(2.0);
+            ui.label(egui::RichText::new(t.get("un_language_desc")).color(TEXT_DIM).size(13.5));
+        });
+        ui.add_space(8.0);
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            for (i, lang) in self.manifest.languages.iter().enumerate() {
+                let selected = self.lang_idx == i;
+                let fill = if selected {
+                    ACCENT.linear_multiply(0.35)
+                } else {
+                    Color32::from_black_alpha(60)
+                };
+                let stroke = if selected {
+                    egui::Stroke::new(1.2, ACCENT)
+                } else {
+                    egui::Stroke::new(1.0, CARD_STROKE)
+                };
+                let label = if lang.name.trim().is_empty() {
+                    lang.id.clone()
+                } else {
+                    format!("{}（{}）", lang.name, lang.id)
+                };
+                egui::Frame::none()
+                    .fill(fill)
+                    .rounding(8.0)
+                    .stroke(stroke)
+                    .inner_margin(egui::Margin::symmetric(10.0, 7.0))
+                    .show(ui, |ui| {
+                        let resp = ui
+                            .add(
+                                egui::Label::new(
+                                    egui::RichText::new(label).color(TEXT).size(14.0),
+                                )
+                                .sense(egui::Sense::click()),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        if resp.clicked() {
+                            self.lang_idx = i;
+                        }
+                    });
+                ui.add_space(2.0);
+            }
+        });
+    }
+
     /// 步骤 18：卸载完成详情停留页（NSIS INSTFILES 完成态语义）——
     /// 完成徽标 + 统计 + 全量日志（默认展开），点「下一步」进入完成总结页。
     fn page_summary(&mut self, ui: &mut egui::Ui) {
+        let t = self.texts.clone();
         ui.vertical_centered(|ui| {
             ui.add_space(4.0);
             draw_badge(ui, GREEN, "√");
             ui.add_space(4.0);
             ui.heading(
-                egui::RichText::new(format!("已成功卸载 {}", self.manifest.app_name))
+                egui::RichText::new(t.fmt("un_summary_title", &[("app", self.manifest.app_name.trim())]))
                     .color(TEXT)
                     .size(24.0)
                     .strong(),
@@ -634,22 +843,22 @@ impl UninstallerApp {
                 (r.files_removed, r.dirs_removed, r.bytes_freed, r.reboot_scheduled)
             };
             ui.label(
-                egui::RichText::new(format!(
-                    "已删除 {} 个文件、{} 个目录，释放 {}",
-                    fr,
-                    dr,
-                    miedit_core::util::human_size(bf)
+                egui::RichText::new(t.fmt(
+                    "un_stats",
+                    &[
+                        ("files", &fr.to_string()),
+                        ("dirs", &dr.to_string()),
+                        ("size", &miedit_core::util::human_size(bf)),
+                    ],
                 ))
                 .color(TEXT_DIM)
                 .size(13.5),
             );
             if reboot > 0 {
                 ui.label(
-                    egui::RichText::new(format!(
-                        "{reboot} 个文件将在系统重启后删除。"
-                    ))
-                    .color(AMBER)
-                    .size(13.0),
+                    egui::RichText::new(t.fmt("un_reboot_note", &[("count", &reboot.to_string())]))
+                        .color(AMBER)
+                        .size(13.0),
                 );
             }
         });
@@ -679,6 +888,7 @@ impl UninstallerApp {
     }
 
     fn page_confirm(&mut self, ui: &mut egui::Ui) {
+        let t = self.texts.clone();
         ui.vertical_centered(|ui| {
             ui.add_space(8.0);
             if let Some(icon) = &self.icon_tex {
@@ -694,12 +904,21 @@ impl UninstallerApp {
                 draw_badge(ui, ACCENT, "!");
             }
             ui.add_space(6.0);
-            ui.heading(egui::RichText::new(format!("卸载 {}", self.manifest.app_name)).color(TEXT).size(26.0).strong());
+            ui.heading(
+                egui::RichText::new(t.fmt("un_confirm_title", &[("app", self.manifest.app_name.trim())]))
+                    .color(TEXT)
+                    .size(26.0)
+                    .strong(),
+            );
             ui.add_space(4.0);
             ui.label(
-                egui::RichText::new(format!(
-                    "这将从计算机中移除 {} {} 及其所有组件。\n安装目录：{}",
-                    self.manifest.app_name, self.manifest.version, self.manifest.install_dir
+                egui::RichText::new(t.fmt(
+                    "un_confirm_body",
+                    &[
+                        ("app", self.manifest.app_name.trim()),
+                        ("version", self.manifest.version.trim()),
+                        ("dir", &self.manifest.install_dir),
+                    ],
                 ))
                 .color(TEXT_DIM)
                 .size(14.5),
@@ -708,14 +927,11 @@ impl UninstallerApp {
             if self.app_running {
                 ui.add_space(6.0);
                 ui.label(
-                    egui::RichText::new(format!(
-                        "检测到 {} 可能正在运行，建议关闭后再卸载；\n被占用的文件将在系统重启后删除。",
-                        self.manifest.app_name
-                    ))
-                    .color(AMBER)
-                    .size(13.5),
+                    egui::RichText::new(t.fmt("un_running_warning", &[("app", self.manifest.app_name.trim())]))
+                        .color(AMBER)
+                        .size(13.5),
                 );
-                if ui.add(secondary_button("重新检测")).clicked() {
+                if ui.add(secondary_button(&t.get("un_recheck"))).clicked() {
                     self.app_running = main_exe_running(&self.manifest);
                 }
             }
@@ -724,7 +940,7 @@ impl UninstallerApp {
             ui.vertical_centered(|ui| {
                 ui.checkbox(
                     &mut self.delete_user_data,
-                    egui::RichText::new("同时删除用户数据和配置")
+                    egui::RichText::new(t.get("un_delete_user_data"))
                         .color(TEXT_DIM)
                         .size(13.5),
                 );
@@ -733,9 +949,15 @@ impl UninstallerApp {
     }
 
     fn page_working(&mut self, ui: &mut egui::Ui) {
+        let t = self.texts.clone();
         let r = self.run.lock().unwrap();
         ui.add_space(6.0);
-        ui.heading(egui::RichText::new(format!("正在卸载 {}", self.manifest.app_name)).color(TEXT).size(26.0).strong());
+        ui.heading(
+            egui::RichText::new(t.fmt("un_working_title", &[("app", self.manifest.app_name.trim())]))
+                .color(TEXT)
+                .size(26.0)
+                .strong(),
+        );
         ui.add_space(10.0);
         let frac = if r.total == 0 { 1.0 } else { r.done_count as f32 / r.total as f32 };
         draw_progress(ui, frac, ACCENT);
@@ -745,15 +967,21 @@ impl UninstallerApp {
         // NSIS “Show details” 风格：默认收起，可展开查看日志
         let show = self.show_details;
         ui.horizontal(|ui| {
-            let label = if show { "隐藏细节" } else { "显示细节" };
-            if ui.add(small_toggle_button(label)).clicked() {
+            let label = if show { t.get("details_hide") } else { t.get("details_show") };
+            if ui.add(small_toggle_button(&label)).clicked() {
                 self.show_details = !self.show_details;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
-                    egui::RichText::new(format!("{}/{} 项", r.done_count, r.total))
-                        .color(TEXT_DIM)
-                        .size(12.0),
+                    egui::RichText::new(t.fmt(
+                        "un_progress_items",
+                        &[
+                            ("done", &r.done_count.to_string()),
+                            ("total", &r.total.to_string()),
+                        ],
+                    ))
+                    .color(TEXT_DIM)
+                    .size(12.0),
                 );
             });
         });
@@ -783,14 +1011,20 @@ impl UninstallerApp {
     }
 
     fn page_done(&mut self, ui: &mut egui::Ui) {
+        let t = self.texts.clone();
         ui.vertical_centered(|ui| {
             ui.add_space(8.0);
             draw_badge(ui, GREEN, "√");
             ui.add_space(6.0);
-            ui.heading(egui::RichText::new(format!("已成功卸载 {}", self.manifest.app_name)).color(TEXT).size(26.0).strong());
+            ui.heading(
+                egui::RichText::new(t.fmt("un_summary_title", &[("app", self.manifest.app_name.trim())]))
+                    .color(TEXT)
+                    .size(26.0)
+                    .strong(),
+            );
             ui.add_space(4.0);
             ui.label(
-                egui::RichText::new("关闭窗口后，卸载程序将自动清理自身文件。")
+                egui::RichText::new(t.get("un_done_body"))
                     .color(TEXT_DIM)
                     .size(14.0),
             );
@@ -800,11 +1034,13 @@ impl UninstallerApp {
                 (r.files_removed, r.dirs_removed, r.bytes_freed)
             };
             ui.label(
-                egui::RichText::new(format!(
-                    "已删除 {} 个文件、{} 个目录，释放 {}",
-                    fr,
-                    dr,
-                    miedit_core::util::human_size(bf)
+                egui::RichText::new(t.fmt(
+                    "un_stats",
+                    &[
+                        ("files", &fr.to_string()),
+                        ("dirs", &dr.to_string()),
+                        ("size", &miedit_core::util::human_size(bf)),
+                    ],
                 ))
                 .color(TEXT_DIM)
                 .size(13.5),
@@ -814,21 +1050,20 @@ impl UninstallerApp {
             if reboot > 0 {
                 ui.add_space(6.0);
                 ui.label(
-                    egui::RichText::new(format!(
-                        "{reboot} 个文件正在使用中，已计划在系统重启后删除；重启后将完成全部清理。"
-                    ))
-                    .color(AMBER)
-                    .size(13.5),
+                    egui::RichText::new(t.fmt("un_done_reboot_body", &[("count", &reboot.to_string())]))
+                        .color(AMBER)
+                        .size(13.5),
                 );
             }
         });
     }
 
     fn page_failed(&mut self, ui: &mut egui::Ui, err: &str) {
+        let t = self.texts.clone();
         ui.vertical_centered(|ui| {
             draw_badge(ui, ACCENT, "!");
             ui.add_space(4.0);
-            ui.heading(egui::RichText::new("卸载遇到问题").color(TEXT).size(26.0).strong());
+            ui.heading(egui::RichText::new(t.get("un_failed_title")).color(TEXT).size(26.0).strong());
             ui.add_space(4.0);
             ui.label(egui::RichText::new(err).color(TEXT_DIM).size(13.5));
             ui.add_space(8.0);
@@ -853,7 +1088,12 @@ impl eframe::App for UninstallerApp {
             )
         });
         if esc && self.phase != Phase::Working {
-            cleanup_after_uninstall(&self.manifest);
+            // 语言页/确认页取消 = 放弃卸载：不清理不删除（修复旧版在取消时
+            // 误删清单/自删除卸载器的问题——取消后安装应保持可再卸载）；
+            // 卸载完成后的页面（Summary/Done/Failed）才执行收尾自删除
+            if matches!(self.phase, Phase::Summary | Phase::Done | Phase::Failed(_)) {
+                cleanup_after_uninstall(&self.manifest);
+            }
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
@@ -903,7 +1143,8 @@ impl eframe::App for UninstallerApp {
             ui.painter().text(
                 Pos2::new(title_x, sr.top() + 21.0),
                 Align2::LEFT_CENTER,
-                format!("卸载 {}", self.manifest.app_name),
+                self.texts
+                    .fmt("un_window_title", &[("app", self.manifest.app_name.trim())]),
                 FontId::proportional(13.5),
                 TEXT_DIM,
             );
@@ -934,33 +1175,43 @@ impl eframe::App for UninstallerApp {
 
             // 底部按钮
             let phase = self.phase.clone();
+            let t = self.texts.clone();
             egui::Area::new(egui::Id::new("buttons"))
                 .anchor(Align2::RIGHT_BOTTOM, Vec2::new(-28.0, -24.0))
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         match phase {
+                            Phase::Language => {
+                                if ui.add(primary_button(&t.get("un_btn_next"), ACCENT)).clicked() {
+                                    self.primary_action(ctx);
+                                }
+                            }
                             Phase::Confirm => {
-                                if ui.add(secondary_button("取消")).clicked() {
-                                    cleanup_after_uninstall(&self.manifest);
+                                if ui.add(secondary_button(&t.get("un_btn_cancel"))).clicked() {
+                                    // 取消 = 放弃卸载：保留清单与卸载器（可再次卸载）
                                     ctx.send_viewport_cmd(ViewportCommand::Close);
                                 }
-                                if ui.add(primary_button("卸载", ACCENT)).clicked() {
+                                if ui.add(primary_button(&t.get("un_btn_uninstall"), ACCENT)).clicked() {
                                     self.start_uninstall(ctx);
                                 }
                             }
                             Phase::Working => {}
                             Phase::Summary => {
-                                if ui.add(secondary_button("取消")).clicked() {
+                                if ui.add(secondary_button(&t.get("un_btn_cancel"))).clicked() {
                                     cleanup_after_uninstall(&self.manifest);
                                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                                 }
-                                if ui.add(primary_button("下一步", GREEN)).clicked() {
+                                if ui.add(primary_button(&t.get("un_btn_next"), GREEN)).clicked() {
                                     self.primary_action(ctx);
                                 }
                             }
                             Phase::Done | Phase::Failed(_) => {
-                                let label = if matches!(phase, Phase::Done) { "完成" } else { "关闭" };
-                                if ui.add(primary_button(label, if matches!(phase, Phase::Done) { GREEN } else { ACCENT })).clicked() {
+                                let label = if matches!(phase, Phase::Done) {
+                                    t.get("un_btn_finish")
+                                } else {
+                                    t.get("un_btn_close")
+                                };
+                                if ui.add(primary_button(&label, if matches!(phase, Phase::Done) { GREEN } else { ACCENT })).clicked() {
                                     self.primary_action(ctx);
                                 }
                             }

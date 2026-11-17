@@ -36,6 +36,23 @@ compression = "deflate"                      # deflate|solid|lzma|lzma-solid|bro
 # args = '/IM MIEditDemo.exe /F'
 # optional = true
 
+# 环境变量（NSIS WriteEnvStr 惯例 / Inno ChangesEnvironment，路线图步骤 27）：
+# part = "all" 直接设值（卸载时还原安装前原值）/ "path_append" 追加 /
+# "path_prepend" 前置（PATH 式 `;` 列表去重合并，卸载时只移除本安装写入的段）；
+# scope = "user"（HKCU，默认）| "machine"（HKLM，需管理员）。
+# 写入后广播 WM_SETTINGCHANGE，新启动进程立即可见，无需注销。
+# [[install.env]]
+# name = "MIEDIT_HOME"
+# value = "{install_dir}"
+# part = "all"
+# scope = "user"
+#
+# [[install.env]]
+# name = "Path"
+# value = "{install_dir}"
+# part = "path_append"
+# scope = "user"
+
 # 内置界面模板（五选一：aurora / midnight / sunrise / forest / mono）
 # template = "midnight"
 # 液态玻璃材质（默认 glass；standard = 旧观感）；Win11 亚克力需 acrylic = true

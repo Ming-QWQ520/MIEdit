@@ -117,6 +117,10 @@ pub fn finalize_install(
             .unwrap_or(0),
         // 卸载前命令随清单内嵌/落盘（步骤 23；卸载器无脚本，只读清单）
         exec_before_uninstall: cfg.install.exec_before_uninstall.clone(),
+        // 语言包副本随清单内嵌/落盘（步骤 26，NSIS un MUI 对齐）
+        languages: cfg.ui.languages.clone(),
+        // 环境变量清理引用（步骤 27，下方逐条填充）
+        env_values: Vec::new(),
     };
 
     // 2. 快捷方式（简单开关 + Inno [Icons] 风格条目，路线图步骤 13；
@@ -383,6 +387,109 @@ pub fn finalize_install(
                 resolved.len(),
                 miedit_core::regspec::view_label(view),
                 if created_key { "新建键" } else { "既有键" }
+            ),
+        );
+    }
+
+    // 4.5 环境变量（步骤 27，NSIS WriteEnvStr 惯例 / Inno ChangesEnvironment 对齐）：
+    //     `all` 直接设值（记录原值供卸载还原）；`path_append`/`path_prepend` 按
+    //     `;` 列表去重合并（记录写入段供卸载时移除）。写完统一广播
+    //     WM_SETTINGCHANGE，新启动进程立即可见。非 Windows 平台为桩跳过。
+    #[cfg(windows)]
+    {
+        let install_dir_str = dest.display().to_string();
+        let mut env_dirty = false;
+        for (i, spec) in cfg.install.env.iter().enumerate() {
+            let entry = match miedit_core::envspec::resolve_entry(spec, &install_dir_str, &cfg.app.name) {
+                Ok(e) => e,
+                Err(e) => {
+                    push_log(st, format!("警告: 环境变量 #{} 跳过: {e}", i + 1));
+                    continue;
+                }
+            };
+            let scope_label = if entry.machine { "机器级" } else { "用户级" };
+            if entry.machine && !winutil::is_admin() {
+                push_log(
+                    st,
+                    format!("警告: 环境变量 {}（机器级）需要管理员权限，已跳过", entry.name),
+                );
+                continue;
+            }
+            match entry.part {
+                miedit_core::envspec::EnvPart::All => {
+                    let existed = winutil::env_read(entry.machine, &entry.name);
+                    if let Err(e) = winutil::env_write(entry.machine, &entry.name, &entry.value) {
+                        push_log(st, format!("警告: 环境变量 {} 写入失败: {e:#}", entry.name));
+                        continue;
+                    }
+                    manifest.env_values.push(miedit_core::manifest::EnvCleanupRef {
+                        name: entry.name.clone(),
+                        machine: entry.machine,
+                        path_segment: String::new(),
+                        existed: existed.is_some(),
+                        previous_value: existed.unwrap_or_default(),
+                    });
+                    push_log(
+                        st,
+                        format!("环境变量: {} = {}（{scope_label}，直接设值）", entry.name, entry.value),
+                    );
+                }
+                part @ (miedit_core::envspec::EnvPart::PathAppend
+                | miedit_core::envspec::EnvPart::PathPrepend) => {
+                    let segment = entry.value.trim().trim_matches('"').to_string();
+                    if segment.is_empty() {
+                        push_log(st, format!("警告: 环境变量 {} 段为空，已跳过", entry.name));
+                        continue;
+                    }
+                    let current = winutil::env_read(entry.machine, &entry.name)
+                        .map(|v| miedit_core::envspec::split_path_list(&v))
+                        .unwrap_or_default();
+                    let existed = winutil::env_read(entry.machine, &entry.name).is_some();
+                    let merged = miedit_core::envspec::merge_path_list(
+                        &current,
+                        &segment,
+                        part == miedit_core::envspec::EnvPart::PathPrepend,
+                    );
+                    if let Err(e) = winutil::env_write(
+                        entry.machine,
+                        &entry.name,
+                        &miedit_core::envspec::join_path_list(&merged),
+                    ) {
+                        push_log(st, format!("警告: 环境变量 {} 写入失败: {e:#}", entry.name));
+                        continue;
+                    }
+                    manifest.env_values.push(miedit_core::manifest::EnvCleanupRef {
+                        name: entry.name.clone(),
+                        machine: entry.machine,
+                        path_segment: segment.clone(),
+                        existed,
+                        previous_value: String::new(),
+                    });
+                    let part_label = if part == miedit_core::envspec::EnvPart::PathPrepend {
+                        "列表前置"
+                    } else {
+                        "列表追加"
+                    };
+                    push_log(
+                        st,
+                        format!("环境变量: {} {} 段 {}（{scope_label}）", entry.name, part_label, segment),
+                    );
+                }
+            }
+            env_dirty = true;
+        }
+        if env_dirty {
+            winutil::env_broadcast();
+            push_log(st, "环境变更已广播（WM_SETTINGCHANGE），新启动进程立即生效".to_string());
+        }
+    }
+    #[cfg(not(windows))]
+    if !cfg.install.env.is_empty() {
+        push_log(
+            st,
+            format!(
+                "非 Windows 平台：跳过 {} 条环境变量写入（平台桩，同注册表）",
+                cfg.install.env.len()
             ),
         );
     }

@@ -34,6 +34,8 @@
 | 23 | 安装前/后 + 卸载前自定义命令（ExecWait） | NSIS `Exec`/`ExecWait` / Inno `[Run]` 前后段 | **已完成**（v0.13.0） |
 | 24 | 组件分组树（SectionGroup） | NSIS `SectionGroup`/`SectionGroupEnd` | **已完成**（v0.13.0） |
 | 25 | 压缩格式扩充：LZMA/LZMA-solid/Brotli/Brotli-solid + 版本号固定 0.1.0 | NSIS `SetCompressor` zlib/lzma(+solid) / Inno 压缩可插拔 | **已完成**（0.1.0，#13） |
+| 26 | 卸载器多语言（语言选择页 + 全部文案随语言切换） | NSIS `MUI_UNPAGE_LANGUAGE` / un 语言链 | **已完成**（0.1.0，#14） |
+| 27 | 环境变量/PATH 管理（写入 + 广播 + 卸载精确清理） | NSIS WriteEnvStr 惯例 / Inno `ChangesEnvironment` | **已完成**（0.1.0，#14） |
 
 ## 迭代步骤定义
 
@@ -246,6 +248,42 @@
   （构建 + 静默安装退出码 0 + payload 逐字节一致 + install.log）；
   体积排序 lzma-solid < lzma < brotli-solid < brotli < deflate ≈ solid。
 
+### 步骤 26：卸载器多语言（NSIS un MUI 对齐）
+- **做什么**：安装器已有 MUI2 式语言框架（步骤 15），卸载器却是中文硬编码。
+  对齐 NSIS 卸载器语言机制：① 卸载清单新增 `languages`（安装器把
+  `ui.languages` 随清单内嵌/落盘）；② 清单携带 >1 语言时卸载器先显示
+  **语言选择页**（NSIS `MUI_UNPAGE_LANGUAGE`，预选系统语言，确认后同步
+  窗口标题）；③ 卸载器全部 UI（确认/进度/详情/完成/失败/按钮）与日志
+  （静默/详情页）文案键化（45 个 `un_*` 键，英文默认表 + 内置 zh-CN 包
+  双语同步，键集一致性测试守护）；④ 静默模式按系统语言自动预选。
+- **向后兼容**：旧清单无 `languages` 字段 → serde default 空 → 解析链回退
+  内置 zh-CN（历史中文文案行为不变）；新清单语言解析与安装器同链
+  （语言包 text > 内置包 > 英文默认）。
+- **顺带修复**：确认页/语言页取消或 Esc 放弃卸载时不再删除清单与自删除
+  卸载器（旧版取消后安装再也不能卸载——NSIS 取消语义是保留原状）。
+- **验收**：文案键集/解析链/清单新字段往返 + 旧 JSON 兼容单测；Linux 实机
+  清单内嵌语言包 + 独立卸载器读取卸载成功。
+
+### 步骤 27：环境变量/PATH 管理（NSIS WriteEnvStr 惯例 / Inno ChangesEnvironment 对齐）
+- **做什么**：① `[[install.env]]`（name/value/part/scope）：`part = all`
+  直接设值 / `path_append` 追加 / `path_prepend` 前置（`path_*` 为 `;`
+  列表语义：ASCII 不区分大小写去重合并，不覆盖已有内容）；scope =
+  `user`（HKCU\Environment，默认）/ `machine`（HKLM\...\Session
+  Manager\Environment，需管理员，无权限时告警跳过）；② 写入后广播
+  `WM_SETTINGCHANGE` "Environment"（新启动进程立即可见，无需注销）；
+  ③ 卸载精确清理：`path_*` 合并写入只**移除本安装写入的段**后回写
+  （不误伤其他软件的段；列表空且安装前变量不存在则删除整个值）；`all`
+  写入安装前已存在则**还原安装前原值**、新建则删除整个值；④ 编译器
+  5.2.3 校验（name/value 非空、part/scope 合法、path_* 单段无 `;`、
+  同变量同作用域不重复）；⑤ builder 增加环境变量编辑卡片。
+- **实现**：拆分/合并/去重/移除/展开纯函数下沉 `miedit_core::envspec`
+  （6 项单测）；注册表读写 + 广播在 `winutil::env_read/env_write/
+  env_delete/env_broadcast`（`Path` 与含 `%VAR%` 值写 REG_EXPAND_SZ，
+  其余 REG_SZ）；清理引用 `EnvCleanupRef` 随清单内嵌/落盘。非 Windows
+  平台为桩（同注册表）。
+- **验收**：envspec 单测（含 merge→remove 往返还原）；双平台 check
+  0 error；Linux 端到端（构建 + 静默安装退出码 0 + 平台桩日志）。
+
 1. **纯 Rust**：不引入 C 构建链；新增依赖须在 Windows/Linux 双平台可编译。
 2. **向后兼容**：旧格式安装包/卸载清单必须仍可处理（serde default / magic 回退）。
 3. **测试**：核心逻辑写成 `miedit-core` 纯函数并加单元测试；`cargo test -p miedit-core`
@@ -257,6 +295,32 @@
    不再随功能对齐批次递增；历史批次 v0.2.0–v0.13.0 保留原版本号记录）。
 
 ## 变更日志
+
+- 0.1.0（步骤 26–27，#14）：**卸载器多语言 + 环境变量/PATH 管理**（NSIS
+  卸载语言与环境惯例对齐批次）：
+  ① **卸载器多语言**（NSIS `MUI_UNPAGE_LANGUAGE` 对齐）：卸载清单新增
+  `languages`（安装器把 `ui.languages` 随清单内嵌 MIEDUNIN 尾部/落盘
+  uninstall.json）；清单携带 >1 语言时卸载器先显示语言选择页（预选系统
+  语言，确认后同步窗口标题）；卸载器全部 UI 与日志文案键化（45 个
+  `un_*` 键，英文默认表 + 内置 zh-CN 包双语同步，键集一致性测试守护）；
+  静默模式按系统语言自动预选。旧清单无该字段 → serde default 空 →
+  回退内置 zh-CN（历史中文文案行为不变）。**顺带修复**：语言页/确认页
+  取消（Esc/按钮）不再误删清单与自删除卸载器（旧版取消后安装再也无法
+  卸载）；卸载器静默日志补 TMPDIR 回退（与安装器 #21 对齐）。
+  ② **环境变量/PATH 管理**（NSIS WriteEnvStr 惯例 / Inno
+  `ChangesEnvironment` 对齐）：`[[install.env]]`（name/value/part/scope）
+  写 HKCU\Environment 或 HKLM\SYSTEM\...\Environment；`all` 直接设值 /
+  `path_append`/`path_prepend` 按 `;` 列表 ASCII 不区分大小写去重合并
+  （不覆盖已有内容）；写入后广播 `WM_SETTINGCHANGE` "Environment"
+  （新启动进程立即可见，无需注销）；卸载精确清理——PATH 式合并只移除
+  本安装写入的段（不误伤其他软件的段），`all` 写入还原安装前原值或删除
+  新建值；编译器 5.2.3 校验；builder 新增环境变量编辑卡片；`Path` 与含
+  `%VAR%` 值写 REG_EXPAND_SZ。纯函数下沉 `miedit_core::envspec`（split/
+  merge/remove/expand + 6 单测），决策与清理引用 `EnvCleanupRef` 随清单
+  内嵌。新增 8 项单测（文案键集/解析链/清单新旧兼容/EnvSpec 默认值），
+  core 119 项全过；双平台 check 0 error；Linux 实机端到端（构建 + 静默
+  安装退出码 0 + 清单内嵌语言包 + 独立卸载器读取卸载成功 + payload
+  逐字节一致）。
 
 - 0.1.0（步骤 25，#13 — 版本号自此固定）：**压缩格式扩充**（NSIS
   `SetCompressor` 对齐 + 扩展，全部纯 Rust）：`install.compression`

@@ -416,3 +416,34 @@
    （11 收益有限但耗时陡增）、LZMA preset 6（NSIS 默认档位，8MB 字典）。
    安装包编译是交互式操作，压缩耗时是用户体验的一部分；flate2 best()
    的先例说明本项目一致采用"最好但可接受"档位。
+
+## 十八、落地清单 · 第十五批（NSIS 对齐 #14，0.1.0）
+
+**卸载器多语言（步骤 26）+ 环境变量/PATH 管理（步骤 27）**。
+
+1. **"卸载器多语言"的回退语义要分新旧两个世界**：旧清单无 `languages`
+   字段时若走安装器解析链（英文默认兜底），所有旧包的卸载器会突然变
+   英文——这是行为回归。正确做法是按"清单是否携带语言包"分两条链：
+   旧清单回退内置 zh-CN（保持历史中文硬编码观感），新清单与安装器同链
+   （语言跟随安装语言，NSIS 语义）。serde default 的"缺字段"既是兼容
+   也是信号，用 `languages.is_empty()` 区分新旧世界。
+2. **环境变量卸载清理有两种正确答案，取决于写入方式**：PATH 式合并
+   写入（append/prepend）卸载时**只移除自己写入的段**——整值还原会
+   误删其他软件后来写入的段（A 装 → B 装 → 卸 A → B 的段丢失）；
+   `all` 直接设值则记录**安装前原值**还原（或新建则删值）。清理引用
+   结构（`EnvCleanupRef`）因此是"两种模式二选一"而不是统一字段。
+3. **环境变量广播是"免注销"体验的关键**：NSIS WriteEnvStr 惯例在写完
+   HKCU/HKLM 环境区后必须 `SendMessageTimeoutW(HWND_BROADCAST,
+   WM_SETTINGCHANGE, "Environment")`，否则新值要等注销/重启才对
+   Explorer 生效——用户会以为安装没生效。用 SMTO_ABORTIFHUNG + 2s
+   超时，挂起的窗口不阻塞安装。
+4. **winreg 0.52 的类型边界要提前摸清**：无 `to_multi_string` 解码
+   REG_MULTI_SZ（手工 UTF-16LE 双 NUL 切分）、`create_subkey` 返回
+   `(RegKey, RegDisposition)` 元组而非 `RegKey`（or_else 链会类型不匹）、
+   `RegValue::to_string()` 可直接解 REG_SZ/EXPAND_SZ。平台 API 的
+   返回值形状先查签名再组链式调用，能省一轮交叉编译试错。
+5. **取消按钮的副作用要回到"未操作"状态**：卸载确认页取消时旧版调用了
+   `cleanup_after_uninstall`（删清单 + 调度自删除）——用户放弃卸载后
+   安装反而永久失去卸载能力。对照 NSIS：取消 = 中止向导，一切保持
+   安装后原状。只有真正执行过卸载的页面（详情/完成/失败）才允许收尾
+   自删除。

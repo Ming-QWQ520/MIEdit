@@ -676,6 +676,158 @@ pub fn registry_delete_tree(per_machine: bool, key_path: &str) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// 环境区读写（步骤 27：NSIS WriteEnvStr 惯例 / Inno ChangesEnvironment 对齐）
+// ---------------------------------------------------------------------------
+
+/// 机器级环境区键路径（HKLM）。
+const ENV_KEY_MACHINE: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
+
+/// 环境区键路径（per_machine = HKLM 机器级，否则 HKCU 用户级 `Environment`）。
+#[cfg(windows)]
+fn env_key_path(per_machine: bool) -> &'static str {
+    if per_machine {
+        ENV_KEY_MACHINE
+    } else {
+        "Environment"
+    }
+}
+
+/// 读取环境变量的当前值（原始字节转字符串，REG_SZ / REG_EXPAND_SZ 直接取值，
+/// REG_MULTI_SZ 按 UTF-16LE 双 NUL 分隔手工解码后以 `;` 连接）；
+/// 变量不存在返回 None。
+#[cfg(windows)]
+pub fn env_read(per_machine: bool, name: &str) -> Option<String> {
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ};
+    use winreg::RegKey;
+    let root = RegKey::predef(if per_machine {
+        HKEY_LOCAL_MACHINE
+    } else {
+        HKEY_CURRENT_USER
+    });
+    let key = root.open_subkey_with_flags(env_key_path(per_machine), KEY_READ).ok()?;
+    let raw = key.get_raw_value(name).ok()?;
+    Some(match raw.vtype {
+        winreg::enums::REG_MULTI_SZ => {
+            // winreg 0.52 无 MULTI_SZ 解码方法：手工按 UTF-16LE 双 NUL 切分
+            let u16s: Vec<u16> = raw
+                .bytes
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            let full = String::from_utf16_lossy(&u16s);
+            full.trim_end_matches('\0')
+                .split('\0')
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(";")
+        }
+        _ => raw.to_string(),
+    })
+}
+
+#[cfg(not(windows))]
+pub fn env_read(_per_machine: bool, _name: &str) -> Option<String> {
+    None
+}
+
+/// 写入环境变量值。`Path`（大小写不敏感）按 Windows 惯例写 REG_EXPAND_SZ
+/// （保留 `%VAR%` 引用），其余写 REG_SZ。
+#[cfg(windows)]
+pub fn env_write(per_machine: bool, name: &str, value: &str) -> Result<()> {
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_WRITE, REG_EXPAND_SZ, REG_SZ};
+    use winreg::RegKey;
+    let root = RegKey::predef(if per_machine {
+        HKEY_LOCAL_MACHINE
+    } else {
+        HKEY_CURRENT_USER
+    });
+    let key = match root.open_subkey_with_flags(env_key_path(per_machine), KEY_WRITE) {
+        Ok(k) => k,
+        // 环境区键理论总存在（Windows 初始化创建）；create 仅作兜底
+        Err(_) => {
+            let (k, _) = root
+                .create_subkey(env_key_path(per_machine))
+                .with_context(|| format!("打开环境区失败: {}", env_key_path(per_machine)))?;
+            k
+        }
+    };
+    let is_path = name.eq_ignore_ascii_case("Path");
+    // REG_SZ / REG_EXPAND_SZ 均为 UTF-16LE + 终结 NUL（与 registry_create_set_view 同构造）
+    let mut bytes: Vec<u8> = value
+        .encode_utf16()
+        .flat_map(|u| u.to_le_bytes())
+        .collect();
+    bytes.extend_from_slice(&[0, 0]);
+    let vtype = if is_path || value.contains('%') {
+        // `Path` 与含 `%VAR%` 引用的值按 Windows 惯例写 REG_EXPAND_SZ
+        REG_EXPAND_SZ
+    } else {
+        REG_SZ
+    };
+    key.set_raw_value(name, &winreg::RegValue { bytes, vtype })
+        .with_context(|| format!("写入环境变量失败: {name}"))?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn env_write(_per_machine: bool, _name: &str, _value: &str) -> Result<()> {
+    Ok(())
+}
+
+/// 删除环境变量值（不存在视为成功）。
+#[cfg(windows)]
+pub fn env_delete(per_machine: bool, name: &str) -> Result<()> {
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_WRITE};
+    use winreg::RegKey;
+    let root = RegKey::predef(if per_machine {
+        HKEY_LOCAL_MACHINE
+    } else {
+        HKEY_CURRENT_USER
+    });
+    match root.open_subkey_with_flags(env_key_path(per_machine), KEY_WRITE) {
+        Ok(k) => match k.delete_value(name) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(anyhow::Error::from(e).context(format!("删除环境变量失败: {name}"))),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(anyhow::Error::from(e).context(format!("打开环境区失败: {}", env_key_path(per_machine)))),
+    }
+}
+
+#[cfg(not(windows))]
+pub fn env_delete(_per_machine: bool, _name: &str) -> Result<()> {
+    Ok(())
+}
+
+/// 广播 WM_SETTINGCHANGE "Environment"（Inno ChangesEnvironment 语义）：
+/// 已运行的 Explorer/桌面环境刷新后，新启动的进程即可看到新值，无需注销。
+/// 尽力而为（2 秒超时，忽略失败——已被挂起的窗口不阻塞安装流程）。
+#[cfg(windows)]
+pub fn env_broadcast() {
+    use windows::core::HSTRING;
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SendMessageTimeoutW, HWND_BROADCAST, SMTO_ABORTIFHUNG, WM_SETTINGCHANGE,
+    };
+    let env = HSTRING::from("Environment");
+    unsafe {
+        let _ = SendMessageTimeoutW(
+            HWND_BROADCAST,
+            WM_SETTINGCHANGE,
+            WPARAM(0),
+            LPARAM(env.as_ptr() as isize),
+            SMTO_ABORTIFHUNG,
+            2000,
+            None,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+pub fn env_broadcast() {}
+
+// ---------------------------------------------------------------------------
 // 窗口视觉（步骤 21：Win11 亚克力背景板）
 // ---------------------------------------------------------------------------
 

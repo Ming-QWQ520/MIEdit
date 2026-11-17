@@ -8,6 +8,7 @@ pub mod cliargs;
 pub mod componenttree;
 pub mod config;
 pub mod crc32;
+pub mod envspec;
 pub mod fileerror;
 pub mod files;
 pub mod installdir;
