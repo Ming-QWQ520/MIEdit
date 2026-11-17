@@ -199,6 +199,24 @@ fn run_install(
 
     fs::create_dir_all(dest).with_context(|| format!("创建目录失败: {}", dest.display()))?;
 
+    // 安装前命令（NSIS .onInit/Exec 语义，路线图步骤 23）：解包前执行，
+    // GUI 与静默模式同生效；abort_on_error 时中止（文件尚未写出，无残留）
+    for (i, spec) in pkg.config.install.exec_before.iter().enumerate() {
+        let describe = format!("安装前命令 #{}", i + 1);
+        push_log(st, format!("执行{describe}: {}", spec.cmd.trim()));
+        let outcome = miedit_core::runcmd::execute(spec, dest);
+        for line in miedit_core::runcmd::log_lines(&describe, spec, &outcome) {
+            push_log(st, line);
+        }
+        if miedit_core::runcmd::should_abort(spec, &outcome) {
+            anyhow::bail!(
+                "{} 失败: {}",
+                describe,
+                miedit_core::runcmd::abort_reason(spec, &outcome)
+            );
+        }
+    }
+
     // 3. 组件过滤：把选中规则展开为允许安装的包内路径集合
     let allowed: Option<(HashSet<String>, u64)> = selected_rules.map(|rules| {
         let mut set = HashSet::new();

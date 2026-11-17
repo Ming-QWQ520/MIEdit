@@ -22,8 +22,13 @@ pub struct UninstallManifest {
     pub shortcuts: Vec<String>,
     /// 快捷方式目录（绝对路径，如公共开始菜单的应用子目录）
     pub shortcut_dirs: Vec<String>,
-    /// 额外写入的注册表键（含 hive 前缀，整树删除）
+    /// 额外写入的注册表键（含 hive 前缀，整树删除；步骤 22 起兼容保留：
+    /// 新清单优先用 registry_values 精确清理，本字段仅用于计数/旧行为回退）
     pub registry_keys: Vec<String>,
+    /// 自定义注册表值清理引用（步骤 22 精确清理）：新建键整树删除，
+    /// 既有键只删本次写入的值（不误伤安装前已存在的内容）。
+    /// 旧清单无此字段 → 卸载器回退整树删除 registry_keys
+    pub registry_values: Vec<RegistryValueRef>,
     /// 卸载注册表键（不含 hive 前缀，如 SOFTWARE\...\Uninstall\{app_id}）
     pub uninstall_key: String,
     /// 用户数据/配置目录（安装时解析；仅当卸载时勾选“删除用户数据”才删除）
@@ -32,4 +37,28 @@ pub struct UninstallManifest {
     pub manifest_path: String,
     /// 安装时间（Unix 时间戳秒）
     pub installed_at: u64,
+    /// 卸载前执行命令（步骤 23；安装器从脚本复制，卸载器删除阶段前执行）
+    pub exec_before_uninstall: Vec<crate::config::RunCommandSpec>,
+}
+
+/// 单条自定义注册表值的清理引用（步骤 22）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RegistryValueRef {
+    /// 含 hive 前缀的键（与 registry_keys 一致）
+    pub key: String,
+    /// 值名；空 = 仅键级清理（该 spec 无值写入时）
+    pub name: String,
+    /// 安装前该键不存在（卸载时可整树删除，避免误删既有内容）
+    pub created_key: bool,
+}
+
+impl Default for RegistryValueRef {
+    fn default() -> Self {
+        Self {
+            key: String::new(),
+            name: String::new(),
+            created_key: false,
+        }
+    }
 }

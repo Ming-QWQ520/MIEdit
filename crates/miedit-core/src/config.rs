@@ -121,6 +121,15 @@ pub struct InstallConfig {
     /// 允许安装到盘根/网络共享根（NSIS `AllowRootDirInstall` 对齐，路线图步骤 20）。
     /// 默认 false：目录页拒绝根目录安装并提示选择子文件夹（NSIS 安全默认语义）
     pub allow_root_dir_install: bool,
+    /// 安装前执行命令（NSIS `.onInit`/`Exec` 语义，路线图步骤 23）：
+    /// 解包前执行，GUI 与静默模式同生效；`abort_on_error` 时中止安装
+    pub exec_before: Vec<RunCommandSpec>,
+    /// 安装完成后执行命令（NSIS `ExecWait` 语义，路线图步骤 23）：
+    /// 卸载器/清单/快捷方式/注册表全部写入后执行
+    pub exec_after: Vec<RunCommandSpec>,
+    /// 卸载前执行命令（如停服务/关闭进程，路线图步骤 23）：
+    /// 失败不中止卸载（占用文件走重试/重启删除路径），仅记录错误
+    pub exec_before_uninstall: Vec<RunCommandSpec>,
 }
 
 impl Default for InstallConfig {
@@ -137,6 +146,38 @@ impl Default for InstallConfig {
             uninstall_background: None,
             min_version: String::new(),
             allow_root_dir_install: false,
+            exec_before: Vec::new(),
+            exec_after: Vec::new(),
+            exec_before_uninstall: Vec::new(),
+        }
+    }
+}
+
+/// 自定义命令（NSIS `Exec`/`ExecWait` 语义，路线图步骤 23）。
+/// `{install_dir}` 模板在执行时替换为实际安装目录。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RunCommandSpec {
+    /// 可执行文件：绝对路径 / 系统 PATH 内程序名；支持 `{install_dir}` 模板
+    pub cmd: String,
+    /// 参数（引号感知切分）；支持 `{install_dir}` 模板
+    pub args: String,
+    /// 工作目录；空 = 安装目录；支持 `{install_dir}` 模板
+    pub working_dir: String,
+    /// 退出码非 0 或启动失败时中止（默认 false：仅记录日志继续）
+    pub abort_on_error: bool,
+    /// 程序不存在（未随包安装/系统未提供）时忽略而不报错（默认 false）
+    pub optional: bool,
+}
+
+impl Default for RunCommandSpec {
+    fn default() -> Self {
+        Self {
+            cmd: String::new(),
+            args: String::new(),
+            working_dir: String::new(),
+            abort_on_error: false,
+            optional: false,
         }
     }
 }
@@ -177,6 +218,9 @@ pub struct ComponentSpec {
     /// 必装组件：勾选锁定
     pub required: bool,
     pub files: Vec<usize>,
+    /// 父分组路径（NSIS `SectionGroup`/`SectionGroupEnd` 嵌套等价，路线图步骤 24）：
+    /// 如 `"Tools/Compression"`（`/` 分隔多级），空 = 根级。中间组自动创建。
+    pub group: String,
 }
 
 impl Default for ComponentSpec {
@@ -186,6 +230,7 @@ impl Default for ComponentSpec {
             description: String::new(),
             required: false,
             files: Vec::new(),
+            group: String::new(),
         }
     }
 }
@@ -408,8 +453,19 @@ pub struct FileSpec {
 pub struct RegistrySpec {
     /// 如 `HKCU\Software\Vendor\App` 或 `HKLM\...`
     pub key: String,
-    /// 仅支持字符串值；`{install_dir}` 会在安装时替换
+    /// 字符串值（REG_SZ）；`{install_dir}` 会在安装时替换
     pub values: BTreeMap<String, String>,
+    /// 注册表视图（NSIS `SetRegView` 语义，路线图步骤 22）：
+    /// `default`（默认）/ `64`（KEY_WOW64_64KEY）/ `32`（KEY_WOW64_32KEY），大小写不敏感
+    pub view: String,
+    /// DWORD 值（字符串形式：十进制或 `0x` 前缀十六进制，如 `"1"` / `"0x80"`；负数按 32 位回绕）
+    pub dwords: BTreeMap<String, String>,
+    /// 二进制值（REG_BINARY，十六进制字符串，可含空白，长度必须为偶数，如 `"DE AD BE EF"`）
+    pub binary: BTreeMap<String, String>,
+    /// REG_EXPAND_SZ 值（含 `%VAR%` 环境变量引用的字符串，安装时原样写入；`{install_dir}` 模板可用）
+    pub expand_sz: BTreeMap<String, String>,
+    /// REG_MULTI_SZ 值（多字符串列表）
+    pub multi_sz: BTreeMap<String, Vec<String>>,
 }
 
 /// 读取 UI 文案：优先使用脚本覆盖，否则使用内置英文默认值。

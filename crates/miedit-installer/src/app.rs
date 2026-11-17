@@ -47,6 +47,8 @@ pub struct InstallerApp {
     install_type: usize,
     /// 组件页描述面板跟随的组件索引（悬停/点击更新，NSIS 描述框语义）
     desc_index: Option<usize>,
+    /// 组件分组树已折叠组（步骤 24：NSIS SectionGroup 展开态；空集 = 全部展开）
+    comp_collapsed: std::collections::BTreeSet<String>,
     run_checked: Vec<bool>,
     err_msg: String,
     theme: theme::Theme,
@@ -186,6 +188,7 @@ pub fn run_gui(
                 license_accepted: false,
                 license_scrolled: false,
                 component_checked,
+                comp_collapsed: std::collections::BTreeSet::new(),
                 install_type,
                 desc_index: None,
                 run_checked: Vec::new(),
@@ -927,45 +930,131 @@ impl InstallerApp {
                     .stroke(Stroke::new(1.0, self.theme.card_stroke))
                     .inner_margin(egui::Margin::same(14.0))
                     .show(ui, |ui| {
-                        for (i, comp) in cfg.components.iter().enumerate() {
-                            let checked = checked_next.get(i).copied().unwrap_or(true);
-                            let mut next = checked;
-                            let row = ui.horizontal(|ui| {
-                                let resp = ui
-                                    .add_enabled_ui(!comp.required, |ui| {
-                                        ui.checkbox(
-                                            &mut next,
-                                            egui::RichText::new(&comp.name)
-                                                .color(self.theme.text)
-                                                .size(15.0)
-                                                .strong(),
-                                        )
-                                    })
-                                    .inner;
-                                // 步骤 11：悬停/点击组件行 → 描述面板跟随（NSIS 描述框语义）
-                                if resp.hovered() || resp.clicked() {
-                                    desc_next = Some(i);
+                        // 步骤 24：组件分组树（NSIS SectionGroup/SectionGroupEnd 语义）——
+                        // `group = "父组/子组"` 路径 → 缩进树行；组行可折叠/展开，
+                        // 组复选框三态联动子组件（必装组件保持勾选）；
+                        // 安装类型与 CLI --components= 仍按扁平索引运作，互不影响。
+                        let rows = miedit_core::componenttree::build(&cfg.components);
+                        let mut collapsed_next = self.comp_collapsed.clone();
+                        for row in &rows {
+                            // 折叠判定：组行仅在「真祖先」被折叠时隐藏（自身折叠仍渲染，
+                            // 以便展开）；组件行在整条组路径任一层被折叠时隐藏
+                            let skip = match row.kind {
+                                miedit_core::componenttree::RowKind::Group => {
+                                    let parent = row
+                                        .group_path
+                                        .rsplit_once('/')
+                                        .map(|(p, _)| p.to_string())
+                                        .unwrap_or_default();
+                                    miedit_core::componenttree::is_hidden(&collapsed_next, &parent)
                                 }
-                                if comp.required {
-                                    chip_small(
-                                        ui,
-                                        txt(cfg, self.language, "components_required"),
-                                        self.theme.accent,
-                                    );
+                                miedit_core::componenttree::RowKind::Component => {
+                                    miedit_core::componenttree::is_hidden(
+                                        &collapsed_next,
+                                        &row.group_path,
+                                    )
                                 }
-                            });
-                            // 整行作为悬停面（必装组件的复选框处于禁用态，其响应不含悬停）
-                            let hover = ui.interact(
-                                row.response.rect,
-                                egui::Id::new(("comp_row_hover", i)),
-                                egui::Sense::hover(),
-                            );
-                            if hover.hovered() {
-                                desc_next = Some(i);
+                            };
+                            if skip {
+                                continue;
                             }
-                            checked_next[i] = if comp.required { true } else { next };
-                            ui.add_space(6.0);
+                            match row.kind {
+                                miedit_core::componenttree::RowKind::Group => {
+                                    let state = miedit_core::componenttree::group_state(
+                                        &cfg.components,
+                                        &checked_next,
+                                        &row.group_path,
+                                    );
+                                    ui.horizontal(|ui| {
+                                        ui.add_space(row.depth as f32 * 18.0);
+                                        let is_collapsed =
+                                            collapsed_next.contains(&row.group_path);
+                                        let arrow = if is_collapsed { "▸" } else { "▾" };
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    egui::RichText::new(arrow)
+                                                        .color(self.theme.text_dim)
+                                                        .size(12.0),
+                                                )
+                                                .frame(false),
+                                            )
+                                            .clicked()
+                                        {
+                                            if is_collapsed {
+                                                collapsed_next.remove(&row.group_path);
+                                            } else {
+                                                collapsed_next.insert(row.group_path.clone());
+                                            }
+                                        }
+                                        let mut display =
+                                            state != miedit_core::componenttree::GroupState::None_;
+                                        let resp = ui.checkbox(
+                                            &mut display,
+                                            egui::RichText::new(&row.label)
+                                                .color(self.theme.text)
+                                                .size(14.5)
+                                                .strong(),
+                                        );
+                                        if resp.changed() {
+                                            miedit_core::componenttree::toggle_group(
+                                                &cfg.components,
+                                                &mut checked_next,
+                                                &row.group_path,
+                                                display,
+                                            );
+                                        }
+                                    });
+                                    ui.add_space(2.0);
+                                }
+                                miedit_core::componenttree::RowKind::Component => {
+                                    let i = match row.component {
+                                        Some(i) => i,
+                                        None => continue,
+                                    };
+                                    let comp = &cfg.components[i];
+                                    let checked = checked_next.get(i).copied().unwrap_or(true);
+                                    let mut next = checked;
+                                    let row_r = ui.horizontal(|ui| {
+                                        ui.add_space(row.depth as f32 * 18.0);
+                                        let resp = ui
+                                            .add_enabled_ui(!comp.required, |ui| {
+                                                ui.checkbox(
+                                                    &mut next,
+                                                    egui::RichText::new(&row.label)
+                                                        .color(self.theme.text)
+                                                        .size(15.0)
+                                                        .strong(),
+                                                )
+                                            })
+                                            .inner;
+                                        // 步骤 11：悬停/点击组件行 → 描述面板跟随（NSIS 描述框语义）
+                                        if resp.hovered() || resp.clicked() {
+                                            desc_next = Some(i);
+                                        }
+                                        if comp.required {
+                                            chip_small(
+                                                ui,
+                                                txt(cfg, self.language, "components_required"),
+                                                self.theme.accent,
+                                            );
+                                        }
+                                    });
+                                    // 整行作为悬停面（必装组件的复选框处于禁用态，其响应不含悬停）
+                                    let hover = ui.interact(
+                                        row_r.response.rect,
+                                        egui::Id::new(("comp_row_hover", i)),
+                                        egui::Sense::hover(),
+                                    );
+                                    if hover.hovered() {
+                                        desc_next = Some(i);
+                                    }
+                                    checked_next[i] = if comp.required { true } else { next };
+                                    ui.add_space(6.0);
+                                }
+                            }
                         }
+                        self.comp_collapsed = collapsed_next;
                     });
                 ui.add_space(6.0);
                 // 步骤 11：组件描述面板（NSIS 组件页描述框语义；必装组件带「必需」徽标）

@@ -171,8 +171,14 @@ fn do_uninstall(
     delete_user_data: bool,
 ) -> Vec<String> {
     let user_data = if delete_user_data { &m.user_data_dirs } else { &Vec::new() };
+    // 步骤 22：注册表操作数（新清单用精确清理条数，旧清单回退键数）
+    let reg_ops = if m.registry_values.is_empty() {
+        m.registry_keys.len()
+    } else {
+        m.registry_values.len()
+    };
     let total = m.files.len() + m.dirs.len() + m.shortcuts.len() + m.shortcut_dirs.len()
-        + m.registry_keys.len() + user_data.len() + 1;
+        + reg_ops + user_data.len() + 1;
     {
         let mut r = run.lock().unwrap();
         r.total = total;
@@ -189,6 +195,24 @@ fn do_uninstall(
             c.request_repaint();
         }
     };
+
+    // 0. 卸载前命令（步骤 23：NSIS 卸载脚本 Exec 语义；如停服务/关闭进程）。
+    //    失败不中止卸载（继续删除，被占用文件走重试/重启删除路径），仅记录错误
+    for (i, spec) in m.exec_before_uninstall.iter().enumerate() {
+        let describe = format!("卸载前命令 #{}", i + 1);
+        tick(run, format!("执行{describe}: {}", spec.cmd.trim()), ctx);
+        let outcome = miedit_core::runcmd::execute(spec, Path::new(&m.install_dir));
+        for line in miedit_core::runcmd::log_lines(&describe, spec, &outcome) {
+            run.lock().unwrap().log.push(line);
+        }
+        if miedit_core::runcmd::should_abort(spec, &outcome) {
+            errors.push(format!(
+                "{} 失败: {}（已忽略，继续卸载）",
+                describe,
+                miedit_core::runcmd::abort_reason(spec, &outcome)
+            ));
+        }
+    }
 
     // 1. 文件（NSIS Delete /REBOOTOK 对齐：占用中的文件转入重启删除，不算失败）
     for f in &m.files {
@@ -285,14 +309,38 @@ fn do_uninstall(
         }
     }
 
-    // 5. 注册表
-    for k in &m.registry_keys {
-        if let Ok((per_machine, rest)) = winutil::split_hive(k) {
-            if let Err(e) = winutil::registry_delete_tree(per_machine, &rest) {
-                errors.push(format!("{e:#}"));
+    // 5. 注册表（步骤 22 精确清理：本次新建的键整树删除，既有键只删本次写入的
+    //    值并尝试清理空壳键——不误伤安装前已存在的内容；旧清单无 registry_values
+    //    字段 → 回退整树删除 registry_keys，行为与旧版卸载器一致）
+    if !m.registry_values.is_empty() {
+        for r in &m.registry_values {
+            if let Ok((pm, rest)) = winutil::split_hive(&r.key) {
+                if r.created_key {
+                    if let Err(e) = winutil::registry_delete_tree(pm, &rest) {
+                        errors.push(format!("{e:#}"));
+                    }
+                } else {
+                    if !r.name.is_empty() {
+                        if let Err(e) = winutil::registry_delete_value(pm, &rest, &r.name, winutil::RegView::Default) {
+                            errors.push(format!("{e:#}"));
+                        }
+                    }
+                    if let Err(e) = winutil::registry_delete_subkey_if_empty(pm, &rest, winutil::RegView::Default) {
+                        errors.push(format!("{e:#}"));
+                    }
+                }
             }
+            tick(run, format!("移除注册表值 {}", r.key), ctx);
         }
-        tick(run, format!("移除注册表键 {k}"), ctx);
+    } else {
+        for k in &m.registry_keys {
+            if let Ok((per_machine, rest)) = winutil::split_hive(k) {
+                if let Err(e) = winutil::registry_delete_tree(per_machine, &rest) {
+                    errors.push(format!("{e:#}"));
+                }
+            }
+            tick(run, format!("移除注册表键 {k}"), ctx);
+        }
     }
     if let Err(e) = winutil::registry_delete_tree(m.per_machine, &m.uninstall_key) {
         errors.push(format!("{e:#}"));

@@ -4,8 +4,9 @@
 //! 以及安装器/卸载器共用的 Windows 工具函数。
 
 pub mod archive;
-pub mod config;
 pub mod cliargs;
+pub mod componenttree;
+pub mod config;
 pub mod crc32;
 pub mod fileerror;
 pub mod files;
@@ -14,7 +15,9 @@ pub mod installtypes;
 pub mod langs;
 pub mod manifest;
 pub mod overwrite;
+pub mod regspec;
 pub mod repair;
+pub mod runcmd;
 pub mod sysreq;
 pub mod templates;
 pub mod trailer;

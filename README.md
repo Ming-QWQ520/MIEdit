@@ -28,13 +28,14 @@
 | 现代化 UI | egui 无边框窗口、玻璃卡片、主题色可配、自绘进度条、中文字体自适应 |
 | **全窗口图片背景** | `background = "bg.png"`，`cover / contain / stretch` 三种模式 |
 | 安装向导 | 欢迎 → 许可（可强制滚动到底）→ 组件选择（**Space required 联动**）→ 目录（**磁盘空间检测**）→ 安装进度（计数/速度/**细节开关**）→ 完成（**多任务复选**） |
-| **组件选择** | NSIS Section / Inno Components 风格：`[[components]]` + 规则引用，必装锁定、全选/重置 |
+| **组件选择** | NSIS Section / Inno Components 风格：`[[components]]` + 规则引用，必装锁定、全选/重置；**分组树**：`group = "父组/子组"`（NSIS `SectionGroup`），组件页树形渲染、组行折叠/展开、组复选框三态联动 |
 | **安装类型** | NSIS `InstallTypes` / Inno `[Types]` 对齐：`[[install_types]]` 组件页顶部单选（Typical/Full/…），切换类型联动组件勾选；手动改动任意组件自动切到 **Custom** |
 | **组件描述侧栏** | NSIS 组件页描述框对齐：悬停/点击组件行，下方描述面板跟随显示 `description`，必装组件带「必需」徽标，空描述显示占位 |
 | **安装后任务** | Inno [Run] 风格：`[[install.run_tasks]]` 完成页复选，支持 exe 参数与文档打开 |
 | **NSIS 式卸载器** | **自包含**：清单与图标内嵌 `uninstall.exe`（MRISUNIN 尾部，无外部 json）；确认页（可勾选删除用户数据）→ 进度（细节默认收起可展开）→ 完成 |
 | **自删除** | 自身移入 %TEMP% + 分离 cmd：等待退出 → 删除自身 → `rd /s /q` 清理安装目录 → 重试 |
-| 卸载注册表 | HKLM/HKCU `...\Uninstall\{app_id}`（控制面板可见），支持自定义注册表键值 |
+| **自定义命令** | NSIS `Exec`/`ExecWait` 对齐：`[[install.exec_before]]`（解包前）/ `[[install.exec_after]]`（清单就绪后）/ `[[install.exec_before_uninstall]]`（卸载前，如停服务）；`abort_on_error`/`optional` 开关，`{install_dir}` 模板，GUI 与静默同生效，Win 下不闪黑框 |
+| 卸载注册表 | HKLM/HKCU `...\Uninstall\{app_id}`（控制面板可见）；自定义注册表支持**全类型**（NSIS `WriteRegStr/DWORD/Bin/ExpandStr/MultiSz` 对齐）与 32/64 位视图（`SetRegView`）；卸载**精确清理**：新建键整树删、既有键只删本次写入的值 |
 | 快捷方式 | 开始菜单（自动含“卸载”快捷方式）与桌面，per-machine / per-user 自适应 |
 | **默认图标** | 未配置图标时自动使用内置 **modern-install.ico / modern-uninstall.ico**（NSIS 做法），PE 资源 + 窗口图标同步替换 |
 | **EXE 版本信息** | 安装器/卸载器 EXE 嵌入 VERSIONINFO（NSIS `VIProductVersion` / `VIAddVersionKey` 对齐）：产品名/版本/公司/描述/版权，资源管理器属性可见 |

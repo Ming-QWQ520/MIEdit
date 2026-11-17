@@ -248,6 +248,36 @@ pub fn build_package(
         );
     }
 
+    // 5.2.1 校验自定义命令（NSIS Exec/ExecWait 对齐，路线图步骤 23）
+    for (tag, list) in [
+        ("exec_before", &cfg.install.exec_before),
+        ("exec_after", &cfg.install.exec_after),
+        ("exec_before_uninstall", &cfg.install.exec_before_uninstall),
+    ] {
+        for (j, c) in list.iter().enumerate() {
+            if c.cmd.trim().is_empty() {
+                bail!("[[install.{tag}]] #{} 缺少 cmd", j + 1);
+            }
+        }
+    }
+
+    // 5.2.2 校验注册表项（步骤 22：hive/视图/全类型字段格式，与安装期同一套纯函数）
+    for (i, spec) in cfg.registry.iter().enumerate() {
+        if spec.key.trim().is_empty() {
+            continue;
+        }
+        let label = format!("[[registry]] #{}", i + 1);
+        if let Err(e) = miedit_core::winutil::split_hive(spec.key.trim()) {
+            bail!("{label} 键无效: {e}");
+        }
+        if let Err(e) = miedit_core::regspec::view_of(spec) {
+            bail!("{label} view 无效: {e}");
+        }
+        if let Err(e) = miedit_core::regspec::resolve_entries(spec, "") {
+            bail!("{label} {e}");
+        }
+    }
+
     // 5.3 校验快捷方式条目（Inno [Icons] 对齐，路线图步骤 13）
     const SHORTCUT_LOCATIONS: [&str; 3] = ["start_menu", "desktop", "quick_launch"];
     for (i, e) in cfg.shortcuts.entries.iter().enumerate() {

@@ -264,6 +264,7 @@ impl BuilderApp {
                 miedit_core::config::RegistrySpec {
                     key: r.key.trim().to_string(),
                     values,
+                    ..Default::default()
                 }
             })
             .collect();
@@ -839,6 +840,7 @@ impl BuilderApp {
                                     }
                                 });
                                 text_input(ui, &mut comp.description, "描述", inner_w);
+                                text_input(ui, &mut comp.group, "分组（可选，如 Tools/Compression）", inner_w);
                                 let mut files_text = rule_indices_to_string(&comp.files);
                                 ui.horizontal(|ui| {
                                     text_input(ui, &mut files_text, "0,2", 90.0);

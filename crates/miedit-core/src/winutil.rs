@@ -3,11 +3,39 @@
 use anyhow::{anyhow, bail, Context, Result};
 use std::path::{Path, PathBuf};
 
-/// 注册表值类型（MVP 仅字符串与 DWORD）。
+/// 注册表值类型（步骤 22：全类型，NSIS `WriteRegStr`/`WriteRegDWORD`/`WriteRegBin`/
+/// `WriteRegExpandStr`/`WriteRegMultiSz` 对齐）。
 #[derive(Debug, Clone)]
 pub enum RegValue {
     Str(String),
     Dword(u32),
+    /// REG_EXPAND_SZ（含 `%VAR%` 环境变量引用的字符串，Windows 解释器展开）
+    ExpandSz(String),
+    /// REG_BINARY
+    Binary(Vec<u8>),
+    /// REG_MULTI_SZ
+    MultiSz(Vec<String>),
+}
+
+/// 注册表视图（NSIS `SetRegView` 语义，路线图步骤 22）：
+/// 64 位进程写 32 位注册表树（或反之）时使用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegView {
+    Default,
+    /// KEY_WOW64_64KEY：访问 64 位注册表树
+    Wow64_64,
+    /// KEY_WOW64_32KEY：访问 32 位（WoW）注册表树
+    Wow64_32,
+}
+
+#[cfg(windows)]
+fn view_flags(view: RegView) -> u32 {
+    use winreg::enums::{KEY_WOW64_32KEY, KEY_WOW64_64KEY};
+    match view {
+        RegView::Default => 0,
+        RegView::Wow64_64 => KEY_WOW64_64KEY,
+        RegView::Wow64_32 => KEY_WOW64_32KEY,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -425,14 +453,27 @@ pub fn read_prev_install_dir(per_machine: bool, app_id: &str) -> Option<PathBuf>
     None
 }
 
-/// 创建键并写入值。
+/// 创建键并写入值（默认视图；旧调用点保持兼容）。
 #[cfg(windows)]
 pub fn registry_create_set(
     per_machine: bool,
     key_path: &str,
     values: &[(String, RegValue)],
 ) -> Result<()> {
-    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE};
+    registry_create_set_view(per_machine, key_path, values, RegView::Default)
+}
+
+/// 创建键并写入值（可指定 32/64 位视图，NSIS `SetRegView` 对齐）。
+#[cfg(windows)]
+pub fn registry_create_set_view(
+    per_machine: bool,
+    key_path: &str,
+    values: &[(String, RegValue)],
+    view: RegView,
+) -> Result<()> {
+    use winreg::enums::{
+        HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_BINARY, REG_EXPAND_SZ,
+    };
     use winreg::RegKey;
 
     let root = RegKey::predef(if per_machine {
@@ -441,12 +482,37 @@ pub fn registry_create_set(
         HKEY_CURRENT_USER
     });
     let (key, _) = root
-        .create_subkey_with_flags(key_path, KEY_WRITE | KEY_READ)
+        .create_subkey_with_flags(key_path, KEY_WRITE | KEY_READ | view_flags(view))
         .with_context(|| format!("创建注册表键失败: {key_path}"))?;
     for (name, val) in values {
         match val {
-            RegValue::Str(s) => key.set_value(name, &s.as_str())?,
-            RegValue::Dword(d) => key.set_value(name, d)?,
+            RegValue::Str(s) => key.set_value(name.as_str(), &s.as_str())?,
+            RegValue::Dword(d) => key.set_value(name.as_str(), d)?,
+            // REG_BINARY / REG_EXPAND_SZ 无 ToRegValue 映射（winreg 0.52 仅
+            // str/String/u32/u64/Vec<String>）：手工构造原始值写入
+            RegValue::Binary(b) => key.set_raw_value(
+                name.as_str(),
+                &winreg::RegValue {
+                    bytes: b.clone(),
+                    vtype: REG_BINARY,
+                },
+            )?,
+            RegValue::MultiSz(m) => key.set_value(name.as_str(), m)?,
+            // REG_EXPAND_SZ：UTF-16LE + 终结 NUL
+            RegValue::ExpandSz(s) => {
+                let mut bytes: Vec<u8> = s
+                    .encode_utf16()
+                    .flat_map(|u| u.to_le_bytes())
+                    .collect();
+                bytes.extend_from_slice(&[0, 0]); // 终结 NUL
+                key.set_raw_value(
+                    name.as_str(),
+                    &winreg::RegValue {
+                        bytes,
+                        vtype: REG_EXPAND_SZ,
+                    },
+                )?;
+            }
         }
     }
     Ok(())
@@ -459,6 +525,110 @@ pub fn registry_create_set(
     values: &[(String, RegValue)],
 ) -> Result<()> {
     let _ = (per_machine, key_path, values);
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn registry_create_set_view(
+    per_machine: bool,
+    key_path: &str,
+    values: &[(String, RegValue)],
+    view: RegView,
+) -> Result<()> {
+    let _ = (per_machine, key_path, values, view);
+    Ok(())
+}
+
+/// 键是否存在（精确清理判断用；不存在 = 本次安装新建键，卸载时可整树删除）。
+#[cfg(windows)]
+pub fn registry_key_exists(per_machine: bool, key_path: &str, view: RegView) -> bool {
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ};
+    use winreg::RegKey;
+    let root = RegKey::predef(if per_machine {
+        HKEY_LOCAL_MACHINE
+    } else {
+        HKEY_CURRENT_USER
+    });
+    root.open_subkey_with_flags(key_path, KEY_READ | view_flags(view))
+        .is_ok()
+}
+
+#[cfg(not(windows))]
+pub fn registry_key_exists(_per_machine: bool, _key_path: &str, _view: RegView) -> bool {
+    false
+}
+
+/// 删除单个注册表值（不存在视为成功；步骤 22 精确清理：既有键只删本次写入的值）。
+#[cfg(windows)]
+pub fn registry_delete_value(
+    per_machine: bool,
+    key_path: &str,
+    name: &str,
+    view: RegView,
+) -> Result<()> {
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_WRITE};
+    use winreg::RegKey;
+    let root = RegKey::predef(if per_machine {
+        HKEY_LOCAL_MACHINE
+    } else {
+        HKEY_CURRENT_USER
+    });
+    match root.open_subkey_with_flags(key_path, KEY_WRITE | view_flags(view)) {
+        Ok(k) => match k.delete_value(name) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(anyhow::Error::from(e)
+                .context(format!("删除注册表值失败: {key_path}\\{name}"))),
+        },
+        // 键已不存在 = 无此值
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(anyhow::Error::from(e)
+            .context(format!("打开注册表键失败: {key_path}"))),
+    }
+}
+
+#[cfg(not(windows))]
+pub fn registry_delete_value(
+    _per_machine: bool,
+    _key_path: &str,
+    _name: &str,
+    _view: RegView,
+) -> Result<()> {
+    Ok(())
+}
+
+/// 仅当键为空（无子键无值）时删除该键（清理我们自己创建的空壳键）；
+/// 键不存在或仍有内容时静默成功——绝不误删既有内容。
+#[cfg(windows)]
+pub fn registry_delete_subkey_if_empty(
+    per_machine: bool,
+    key_path: &str,
+    view: RegView,
+) -> Result<()> {
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE};
+    use winreg::RegKey;
+    let root = RegKey::predef(if per_machine {
+        HKEY_LOCAL_MACHINE
+    } else {
+        HKEY_CURRENT_USER
+    });
+    if let Ok(k) = root.open_subkey_with_flags(key_path, KEY_READ | KEY_WRITE | view_flags(view)) {
+        let has_subs = k.enum_keys().next().is_some();
+        let has_vals = k.enum_values().next().is_some();
+        if !has_subs && !has_vals {
+            // 与 registry_delete_tree 同样的删除路径；失败仅忽略（尽力清理）
+            let _ = root.delete_subkey(key_path);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn registry_delete_subkey_if_empty(
+    _per_machine: bool,
+    _key_path: &str,
+    _view: RegView,
+) -> Result<()> {
     Ok(())
 }
 

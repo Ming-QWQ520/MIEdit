@@ -125,6 +125,7 @@ mod tests {
             description: String::new(),
             required,
             files: vec![0],
+            group: String::new(),
         }
     }
 

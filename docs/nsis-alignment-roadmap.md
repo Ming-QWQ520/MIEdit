@@ -30,6 +30,9 @@
 | 19 | 卸载器壁纸 | Inno 卸载向导背景图 / NSIS `BGImage` | **已完成**（v0.10.0） |
 | 20 | 目录页空间动态刷新 + 安装目录校验 | NSIS DirectoryPage / `AllowRootDirInstall` / `.onVerifyInstDir` | **已完成**（v0.11.0） |
 | 21 | 步骤导航 + UI 材质/模板 + Linux/CLI 适配 + 组件空间联动 | HM NIS Edit 向导 / NSIS components 页 / 跨平台打包 | **已完成**（v0.12.0） |
+| 22 | 注册表全类型 + 32/64 视图 + 卸载精确清理 | NSIS `WriteRegDWORD/WriteRegBin/WriteRegExpandStr/WriteRegMultiSz/SetRegView` | **已完成**（v0.13.0） |
+| 23 | 安装前/后 + 卸载前自定义命令（ExecWait） | NSIS `Exec`/`ExecWait` / Inno `[Run]` 前后段 | **已完成**（v0.13.0） |
+| 24 | 组件分组树（SectionGroup） | NSIS `SectionGroup`/`SectionGroupEnd` | **已完成**（v0.13.0） |
 
 ## 迭代步骤定义
 
@@ -180,6 +183,44 @@
 - **验收**：core 单测全过（87 项）；Linux/Windows 双平台 check 0 error；
   YAML 语法校验通过。
 
+### 步骤 22：注册表全类型 + 32/64 视图 + 卸载精确清理（NSIS SetRegView 对齐）
+- **做什么**：① `[[registry]]` 值类型从仅 REG_SZ 扩展到全类型：`dwords`
+  （十进制/`0x` 十六进制/负数 32 位回绕）、`binary`（十六进制串，长度偶数）、
+  `expand_sz`、`multi_sz`，加 `view = "default/64/32"`（NSIS `SetRegView`，
+  KEY_WOW64_32KEY/64KEY）；② 卸载精确清理：安装时记录键是否为本次新建
+  （`registry_key_exists` 判断），卸载时**新建键整树删除、既有键只删本次写入的
+  值并尝试清理空壳键**——不再误伤安装前已存在的内容（旧清单无
+  `registry_values` 字段 → 回退整树删除，行为不变）。
+- **实现**：解析/校验纯函数下沉 `miedit_core::regspec`（parse_dword/
+  parse_hex_binary/parse_view/resolve_entries，6 项单测）；winreg 0.52 无
+  REG_BINARY/REG_EXPAND_SZ 的 `ToRegValue` 映射，用 `set_raw_value` 手工构造；
+  编译器新增 5.2.2 注册表项校验（与安装期同一套纯函数）。
+- **验收**：全类型往返单测；双平台 check 0 error；旧清单/旧脚本行为不变。
+
+### 步骤 23：安装前/后 + 卸载前自定义命令（NSIS Exec/ExecWait）
+- **做什么**：`[[install.exec_before]]`（解包前，NSIS `.onInit`/`Exec`）、
+  `[[install.exec_after]]`（清单/卸载器写入完成后，ExecWait）、
+  `[[install.exec_before_uninstall]]`（卸载删除阶段前，如停服务/关进程）；
+  每条 `cmd/args/working_dir`（`{install_dir}` 模板）+ `abort_on_error`
+  （退出码非 0 中止）+ `optional`（程序缺失仅告警）；GUI 与静默同生效；
+  Windows 子进程 CREATE_NO_WINDOW 不闪黑框；退出码/输出尾部写入日志。
+- **实现**：展开/切分/决策纯函数下沉 `miedit_core::runcmd`
+  （split_args 引号感知、should_abort 矩阵、log_lines，4 项单测）；
+  卸载前命令由安装器复制进卸载清单（卸载器无脚本只读清单）；
+  卸载命令失败不中止卸载（占用文件走重试/重启删除路径）。
+- **验收**：决策矩阵单测；双平台 check 0 error；编译器拒绝空 cmd。
+
+### 步骤 24：组件分组树（NSIS SectionGroup）
+- **做什么**：`[[components]]` 新增 `group = "父组/子组"`（`/` 分隔多级，
+  空 = 根级，TOML 友好且等价于 NSIS SectionGroup/SectionGroupEnd 嵌套）；
+  组件页树形渲染：组行可折叠/展开（▸/▾）、组复选框三态（全选/部分/全不选）
+  联动子组件（必装组件保持勾选）；声明顺序保持、中间组隐式创建；
+  安装类型与 CLI `--components=` 仍按扁平索引运作。
+- **实现**：树构建/组勾选/三态/折叠判定纯函数下沉
+  `miedit_core::componenttree`（5 项单测）；安装器组件页改树渲染；
+  builder 组件卡片加 group 输入框。
+- **验收**：建树/联动/折叠单测；双平台 check 0 error。
+
 ## 工程约束（每次迭代都要遵守）
 
 1. **纯 Rust**：不引入 C 构建链；新增依赖须在 Windows/Linux 双平台可编译。
@@ -192,6 +233,32 @@
 6. **版本号**：功能对齐批次完成后递增 `Cargo.toml` workspace version。
 
 ## 变更日志
+
+- v0.13.0（步骤 22–24）：**注册表全类型与精确卸载清理 + ExecWait 自定义
+  命令 + 组件分组树**（NSIS 成熟度对齐批次）：
+  ① `[[registry]]` 值类型从仅 REG_SZ 扩展到**全类型**（NSIS
+  `WriteRegDWORD`/`WriteRegBin`/`WriteRegExpandStr`/`WriteRegMultiSz`）：
+  `dwords`（十进制/`0x` 十六进制/负数 32 位回绕）、`binary`（十六进制串），
+  `expand_sz`、`multi_sz`，加 `view = "default/64/32"`（NSIS `SetRegView`，
+  KEY_WOW64_32KEY/64KEY）；winreg 0.52 对 REG_BINARY/REG_EXPAND_SZ 无
+  `ToRegValue` 映射，用 `set_raw_value` 手工构造（REG_BINARY 原始字节、
+  REG_EXPAND_SZ UTF-16LE+NUL）。② **卸载精确清理**：安装时记录键是否为
+  本次新建（`registry_key_exists`），卸载时新建键整树删除、**既有键只删
+  本次写入的值并尝试清理空壳键**——不误伤安装前已存在的内容（旧清单无
+  `registry_values` 字段回退整树删除，行为不变）。③ **自定义命令**（NSIS
+  `Exec`/`ExecWait` / Inno `[Run]` 前后段）：`[[install.exec_before]]`
+  （解包前）、`[[install.exec_after]]`（清单/卸载器就绪后）、
+  `[[install.exec_before_uninstall]]`（随清单内嵌/落盘，卸载删除阶段前，
+  失败不中止卸载）；每条 `cmd/args/working_dir`（`{install_dir}` 模板）+
+  `abort_on_error` + `optional`；GUI 与静默同生效；Windows CREATE_NO_WINDOW
+  不闪黑框；退出码/输出尾部入日志。④ **组件分组树**（NSIS
+  `SectionGroup`/`SectionGroupEnd`）：`[[components]]` 新增
+  `group = "父组/子组"`，组件页树形渲染（组行 ▸/▾ 折叠展开、组复选框
+  三态联动子组件且必装保持勾选、声明顺序保持、中间组隐式创建），
+  安装类型与 CLI `--components=` 仍按扁平索引运作。纯函数下沉
+  `regspec`（6 单测）/`runcmd`（4 单测）/`componenttree`（5 单测），
+  core 102 项全过；编译器新增 5.2.1 命令校验与 5.2.2 注册表校验；
+  builder 组件卡片加 group 输入框；demo 脚本追加三特性示例。
 
 - v0.12.0（步骤 21）：**安装导航 + UI 材质/模板 + Linux/CLI 适配 +
   组件空间联动**（七项，用户指令驱动）：① 盘符切换空间即时刷新回归

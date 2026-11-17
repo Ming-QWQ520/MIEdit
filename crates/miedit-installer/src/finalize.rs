@@ -84,6 +84,7 @@ pub fn finalize_install(
         shortcuts: Vec::new(),
         shortcut_dirs: Vec::new(),
         registry_keys: Vec::new(),
+        registry_values: Vec::new(),
         uninstall_key: format!(
             r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{app_id}"
         ),
@@ -114,6 +115,8 @@ pub fn finalize_install(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0),
+        // 卸载前命令随清单内嵌/落盘（步骤 23；卸载器无脚本，只读清单）
+        exec_before_uninstall: cfg.install.exec_before_uninstall.clone(),
     };
 
     // 2. 快捷方式（简单开关 + Inno [Icons] 风格条目，路线图步骤 13；
@@ -328,26 +331,60 @@ pub fn finalize_install(
     }
     winutil::registry_create_set(per_machine, &manifest.uninstall_key, &values)?;
 
-    // 4. 脚本声明的自定义注册表值
+    // 4. 脚本声明的自定义注册表值（步骤 22：全类型 + 32/64 视图 + 精确清理跟踪）
     for spec in &cfg.registry {
         if spec.key.trim().is_empty() {
             continue;
         }
         let install_dir_str = dest.display().to_string();
-        let resolved: Vec<(String, RegValue)> = spec
-            .values
-            .iter()
-            .map(|(k, v)| {
-                (
-                    k.clone(),
-                    RegValue::Str(v.replace("{install_dir}", &install_dir_str)),
-                )
-            })
-            .collect();
-        let (pm, rest) = winutil::split_hive(&spec.key)?;
-        winutil::registry_create_set(pm, &rest, &resolved)?;
+        let (resolved, view) = match (|| -> Result<_, String> {
+            let v = miedit_core::regspec::resolve_entries(spec, &install_dir_str)?;
+            let view = miedit_core::regspec::view_of(spec)?;
+            Ok((v, view))
+        })() {
+            Ok(v) => v,
+            Err(e) => {
+                push_log(st, format!("警告: 注册表项跳过: {}（{e}）", spec.key));
+                continue;
+            }
+        };
+        let (pm, rest) = match winutil::split_hive(&spec.key) {
+            Ok(v) => v,
+            Err(e) => {
+                push_log(st, format!("警告: 注册表项跳过: {e:#}"));
+                continue;
+            }
+        };
+        // 键是否为本次新建（精确清理：新建键卸载时可整树删除，
+        // 既有键只删本次写入的值，不误伤安装前已存在的内容）
+        let created_key = !winutil::registry_key_exists(pm, &rest, view);
+        winutil::registry_create_set_view(pm, &rest, &resolved, view)?;
         manifest.registry_keys.push(spec.key.clone());
-        push_log(st, format!("注册表键: {}", spec.key));
+        if resolved.is_empty() {
+            manifest.registry_values.push(miedit_core::manifest::RegistryValueRef {
+                key: spec.key.clone(),
+                name: String::new(),
+                created_key,
+            });
+        } else {
+            for (name, _) in &resolved {
+                manifest.registry_values.push(miedit_core::manifest::RegistryValueRef {
+                    key: spec.key.clone(),
+                    name: name.clone(),
+                    created_key,
+                });
+            }
+        }
+        push_log(
+            st,
+            format!(
+                "注册表键: {}（{} 个值，视图 {}，{}）",
+                spec.key,
+                resolved.len(),
+                miedit_core::regspec::view_label(view),
+                if created_key { "新建键" } else { "既有键" }
+            ),
+        );
     }
 
     // 5. 卸载清单：Windows 内嵌进卸载器 EXE 尾部（NSIS 式自包含卸载器）；
@@ -399,5 +436,20 @@ pub fn finalize_install(
             manifest.shortcuts.len()
         ),
     );
+
+    // 6. 安装后命令（NSIS ExecWait 语义，步骤 23）：清单/卸载器已就绪，
+    //    命令失败（abort_on_error）时安装仍可卸载，安全退出点
+    for (i, spec) in cfg.install.exec_after.iter().enumerate() {
+        let describe = format!("安装后命令 #{}", i + 1);
+        push_log(st, format!("执行{describe}: {}", spec.cmd.trim()));
+        let outcome = miedit_core::runcmd::execute(spec, dest);
+        for line in miedit_core::runcmd::log_lines(&describe, spec, &outcome) {
+            push_log(st, line);
+        }
+        if miedit_core::runcmd::should_abort(spec, &outcome) {
+            anyhow::bail!("{} 失败: {}", describe, miedit_core::runcmd::abort_reason(spec, &outcome));
+        }
+    }
+
     Ok(manifest)
 }
