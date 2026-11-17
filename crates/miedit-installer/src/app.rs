@@ -62,9 +62,17 @@ pub struct InstallerApp {
     /// 步骤 18：安装完成（后台线程 Done）——停留在安装详情页（NSIS
     /// INSTFILES 完成态语义），点「下一步」才进入完成页
     install_finished: bool,
+    /// 步骤 21（CLI 适配）：--no-shortcuts 跳过快捷方式创建
+    no_shortcuts: bool,
 }
 
-pub fn run_gui(pkg: Arc<Package>, default_dest: PathBuf, repair: bool) -> anyhow::Result<()> {
+pub fn run_gui(
+    pkg: Arc<Package>,
+    default_dest: PathBuf,
+    repair: bool,
+    cli_components: Option<Vec<bool>>,
+    no_shortcuts: bool,
+) -> anyhow::Result<()> {
     let cfg = &pkg.config;
     // 启动语言预选（NSIS MUI：多语言时预选系统语言，单语言直接使用，无语言包保持旧行为）
     let language = miedit_core::langs::initial_language(cfg);
@@ -88,10 +96,24 @@ pub fn run_gui(pkg: Arc<Package>, default_dest: PathBuf, repair: bool) -> anyhow
         viewport = viewport.with_icon(icon.clone());
     }
 
+    // 步骤 21：Windows 11 亚克力背景板（ui.acrylic；低版本失败静默回退
+    // 为绘制的玻璃卡片，观感不受损）。窗口背景透明化以便 backdrop 透出
+    // （必须在构建 options 前设置 viewport）。
+    #[cfg(windows)]
+    if theme::Theme::from_config(&pkg).acrylic {
+        viewport = viewport.with_transparent(true);
+    }
+
     let options = eframe::NativeOptions {
         viewport,
         ..Default::default()
     };
+
+    // 亚克力背景板：窗口创建后设置 DWM SystemBackdrop（异步轮询）
+    #[cfg(windows)]
+    if theme::Theme::from_config(&pkg).acrylic {
+        miedit_core::winutil::enable_acrylic_backdrop(&title);
+    }
 
     let run_title = title.clone();
     eframe::run_native(
@@ -119,16 +141,31 @@ pub fn run_gui(pkg: Arc<Package>, default_dest: PathBuf, repair: bool) -> anyhow
                 )
             });
             let types = &pkg.config.install_types;
-            let install_type = miedit_core::installtypes::default_type_index(types)
+            let mut install_type = miedit_core::installtypes::default_type_index(types)
                 .unwrap_or(0); // 无类型时占位，组件页不渲染类型行
-            let component_checked = match miedit_core::installtypes::default_type_index(types) {
-                Some(i) => miedit_core::installtypes::selection_for_type(
-                    types,
-                    &pkg.config.components,
-                    i,
-                )
-                .unwrap_or_else(|| pkg.config.components.iter().map(|_| true).collect()),
-                None => pkg.config.components.iter().map(|_| true).collect(),
+            let component_checked = match &cli_components {
+                // 步骤 21：CLI --components= 预选组件（GUI 同样生效），
+                // 类型状态切到 Custom（NSIS 自定义选择语义）
+                Some(sel) => {
+                    let v = pkg
+                        .config
+                        .components
+                        .iter()
+                        .enumerate()
+                        .map(|(i, c)| c.required || sel.get(i).copied().unwrap_or(false))
+                        .collect::<Vec<bool>>();
+                    install_type = types.len(); // Custom
+                    v
+                }
+                None => match miedit_core::installtypes::default_type_index(types) {
+                    Some(i) => miedit_core::installtypes::selection_for_type(
+                        types,
+                        &pkg.config.components,
+                        i,
+                    )
+                    .unwrap_or_else(|| pkg.config.components.iter().map(|_| true).collect()),
+                    None => pkg.config.components.iter().map(|_| true).collect(),
+                },
             };
             // NSIS MUI 语义：定义了多个语言 → 首页为语言选择页；
             // 修复模式跳过全部向导页，直接进入修复确认页
@@ -160,6 +197,7 @@ pub fn run_gui(pkg: Arc<Package>, default_dest: PathBuf, repair: bool) -> anyhow
                 title,
                 repair,
                 install_finished: false,
+                no_shortcuts,
             }))
         }),
     )
@@ -182,6 +220,122 @@ impl InstallerApp {
 
     fn dest_display(&self) -> String {
         self.dest.display().to_string()
+    }
+
+    // ---- 步骤导航栏（HM NIS Edit 向导式，路线图步骤 21）----
+
+    fn show_step_rail(&self) -> bool {
+        self.pkg.config.ui.show_step_rail
+    }
+
+    /// 当前步骤对应的导航页（AppRunning 归入安装步；非向导页返回 None = 隐藏导航栏）。
+    fn rail_current(&self) -> Option<Page> {
+        match self.page {
+            Page::AppRunning => Some(Page::Install),
+            p @ (Page::Welcome
+            | Page::License
+            | Page::Components
+            | Page::Dir
+            | Page::Install
+            | Page::Finish) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// 绘制左列步骤导航（仅指示，不可点击——NSIS 页面流线性不可跳跃）：
+    /// 当前步 accent 高亮 + 描边，已完成步勾点，未到步空心点。
+    fn paint_step_rail(&self, ui: &egui::Ui, area: Rect) {
+        let cfg = &self.pkg.config;
+        let mut steps: Vec<(Page, &str)> = vec![(Page::Welcome, "nav_welcome")];
+        if self.has_license() {
+            steps.push((Page::License, "nav_license"));
+        }
+        if self.has_components() {
+            steps.push((Page::Components, "nav_components"));
+        }
+        if self.has_dir_page() {
+            steps.push((Page::Dir, "nav_dir"));
+        }
+        steps.push((Page::Install, "nav_install"));
+        steps.push((Page::Finish, "nav_finish"));
+        let Some(cur) = self.rail_current() else {
+            return;
+        };
+        let cur_idx = steps
+            .iter()
+            .position(|(p, _)| *p == cur)
+            .unwrap_or(usize::MAX);
+        let painter = ui.painter();
+        let row_h = 34.0;
+        let mut y = area.top() + 18.0;
+        for (i, (_page, key)) in steps.iter().enumerate() {
+            let row = Rect::from_min_max(
+                Pos2::new(area.left() + 10.0, y),
+                Pos2::new(area.right() - 6.0, y + row_h),
+            );
+            let is_cur = i == cur_idx;
+            let is_done = i < cur_idx;
+            if is_cur {
+                painter.rect_filled(
+                    row,
+                    9.0,
+                    Color32::from_rgba_unmultiplied(
+                        self.theme.accent.r(),
+                        self.theme.accent.g(),
+                        self.theme.accent.b(),
+                        48,
+                    ),
+                );
+                painter.rect(
+                    row,
+                    9.0,
+                    Color32::TRANSPARENT,
+                    Stroke::new(
+                        1.0,
+                        Color32::from_rgba_unmultiplied(
+                            self.theme.accent.r(),
+                            self.theme.accent.g(),
+                            self.theme.accent.b(),
+                            130,
+                        ),
+                    ),
+                );
+            }
+            // 状态点：当前 = 实心 accent；已完成 = accent 勾点；未到 = 空心
+            let dot_c = Pos2::new(row.left() + 15.0, row.center().y);
+            if is_cur {
+                painter.circle_filled(dot_c, 4.5, self.theme.accent);
+            } else if is_done {
+                painter.circle_filled(dot_c, 4.5, self.theme.accent);
+                painter.text(
+                    Pos2::new(dot_c.x, dot_c.y - 0.5),
+                    Align2::CENTER_CENTER,
+                    "√",
+                    FontId::proportional(7.5),
+                    Color32::WHITE,
+                );
+            } else {
+                painter.circle(
+                    dot_c,
+                    3.5,
+                    Color32::TRANSPARENT,
+                    Stroke::new(1.2, self.theme.text_dim.linear_multiply(0.55)),
+                );
+            }
+            let label = txt(cfg, self.language, key);
+            painter.text(
+                Pos2::new(row.left() + 30.0, row.center().y),
+                Align2::LEFT_CENTER,
+                label,
+                FontId::proportional(if is_cur { 13.0 } else { 12.5 }),
+                if is_cur {
+                    self.theme.text
+                } else {
+                    self.theme.text_dim
+                },
+            );
+            y += row_h + 4.0;
+        }
     }
 
     /// 组件选择 → 允许安装的规则索引集合；None = 全部安装。
@@ -290,8 +444,14 @@ impl InstallerApp {
         }
 
         let rules = self.selected_rules();
-        self.state =
-            install::spawn(self.pkg.clone(), dest, Some(ctx.clone()), rules, self.language);
+        self.state = install::spawn(
+            self.pkg.clone(),
+            dest,
+            Some(ctx.clone()),
+            rules,
+            self.language,
+            self.no_shortcuts,
+        );
         self.page = Page::Install;
     }
 
@@ -746,10 +906,17 @@ impl InstallerApp {
                         }
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // 步骤 21：NSIS components page「Space required」联动——
+                        // 随组件勾选实时统计并显示带标签的空间需求
                         ui.label(
-                            egui::RichText::new(miedit_core::util::human_size(self.selected_bytes()))
-                                .color(self.theme.text_dim)
-                                .size(12.5),
+                            egui::RichText::new(
+                                txt(cfg, self.language, "disk_space").replace(
+                                    "{size}",
+                                    &miedit_core::util::human_size(self.selected_bytes()),
+                                ),
+                            )
+                            .color(self.theme.text_dim)
+                            .size(12.5),
                         );
                     });
                 });
@@ -1316,6 +1483,7 @@ impl InstallerApp {
                             Some(ctx.clone()),
                             rules,
                             self.language,
+                            self.no_shortcuts,
                         );
                         self.page = Page::Install;
                     }
@@ -1406,9 +1574,9 @@ impl eframe::App for InstallerApp {
                 theme::paint_background(
                     ui.painter(),
                     sr,
+                    &self.theme,
                     self.bg_tex.as_ref(),
                     &self.pkg.config.ui.background_style,
-                    self.theme.accent,
                 );
 
                 // 无边框标题栏：拖拽 + 最小化/关闭
@@ -1468,19 +1636,39 @@ impl eframe::App for InstallerApp {
                     ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
                 }
 
-                // 半透明卡片
+                // 半透明卡片（液态玻璃：半透明浅色 + 高光描边，背景透出）
                 let card = Rect::from_min_max(
                     Pos2::new(sr.left() + 44.0, sr.top() + 108.0),
                     Pos2::new(sr.right() - 44.0, sr.bottom() - 104.0),
                 );
-                ui.painter().rect_filled(card, 18.0, self.theme.card.linear_multiply(0.62));
+                ui.painter().rect_filled(card, 18.0, self.theme.card_fill());
                 ui.painter().rect(
                     card,
                     18.0,
                     Color32::TRANSPARENT,
-                    Stroke::new(1.0, self.theme.card_stroke),
+                    Stroke::new(1.0, self.theme.stroke_color()),
                 );
-                ui.allocate_ui_at_rect(card.shrink2(Vec2::new(28.0, 22.0)), |ui| {
+                // 步骤导航栏（HM NIS Edit 向导式，路线图步骤 21）：
+                // 左列步骤列表 + 当前步高亮 + 已完成勾点；仅指示不点击
+                // （NSIS 页面流线性，不可跳跃）
+                let rail_w = if self.show_step_rail() && self.rail_current().is_some() {
+                    150.0
+                } else {
+                    0.0
+                };
+                if rail_w > 0.0 {
+                    let rail_rect = Rect::from_min_max(
+                        card.min,
+                        Pos2::new(card.left() + rail_w, card.bottom()),
+                    );
+                    self.paint_step_rail(ui, rail_rect);
+                }
+                let content_left = card.left() + rail_w + if rail_w > 0.0 { 14.0 } else { 28.0 };
+                let content = Rect::from_min_max(
+                    Pos2::new(content_left, card.top() + 22.0),
+                    Pos2::new(card.right() - 28.0, card.bottom() - 22.0),
+                );
+                ui.allocate_ui_at_rect(content, |ui| {
                     self.content(ui, ctx);
                 });
             });

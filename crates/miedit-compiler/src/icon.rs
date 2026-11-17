@@ -113,6 +113,8 @@ pub fn patch_pe_resources(
 }
 
 /// 解析 .ico：返回（RT_GROUP_ICON 数据, 各 RT_ICON 图像数据）。
+/// （仅 Windows 资源替换路径使用；Linux 实现为 no-op bail）
+#[cfg_attr(not(windows), allow(dead_code))]
 fn parse_ico(data: &[u8]) -> Result<(Vec<u8>, Vec<Vec<u8>>)> {
     if data.len() < 6 {
         bail!("ICO 文件过小");

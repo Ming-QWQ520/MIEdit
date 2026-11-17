@@ -5,6 +5,7 @@
 
 pub mod archive;
 pub mod config;
+pub mod cliargs;
 pub mod crc32;
 pub mod fileerror;
 pub mod files;
@@ -15,6 +16,7 @@ pub mod manifest;
 pub mod overwrite;
 pub mod repair;
 pub mod sysreq;
+pub mod templates;
 pub mod trailer;
 pub mod util;
 pub mod versioninfo;

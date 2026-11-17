@@ -1,7 +1,5 @@
 //! Windows 工具：权限检查/提权、快捷方式（COM）、注册表、消息框、自删除等。
 
-// Context 仅在 Windows 实现中使用（with_context）
-#[cfg_attr(not(windows), allow(unused_imports))]
 use anyhow::{anyhow, bail, Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -16,7 +14,8 @@ pub enum RegValue {
 // 权限
 // ---------------------------------------------------------------------------
 
-/// 当前进程是否以管理员运行。
+/// 当前进程是否以管理员/root 运行。
+/// 非 Windows：Linux 读 `/proc/self` 属主（euid），其他 Unix 回退 `$USER`/uid 判定。
 pub fn is_admin() -> bool {
     #[cfg(windows)]
     unsafe {
@@ -25,7 +24,16 @@ pub fn is_admin() -> bool {
     }
     #[cfg(not(windows))]
     {
-        false
+        // Linux：/proc/self 的 uid 即 euid（0 = root）
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if let Ok(m) = std::fs::metadata("/proc/self") {
+                return m.uid() == 0;
+            }
+        }
+        // 其他 Unix 回退：USER=root（容器/嵌入式环境下常见）
+        matches!(std::env::var("USER").as_deref(), Ok("root"))
     }
 }
 
@@ -201,7 +209,39 @@ pub fn create_shortcut(
     icon: Option<&Path>,
     desc: &str,
 ) -> Result<()> {
-    let _ = (lnk, target, args, workdir, icon, desc);
+    // Linux 适配（路线图步骤 21）：创建 freedesktop .desktop 条目
+    // （扩展名统一归一为 .desktop；清单里记录的路径即实际文件路径）
+    use std::fmt::Write as _;
+    let path = lnk.with_extension("desktop");
+    let esc = |s: &str| {
+        s.replace('\\', "/")
+            .replace('"', "\\\"")
+            .replace('%', "%%")
+    };
+    let name = {
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "App".into());
+        if desc.trim().is_empty() { stem } else { desc.trim().to_string() }
+    };
+    let exec = if args.trim().is_empty() {
+        format!("\"{}\"", esc(&target.display().to_string()))
+    } else {
+        format!("\"{}\" {}", esc(&target.display().to_string()), esc(args))
+    };
+    let mut content = String::new();
+    let _ = writeln!(content, "[Desktop Entry]");
+    let _ = writeln!(content, "Type=Application");
+    let _ = writeln!(content, "Name={}", esc(&name));
+    let _ = writeln!(content, "Exec={exec}");
+    let _ = writeln!(content, "Path={}", esc(&workdir.display().to_string()));
+    if let Some(ic) = icon {
+        let _ = writeln!(content, "Icon={}", esc(&ic.display().to_string()));
+    }
+    let _ = writeln!(content, "Terminal=false");
+    let _ = writeln!(content, "Categories=Utility;");
+    std::fs::write(&path, content).with_context(|| format!("写入 .desktop 失败: {}", path.display()))?;
     Ok(())
 }
 
@@ -231,7 +271,16 @@ pub fn start_menu_dir(per_machine: bool) -> PathBuf {
     }
     #[cfg(not(windows))]
     {
-        PathBuf::from("start-menu")
+        // XDG：per_machine → /usr/share/applications；用户 → applications
+        let _ = per_machine;
+        if per_machine {
+            PathBuf::from("/usr/share/applications")
+        } else {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+            PathBuf::from(std::env::var("XDG_DATA_HOME")
+                .unwrap_or_else(|_| format!("{home}/.local/share")))
+                .join("applications")
+        }
     }
 }
 
@@ -252,7 +301,11 @@ pub fn desktop_dir(per_machine: bool) -> PathBuf {
     }
     #[cfg(not(windows))]
     {
-        PathBuf::from("desktop")
+        // XDG：桌面目录（per_machine 无公共桌面标准，回退当前用户桌面）
+        let _ = per_machine;
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+        PathBuf::from(std::env::var("XDG_DESKTOP_DIR")
+            .unwrap_or_else(|_| format!("{home}/Desktop")))
     }
 }
 
@@ -267,7 +320,8 @@ pub fn quick_launch_dir() -> PathBuf {
     }
     #[cfg(not(windows))]
     {
-        PathBuf::from("quick-launch")
+        // Linux 无标准快速启动栏：回退桌面目录（.desktop 条目落在桌面）
+        desktop_dir(false)
     }
 }
 
@@ -449,6 +503,45 @@ pub fn registry_delete_tree(per_machine: bool, key_path: &str) -> Result<()> {
 pub fn registry_delete_tree(per_machine: bool, key_path: &str) -> Result<()> {
     let _ = (per_machine, key_path);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 窗口视觉（步骤 21：Win11 亚克力背景板）
+// ---------------------------------------------------------------------------
+
+/// 尝试对标题为 `title` 的顶层窗口启用 DWM 亚克力背景板
+/// （DWMWA_SYSTEMBACKDROP_TYPE = DWMSBT_TRANSIENTWINDOW）。
+/// 异步轮询等待窗口创建（最多 5 秒）；失败（低版本 Windows/窗口未找到）
+/// 静默返回——调用方 UI 已回退为绘制的玻璃卡片，观感不受损。
+#[cfg(windows)]
+pub fn enable_acrylic_backdrop(title: &str) {
+    let title = title.to_string();
+    std::thread::spawn(move || {
+        use windows::core::{HSTRING, PCWSTR};
+        use windows::Win32::Graphics::Dwm::{
+            DwmSetWindowAttribute, DWMWA_SYSTEMBACKDROP_TYPE, DWM_SYSTEMBACKDROP_TYPE,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
+        for _ in 0..50 {
+            let h = HSTRING::from(&title);
+            if let Ok(hwnd) = unsafe { FindWindowW(PCWSTR::null(), PCWSTR(h.as_ptr())) } {
+                if !hwnd.0.is_null() {
+                    // DWMSBT_TRANSIENTWINDOW(3) = 亚克力背景板
+                    let backdrop = DWM_SYSTEMBACKDROP_TYPE(3);
+                    unsafe {
+                        let _ = DwmSetWindowAttribute(
+                            hwnd,
+                            DWMWA_SYSTEMBACKDROP_TYPE,
+                            &backdrop as *const _ as *const core::ffi::c_void,
+                            4,
+                        );
+                    }
+                    return;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------

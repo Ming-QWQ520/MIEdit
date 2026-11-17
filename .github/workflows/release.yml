@@ -53,3 +53,52 @@ jobs:
           name: MIEdit-binaries
           path: MIEdit-binaries.zip
           if-no-files-found: error
+
+  # 步骤 21（Linux 适配）：Linux 安装器/卸载器二进制
+  # （安装器读包数据 + .desktop 快捷方式；卸载器读 uninstall.json 清单）
+  build-linux:
+    name: Build (Linux, release)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install GUI build dependencies (eframe/winit)
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libx11-dev libwayland-dev
+
+      - name: Cache cargo registry & target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-release-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            linux-release-
+
+      - name: Core unit tests
+        run: cargo test -p miedit-core
+
+      - name: Build installer & uninstaller (release)
+        run: cargo build --release -p miedit-installer -p miedit-uninstaller
+
+      - name: Collect binaries & pack zip (产物直接位于 zip 根目录，单层)
+        run: |
+          stage="$RUNNER_TEMP/dist"
+          mkdir -p "$stage"
+          cp target/release/miedit-installer "$stage/"
+          cp target/release/miedit-uninstaller "$stage/"
+          chmod +x "$stage"/*
+          for f in "$stage"/*; do echo "artifact: $(basename "$f") ($(du -k "$f" | cut -f1) KB)"; done
+          cd "$stage" && zip -j "$GITHUB_WORKSPACE/MIEdit-linux.zip" ./*
+
+      - name: Upload artifact (MIEdit-linux.zip)
+        uses: actions/upload-artifact@v4
+        with:
+          name: MIEdit-linux
+          path: MIEdit-linux.zip
+          if-no-files-found: error

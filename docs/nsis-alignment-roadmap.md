@@ -29,6 +29,7 @@
 | 18 | 安装/卸载完成详情停留页 | NSIS `MUI_PAGE_INSTFILES`（完成后停留，点「下一步」进 Finish） | **已完成**（v0.10.0） |
 | 19 | 卸载器壁纸 | Inno 卸载向导背景图 / NSIS `BGImage` | **已完成**（v0.10.0） |
 | 20 | 目录页空间动态刷新 + 安装目录校验 | NSIS DirectoryPage / `AllowRootDirInstall` / `.onVerifyInstDir` | **已完成**（v0.11.0） |
+| 21 | 步骤导航 + UI 材质/模板 + Linux/CLI 适配 + 组件空间联动 | HM NIS Edit 向导 / NSIS components 页 / 跨平台打包 | **已完成**（v0.12.0） |
 
 ## 迭代步骤定义
 
@@ -146,6 +147,39 @@
 - **验收**：目录页切换盘符可用空间立即变化；输入不存在盘符/非法字符
   时「安装」禁用并提示；默认根目录被拒绝、开关打开后放行。
 
+### 步骤 21：安装导航 + UI 材质/模板 + Linux/CLI 适配 + 组件空间联动
+- **做什么**（七项，用户直接指令驱动）：
+  ① 盘符切换空间即时刷新回归强化（`D:/Demo` → `E:/Demo` 场景单测，
+  正/反斜杠链路全程断言）；
+  ② **安装导航对齐 HM NIS Edit**：左列步骤导航栏（当前步 accent 高亮、
+  已完成勾点、未到空心点；仅指示不可点击——NSIS 页面流线性），
+  `ui.show_step_rail` 开关（默认 true）；
+  ③ **Linux 适配**：路径模板 Linux 实现（`{autopf}`→`/opt`、
+  `{appdata}`/`{localappdata}`→XDG 数据目录、分隔符归一，Windows
+  风格脚本跨平台可用）；快捷方式 = freedesktop `.desktop`（start_menu
+  → applications 目录、desktop → 桌面）；is_admin = euid==0；安装器
+  字体回退链加入 Noto CJK/文泉驿；finalize 在 Linux 落盘
+  `uninstall.json`（卸载器自带清单文件回退读取，PE 卸载器不写出）；
+  per_machine 需 root（sudo 提示）；CI 增加 ubuntu job 产出
+  `MIEdit-linux.zip`（installer + uninstaller）；
+  ④ **命令行安装适配**：`--help`/`--version`/`--components=<a,b>`
+  （Inno /COMPONENTS 语义，组件名/1 起始序号，GUI 与静默同生效）/
+  `--no-shortcuts`；退出码规范 0/1/2（成功/失败/参数无效）；
+  ⑤ **液态玻璃/亚克力材质**：`ui.material = "glass"`（默认）半透明
+  卡片 + 高光描边 + accent 主按钮微透明；`ui.acrylic`（默认 false，
+  Win11 22H2+ DWM SystemBackdrop，失败平台自动回退绘制玻璃）；
+  ⑥ **五套安装模板**：`ui.template` = aurora / midnight / sunrise /
+  forest / mono（模板整体接管调色板，优先于 ui.* 显式色）；
+  ⑦ **组件页 Space required 联动**：空间需求随组件勾选实时刷新
+  （NSIS components page 语义，带文案标签）。
+- **实现**：纯函数下沉 `miedit_core::templates`（5 模板 + apply +
+  5 单测）、`miedit_core::cliargs`（components 解析 + 退出码 + 5 单测）、
+  `installtypes::selection_to_rules`（组件勾选→规则集统一口径 + 1 单测）；
+  安装器 rail/材质/模板渲染 + finalize Linux 分支 + main CLI 全量；
+  文案新增 6 个 nav_* 键（双语同步，键集一致性测试守护）。
+- **验收**：core 单测全过（87 项）；Linux/Windows 双平台 check 0 error；
+  YAML 语法校验通过。
+
 ## 工程约束（每次迭代都要遵守）
 
 1. **纯 Rust**：不引入 C 构建链；新增依赖须在 Windows/Linux 双平台可编译。
@@ -158,6 +192,26 @@
 6. **版本号**：功能对齐批次完成后递增 `Cargo.toml` workspace version。
 
 ## 变更日志
+
+- v0.12.0（步骤 21）：**安装导航 + UI 材质/模板 + Linux/CLI 适配 +
+  组件空间联动**（七项，用户指令驱动）：① 盘符切换空间即时刷新回归
+  强化（`D:/Demo`→`E:/Demo` 正/反斜杠链路单测）；② 安装导航对齐
+  HM NIS Edit——左列步骤导航栏（当前步 accent 高亮/已完成勾点/未到
+  空心点，仅指示不可点击），`ui.show_step_rail`（默认 true）；③
+  **Linux 适配**——路径模板 Linux 实现（`{autopf}`→`/opt`、XDG 数据
+  目录、Windows 风格反斜杠脚本跨平台可用）、`.desktop` 快捷方式
+  （applications/桌面目录）、`is_admin`=euid==0、CJK 字体回退链、
+  finalize 落盘 `uninstall.json`（卸载器清单文件回退读取）、per_machine
+  需 root、CI 新增 ubuntu job（`MIEdit-linux.zip`）；④ **CLI 适配**——
+  `--help`/`--version`/`--components=`（Inno /COMPONENTS 语义，GUI 与
+  静默同生效）`--no-shortcuts`，退出码 0/1/2 规范；⑤ **液态玻璃/
+  亚克力**——`ui.material = "glass"`（默认）半透明卡片 + 高光描边 +
+  微透明主按钮，`ui.acrylic`（Win11 22H2+ DWM SystemBackdrop，失败
+  自动回退绘制玻璃）；⑥ **五套安装模板**——`ui.template` = aurora /
+  midnight / sunrise / forest / mono（整体接管调色板）；⑦ 组件页
+  Space required 随勾选联动（NSIS components 语义）。纯函数下沉
+  `templates`/`cliargs`/`selection_to_rules`（11 项新单测），core 87 项
+  全过；文案新增 6 个 nav_* 键双语同步。
 
 - v0.11.0（步骤 20）：**目录页空间动态刷新 + 安装目录校验**（NSIS
   DirectoryPage / `AllowRootDirInstall` 对齐，修复用户报告缺陷）：

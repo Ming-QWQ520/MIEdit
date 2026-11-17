@@ -57,10 +57,67 @@ pub fn matching_type(
     })
 }
 
+/// 组件勾选 → 允许安装的 `[[files]]` 规则索引集合（步骤 21：CLI
+/// `--components=` 与 GUI 共用同一口径）。
+/// 必装组件始终纳入；未被任何组件引用的规则始终安装（app.rs
+/// `selected_rules` 语义）；`files_len` 为文件规则总数。
+pub fn selection_to_rules(
+    components: &[ComponentSpec],
+    files_len: usize,
+    checked: &[bool],
+) -> std::collections::HashSet<usize> {
+    let referenced: std::collections::HashSet<usize> = components
+        .iter()
+        .flat_map(|c| c.files.iter().copied())
+        .collect();
+    let mut set = std::collections::HashSet::new();
+    for (i, c) in components.iter().enumerate() {
+        if c.required || checked.get(i).copied().unwrap_or(true) {
+            set.extend(c.files.iter().copied());
+        }
+    }
+    for r in 0..files_len {
+        if !referenced.contains(&r) {
+            set.insert(r);
+        }
+    }
+    set
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{ComponentSpec, InstallTypeSpec};
+
+    #[test]
+    fn test_selection_to_rules() {
+        // 组件 0=Core(必装,文件0) 1=Plugins(文件1) 2=Docs(文件2)；
+        // 文件规则 3 未被任何组件引用 → 始终安装
+        let mut core = comp("Core", true);
+        core.files = vec![0];
+        let mut plugins = comp("Plugins", false);
+        plugins.files = vec![1];
+        let mut docs = comp("Docs", false);
+        docs.files = vec![2];
+        let comps = vec![core, plugins, docs];
+        let files_len = 4;
+
+        // 只选 Plugins：规则 = {0(必装),1,3(未引用)}
+        let sel = vec![false, true, false];
+        let rules = selection_to_rules(&comps, files_len, &sel);
+        assert!(rules.contains(&0) && rules.contains(&1) && rules.contains(&3));
+        assert!(!rules.contains(&2));
+
+        // 全不选（CLI 空白名单）：必装 0 + 未引用 3
+        let sel = vec![false, false, false];
+        let rules = selection_to_rules(&comps, files_len, &sel);
+        assert!(rules.contains(&0) && rules.contains(&3));
+        assert!(!rules.contains(&1) && !rules.contains(&2));
+
+        // 越界勾选宽容处理
+        let rules = selection_to_rules(&comps, files_len, &[]);
+        assert!(rules.contains(&0) && rules.contains(&1) && rules.contains(&2));
+    }
 
     fn comp(name: &str, required: bool) -> ComponentSpec {
         ComponentSpec {

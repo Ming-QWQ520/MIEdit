@@ -27,7 +27,7 @@
 | 自解压安装器 | 单文件 EXE：`[stub][payload][config][卸载器][背景图][图标][Trailer]` |
 | 现代化 UI | egui 无边框窗口、玻璃卡片、主题色可配、自绘进度条、中文字体自适应 |
 | **全窗口图片背景** | `background = "bg.png"`，`cover / contain / stretch` 三种模式 |
-| 安装向导 | 欢迎 → 许可（可强制滚动到底）→ 组件选择 → 目录（**磁盘空间检测**）→ 安装进度（计数/速度/**细节开关**）→ 完成（**多任务复选**） |
+| 安装向导 | 欢迎 → 许可（可强制滚动到底）→ 组件选择（**Space required 联动**）→ 目录（**磁盘空间检测**）→ 安装进度（计数/速度/**细节开关**）→ 完成（**多任务复选**） |
 | **组件选择** | NSIS Section / Inno Components 风格：`[[components]]` + 规则引用，必装锁定、全选/重置 |
 | **安装类型** | NSIS `InstallTypes` / Inno `[Types]` 对齐：`[[install_types]]` 组件页顶部单选（Typical/Full/…），切换类型联动组件勾选；手动改动任意组件自动切到 **Custom** |
 | **组件描述侧栏** | NSIS 组件页描述框对齐：悬停/点击组件行，下方描述面板跟随显示 `description`，必装组件带「必需」徽标，空描述显示占位 |
@@ -39,6 +39,11 @@
 | **默认图标** | 未配置图标时自动使用内置 **modern-install.ico / modern-uninstall.ico**（NSIS 做法），PE 资源 + 窗口图标同步替换 |
 | **EXE 版本信息** | 安装器/卸载器 EXE 嵌入 VERSIONINFO（NSIS `VIProductVersion` / `VIAddVersionKey` 对齐）：产品名/版本/公司/描述/版权，资源管理器属性可见 |
 | 磁盘空间检测与目录校验 | 目录页可用空间**随所选驱动器实时刷新**（NSIS DirectoryPage），无效路径/不存在盘符拒绝前进；`allow_root_dir_install` 根目录安装开关（NSIS `AllowRootDirInstall` 默认禁根目录） |
+| **步骤导航** | HM NIS Edit 向导式**左列步骤导航栏**：当前步高亮/已完成勾点，`ui.show_step_rail` 可关 |
+| **界面模板** | 五套内置模板一键切换：`ui.template = aurora / midnight / sunrise / forest / mono` |
+| **液态玻璃** | `ui.material = "glass"` 半透明卡片 + 高光描边（默认）；`ui.acrylic` 启用 Win11 亚克力背景板（失败自动回退） |
+| **Linux 适配** | 安装器/卸载器 Linux 可用：XDG 路径模板、`.desktop` 快捷方式、`uninstall.json` 清单卸载、CJK 字体回退；CI 产出 Linux zip |
+| **命令行安装** | `--silent` `--dir=` `--components=` `--no-shortcuts` `--repair` `--help` `--version`，退出码 0/1/2（NSIS `/S` + Inno `/COMPONENTS` 语义） |
 | 运行中检测 | 安装前独占探测主程序占用，重试/继续 |
 | 升级检测 | 发现旧版本记录版本号并静默卸载后升级（`InstallDirRegKey` 式目录记忆） |
 | 权限 | `per_machine = true` 启动时自动 UAC 提权重启 |
@@ -202,7 +207,7 @@ crates/
 ## 测试
 
 ```bash
-cargo test --workspace    # 74 个单元测试：归档/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/文件错误决策与提示信箱/重启替换/安装类型状态机/系统版本门槛/目录统计/组件过滤映射/slug/语言匹配与 LANGID 映射/多语言文案解析链/修复入口与修复统计/包尾 v4 与卸载数据新旧格式/安装目录解析与根路径校验
+cargo test --workspace    # 87 个单元测试：归档/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/文件错误决策与提示信箱/重启替换/安装类型状态机/系统版本门槛/目录统计/组件过滤映射/slug/语言匹配与 LANGID 映射/多语言文案解析链/修复入口与修复统计/包尾 v4 与卸载数据新旧格式/安装目录解析与根路径校验/盘符切换空间刷新回归/内置模板色板/CLI 组件参数解析
 ```
 
 已在 Windows 10 x64 实机验证：CLI 与 GUI 构建链路、静默安装/卸载全清理、组件过滤生效、

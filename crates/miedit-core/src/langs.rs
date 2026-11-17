@@ -131,6 +131,13 @@ pub static ZH_CN: BuiltinLanguage = BuiltinLanguage {
             "dir_root_warning",
             "出于安全考虑，不允许安装到磁盘根目录。请选择一个子文件夹。",
         ),
+        // 步骤 21：左侧步骤导航栏（HM NIS Edit 向导式导航）
+        ("nav_welcome", "欢迎"),
+        ("nav_license", "许可协议"),
+        ("nav_components", "选择组件"),
+        ("nav_dir", "安装位置"),
+        ("nav_install", "正在安装"),
+        ("nav_finish", "完成"),
     ],
 };
 

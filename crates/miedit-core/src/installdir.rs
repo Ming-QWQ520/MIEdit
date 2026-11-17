@@ -200,6 +200,28 @@ mod tests {
         assert_eq!(classify_inst_dir("C:\\", true), Ok(()));
     }
 
+    // 用户缺陷回归（步骤 20/21）：默认安装位置 D:/Demo，手动改为 E:/Demo
+    // 后必须立即刷新剩余空间——数据链路 = parse_dir_text(输入) →
+    // drive_root_of(取盘根查可用空间) → classify(校验放行)。正斜杠与
+    // 反斜杠输入都要走通（修复前 disk_free 基于旧 dest，冻结在 D 盘）。
+    #[test]
+    fn test_regression_drive_switch_free_space_chain() {
+        let default_dir = "D:/Demo";
+        let user_dir = "E:/Demo";
+        // 两个输入都清洗成功
+        assert_eq!(parse_dir_text(default_dir).as_deref(), Some("D:/Demo"));
+        assert_eq!(parse_dir_text(user_dir).as_deref(), Some("E:/Demo"));
+        // 盘根提取随输入变化（这是剩余空间实时刷新的关键）
+        assert_eq!(drive_root_of(default_dir).as_deref(), Some(r"D:\"));
+        assert_eq!(drive_root_of(user_dir).as_deref(), Some(r"E:\"));
+        // 用户改到 E:/Demo 后校验放行、且不再是根目录
+        assert_eq!(classify_inst_dir(user_dir, false), Ok(()));
+        assert!(!is_root_path(user_dir));
+        assert_eq!(classify_inst_dir(default_dir, false), Ok(()));
+        // 反斜杠写法同样链路可用
+        assert_eq!(drive_root_of(r"E:\Demo").as_deref(), Some(r"E:\"));
+    }
+
     #[test]
     fn test_classify_empty_and_relative() {
         assert_eq!(classify_inst_dir("", false), Err(DirIssue::Empty));

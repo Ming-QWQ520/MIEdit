@@ -80,9 +80,26 @@ pub fn resolve_path_template(tpl: &str, app_name: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
+/// 非 Windows 平台的路径模板解析（路线图步骤 21，Linux 适配）：
+/// `{autopf}` → `/opt`（XDG 应用安装惯例）；`{autopf86}` → `/opt`；
+/// `{localappdata}` / `{appdata}` → `$XDG_DATA_HOME`（缺省 `~/.local/share`）；
+/// `{desktop}` → `$HOME/Desktop`；`{docs}` → `$HOME/Documents`；
+/// `{app_name}` → 应用名。模板里的 `\` 统一转为 `/`（Windows 风格脚本
+/// 在 Linux 上同样可用）。家目录取 `$HOME`（缺省 `/root`，root 兼容）。
 #[cfg(not(windows))]
 pub fn resolve_path_template(tpl: &str, app_name: &str) -> PathBuf {
-    PathBuf::from(tpl.replace("{app_name}", app_name))
+    let home = env_or("HOME", "/root");
+    let xdg_data = env_or("XDG_DATA_HOME", &format!("{home}/.local/share"));
+    let s = tpl
+        .replace("{autopf}", "/opt")
+        .replace("{autopf86}", "/opt")
+        .replace("{localappdata}", &xdg_data)
+        .replace("{appdata}", &xdg_data)
+        .replace("{desktop}", &format!("{home}/Desktop"))
+        .replace("{docs}", &format!("{home}/Documents"))
+        .replace("{app_name}", app_name)
+        .replace('\\', "/");
+    PathBuf::from(s)
 }
 
 /// 递归统计目录下的文件数与总字节数（卸载完成页统计用，路线图步骤 14）。
@@ -123,6 +140,32 @@ mod tests {
         assert_eq!(human_size(500), "500 B");
         assert_eq!(human_size(2048), "2.0 KB");
         assert_eq!(human_size(3 * 1024 * 1024), "3.0 MB");
+    }
+
+    // Linux 适配（路线图步骤 21）：非 Windows 平台的模板解析
+    #[cfg(not(windows))]
+    #[test]
+    fn test_resolve_path_template_linux() {
+        std::env::remove_var("XDG_DATA_HOME");
+        // Windows 风格反斜杠模板在 Linux 上同样可用（分隔符归一）
+        let p = resolve_path_template("{autopf}\\{app_name}", "Demo");
+        assert_eq!(p, PathBuf::from("/opt/Demo"));
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+        let p = resolve_path_template("{localappdata}\\Programs\\{app_name}", "Demo");
+        assert_eq!(p, PathBuf::from(format!("{home}/.local/share/Programs/Demo")));
+        let p = resolve_path_template("{appdata}\\{app_name}", "Demo");
+        assert_eq!(p, PathBuf::from(format!("{home}/.local/share/Demo")));
+        let p = resolve_path_template("{desktop}\\{app_name}.lnk", "Demo");
+        assert_eq!(p, PathBuf::from(format!("{home}/Desktop/Demo.lnk")));
+        let p = resolve_path_template("{docs}\\{app_name}", "Demo");
+        assert_eq!(p, PathBuf::from(format!("{home}/Documents/Demo")));
+        let p = resolve_path_template("{autopf86}\\{app_name}", "Demo");
+        assert_eq!(p, PathBuf::from("/opt/Demo"));
+        // XDG_DATA_HOME 优先
+        std::env::set_var("XDG_DATA_HOME", "/tmp/xdg-data-test");
+        let p = resolve_path_template("{localappdata}\\{app_name}", "Demo");
+        assert_eq!(p, PathBuf::from("/tmp/xdg-data-test/Demo"));
+        std::env::remove_var("XDG_DATA_HOME");
     }
 
     #[test]

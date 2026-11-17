@@ -246,6 +246,32 @@ pub struct UiConfig {
     pub language_auto_detect: bool,
     /// UI 文案覆盖（键值见 README；语言无关的作者强制覆盖，优先级高于语言包）
     pub text: BTreeMap<String, String>,
+    /// 内置界面模板 id（路线图步骤 21，五选一：aurora / midnight /
+    /// sunrise / forest / mono，大小写不敏感）；空 = 不启用模板
+    /// （沿用 accent 与内置默认色）。启用时整体接管调色板
+    pub template: String,
+    /// 是否显示左侧步骤导航栏（HM NIS Edit 向导式导航，路线图步骤 21；默认 true）
+    pub show_step_rail: bool,
+    /// 界面材质：`glass`（液态玻璃：半透明卡片 + 高光描边，默认）或
+    /// `standard`（不透明卡片，旧观感）
+    pub material: String,
+    /// Windows 11 亚克力背景板（DWM SystemBackdrop，需 Win11 22H2+；
+    /// 默认 false——失败平台自动回退为绘制的玻璃卡片，观感不受损）
+    pub acrylic: bool,
+    /// 背景渐变顶部色（十六进制；空 = 内置默认。模板启用时被模板覆盖）
+    pub bg_top: String,
+    /// 背景渐变底部色（同上）
+    pub bg_bottom: String,
+    /// 卡片底色（同上）
+    pub card: String,
+    /// 输入框/字段底色（同上）
+    pub field: String,
+    /// 卡片描边色（同上）
+    pub card_stroke: String,
+    /// 主文字色（同上）
+    pub text_color: String,
+    /// 次要文字色（同上）
+    pub text_dim_color: String,
 }
 
 /// 语言包定义（NSIS `MUI_LANGUAGE` / Inno `[Languages]` 风格）。
@@ -289,6 +315,17 @@ impl Default for UiConfig {
             languages: Vec::new(),
             language_auto_detect: true,
             text: BTreeMap::new(),
+            template: String::new(),
+            show_step_rail: true,
+            material: "glass".into(),
+            acrylic: false,
+            bg_top: String::new(),
+            bg_bottom: String::new(),
+            card: String::new(),
+            field: String::new(),
+            card_stroke: String::new(),
+            text_color: String::new(),
+            text_dim_color: String::new(),
         }
     }
 }
@@ -517,6 +554,13 @@ pub static DEFAULT_TEXT_KEYS: &[(&str, &str)] = &[
             "dir_root_warning",
             "For safety reasons, installing into a drive root is not allowed. Please choose a subfolder.",
         ),
+        // 步骤 21：左侧步骤导航栏（HM NIS Edit 向导式导航）
+        ("nav_welcome", "Welcome"),
+        ("nav_license", "License"),
+        ("nav_components", "Components"),
+        ("nav_dir", "Install Location"),
+        ("nav_install", "Install"),
+        ("nav_finish", "Finish"),
     ];
 
 /// 将文案中的 `{app}` / `{version}` 替换为实际值。

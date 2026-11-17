@@ -19,6 +19,14 @@ compression = "deflate"
 # 允许安装到盘根/网络共享根（NSIS AllowRootDirInstall，默认 false 禁止）
 # allow_root_dir_install = true
 
+# 内置界面模板（五选一：aurora / midnight / sunrise / forest / mono）
+# template = "midnight"
+# 液态玻璃材质（默认 glass；standard = 旧观感）；Win11 亚克力需 acrylic = true
+# material = "glass"
+# acrylic = true
+# 左列步骤导航栏（HM NIS Edit 式，默认开启）
+# show_step_rail = true
+
 [[install.run_tasks]]
 name = "运行 {app}"
 exe = "MIEditDemo.exe"
