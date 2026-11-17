@@ -8,6 +8,7 @@ pub mod config;
 pub mod crc32;
 pub mod fileerror;
 pub mod files;
+pub mod installdir;
 pub mod installtypes;
 pub mod langs;
 pub mod manifest;

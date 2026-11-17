@@ -122,6 +122,15 @@ pub static ZH_CN: BuiltinLanguage = BuiltinLanguage {
         ("repair_now", "立即修复"),
         ("repair_finish_title", "修复完成"),
         ("repair_finish_body", "{app} {version} 已修复完成："),
+        // 步骤 20：目录页校验提示（NSIS DirectoryPage：无效路径/根目录拒绝）
+        (
+            "dir_invalid",
+            "安装目录无效。请输入一个已存在盘符上的有效绝对路径（例如 D:\\Apps\\App）。",
+        ),
+        (
+            "dir_root_warning",
+            "出于安全考虑，不允许安装到磁盘根目录。请选择一个子文件夹。",
+        ),
     ],
 };
 

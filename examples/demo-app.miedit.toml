@@ -16,6 +16,8 @@ dir_template = '{localappdata}\Programs\MIEdit Demo'
 run_after = "MIEditDemo.exe"
 user_data_dirs = ['{appdata}\MIEdit Demo']
 compression = "deflate"
+# 允许安装到盘根/网络共享根（NSIS AllowRootDirInstall，默认 false 禁止）
+# allow_root_dir_install = true
 
 [[install.run_tasks]]
 name = "运行 {app}"

@@ -461,7 +461,8 @@ pub fn disk_free_space(path: &Path) -> Option<u64> {
     {
         use windows::core::HSTRING;
         use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
-        // 取已存在的最近祖先目录作为盘符根
+        // 取已存在的最近祖先目录作为探针（步骤 20：无任何祖先存在——
+        // 典型为不存在的盘符——返回 None，避免误显示其他盘的可用空间）
         let mut probe = path.to_path_buf();
         let mut existing = None;
         loop {
@@ -473,7 +474,7 @@ pub fn disk_free_space(path: &Path) -> Option<u64> {
                 break;
             }
         }
-        let dir = existing.unwrap_or_else(|| PathBuf::from("C:\\"));
+        let dir = existing?;
         let dir_h = HSTRING::from(dir.as_os_str());
         let mut free: u64 = 0;
         let ok = unsafe {

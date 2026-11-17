@@ -2,6 +2,8 @@
 //! 无边框窗口 + 全窗口图片背景 + 半透明卡片，现代化视觉。
 //! 功能对齐 Inno Setup：组件选择、磁盘空间检查、许可强制滚动、[Run] 任务、升级检测、运行中检测、
 //! ARP 修复入口（--repair 确认页，路线图步骤 17）。
+//! 功能对齐 NSIS DirectoryPage（路线图步骤 20）：目录页可用空间随所选驱动器
+//! 实时刷新，无效路径/根目录安装校验（allow_root_dir_install）。
 
 use crate::install::{self, Phase, ProgressState};
 use crate::pkg::Package;
@@ -225,8 +227,46 @@ impl InstallerApp {
         }
     }
 
+    /// 当前生效的目标目录：目录页实时跟随输入框（dir_text），
+    /// 而非仅在 start_install 时才更新的 self.dest（步骤 20 缺陷修复：
+    /// 切换盘符后剩余空间与校验必须随所选驱动器动态变化，NSIS
+    /// DirectoryPage 语义）；输入为空时回退默认目录。
+    fn current_dest(&self) -> PathBuf {
+        miedit_core::installdir::parse_dir_text(&self.dir_text)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.dest.clone())
+    }
+
+    /// 目录页下一页/安装可用性（NSIS DirectoryPage 校验语义）：
+    /// 目录无效（空/相对路径/非法字符/盘不存在）或根目录未允许 → 禁用；
+    /// 空间不足 → 禁用；空间未知 → 放行（保持旧行为）。
+    fn dir_next_enabled(&self) -> bool {
+        if self.dir_issue().is_some() {
+            return false;
+        }
+        match self.disk_free() {
+            Some(free) => free >= self.selected_bytes(),
+            None => true,
+        }
+    }
+
+    /// 安装目录校验（纯字符串判定 + 盘存在性补充检查）。
+    /// 返回 None 表示通过；Some(issue) 时 UI 显示对应提示并禁用前进。
+    fn dir_issue(&self) -> Option<miedit_core::installdir::DirIssue> {
+        let allow = self.pkg.config.install.allow_root_dir_install;
+        if let Err(issue) = miedit_core::installdir::classify_inst_dir(&self.dir_text, allow) {
+            return Some(issue);
+        }
+        // 盘/共享必须真实存在：不存在的盘符查不到可用空间，也不应放行
+        let path = self.current_dest();
+        match miedit_core::installdir::drive_root_of(&path.to_string_lossy()) {
+            Some(root) if PathBuf::from(&root).exists() => None,
+            _ => Some(miedit_core::installdir::DirIssue::Invalid),
+        }
+    }
+
     fn disk_free(&self) -> Option<u64> {
-        miedit_core::winutil::disk_free_space(&self.dest)
+        miedit_core::winutil::disk_free_space(&self.current_dest())
     }
 
     fn check_app_running(&self) -> bool {
@@ -239,7 +279,8 @@ impl InstallerApp {
 
     fn start_install(&mut self, ctx: &egui::Context) {
         self.install_finished = false;
-        let dest = PathBuf::from(self.dir_text.trim().trim_matches('"'));
+        // 步骤 20：目录页输入清洗（去空白/包裹引号/裸盘符规范化）与显示口径统一
+        let dest = self.current_dest();
         self.dest = dest.clone();
 
         // 主程序运行中检测（NSIS/Inno 常见预检）
@@ -382,10 +423,7 @@ impl InstallerApp {
             Page::Language | Page::Welcome | Page::License | Page::Components | Page::Dir => {
                 let enabled = match self.page {
                     Page::License => self.license_accepted,
-                    Page::Dir => match self.disk_free() {
-                        Some(free) => free >= self.selected_bytes(),
-                        None => true,
-                    },
+                    Page::Dir => self.dir_next_enabled(),
                     _ => true,
                 };
                 if enabled {
@@ -866,6 +904,8 @@ impl InstallerApp {
                 let space =
                     txt(cfg, self.language, "disk_space").replace("{size}", &miedit_core::util::human_size(need));
                 ui.label(egui::RichText::new(space).color(self.theme.text_dim).size(13.0));
+                // 步骤 20 缺陷修复：可用空间基于当前输入目录所在盘实时查询
+                //（NSIS DirectoryPage：Space available 随所选驱动器刷新）
                 if let Some(free) = self.disk_free() {
                     let free_s = txt(cfg, self.language, "free_space")
                         .replace("{free}", &miedit_core::util::human_size(free));
@@ -880,9 +920,19 @@ impl InstallerApp {
                             .size(13.0),
                     );
                 }
+                // 步骤 20：目录校验提示（NSIS：无效路径/根目录拒绝 → 提示并禁用前进）
+                if let Some(issue) = self.dir_issue() {
+                    let key = miedit_core::installdir::dir_issue_key(issue);
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new(txt(cfg, self.language, key))
+                            .color(Color32::from_rgb(0xE5, 0x48, 0x4D))
+                            .size(12.5),
+                    );
+                }
                 // Inno DirExistsWarning：目标目录已存在且非空时提示
-                if self.dir_text.trim().trim_matches('"').len() > 0 {
-                    let d = PathBuf::from(self.dir_text.trim().trim_matches('"'));
+                if let Some(parsed) = miedit_core::installdir::parse_dir_text(&self.dir_text) {
+                    let d = PathBuf::from(&parsed);
                     if d.is_dir() {
                         let non_empty = std::fs::read_dir(&d)
                             .map(|mut it| it.next().is_some())
@@ -1212,10 +1262,7 @@ impl InstallerApp {
                     }
                     let enabled = match self.page {
                         Page::License => self.license_accepted,
-                        Page::Dir => match self.disk_free() {
-                            Some(free) => free >= self.selected_bytes(),
-                            None => true,
-                        },
+                        Page::Dir => self.dir_next_enabled(),
                         _ => true,
                     };
                     let is_last = match self.page {

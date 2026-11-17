@@ -28,6 +28,7 @@
 | 17 | ARP ModifyPath/修复入口 | Inno `ModifyPath`/修复向导 | **已完成**（v0.9.0） |
 | 18 | 安装/卸载完成详情停留页 | NSIS `MUI_PAGE_INSTFILES`（完成后停留，点「下一步」进 Finish） | **已完成**（v0.10.0） |
 | 19 | 卸载器壁纸 | Inno 卸载向导背景图 / NSIS `BGImage` | **已完成**（v0.10.0） |
+| 20 | 目录页空间动态刷新 + 安装目录校验 | NSIS DirectoryPage / `AllowRootDirInstall` / `.onVerifyInstDir` | **已完成**（v0.11.0） |
 
 ## 迭代步骤定义
 
@@ -124,6 +125,27 @@
   旧 24B footer）→ 卸载器解码贴图（全窗铺满 + 半透明遮罩保证可读，
   窗口自动放大 800×540）；无壁纸走内置渐变（旧包/缺省行为不变）。
 
+### 步骤 20：目录页空间动态刷新 + 安装目录校验（NSIS DirectoryPage 对齐）
+- **缺陷背景**（用户报告）：切换盘符后剩余空间不刷新，一直显示默认
+  安装盘的可用空间——`disk_free()` 基于仅在 `start_install` 时才更新的
+  `dest`，而非目录页实时编辑的 `dir_text`。
+- **做什么**：① 可用空间与空间不足禁用逻辑改为基于**当前输入目录**
+  所在盘实时查询（NSIS DirectoryPage：Space available 随所选驱动器
+  刷新）；② 目录校验：空/相对路径/非法字符/**不存在盘符**拒绝前进并
+  提示（NSIS 对无效路径的处理）；③ `install.allow_root_dir_install`
+  （NSIS `AllowRootDirInstall`，默认 false = 禁止盘根/UNC 共享根安装）。
+- **实现**：纯函数下沉 `miedit_core::installdir`（`parse_dir_text`
+  清洗引号/空白/裸盘符规范化、`drive_root_of` 盘根与 UNC 共享根提取、
+  `is_root_path`、`classify_inst_dir` 三态校验 + 文案键映射）9 项单测；
+  安装器 `current_dest()`/`dir_issue()`/`dir_next_enabled()` 统一三处
+  口径（空间显示/Enter 校验/按钮禁用）；`disk_free_space` 无已存在
+  祖先目录时返回 None（不再误回退 C 盘）；文案新增 `dir_invalid`/
+  `dir_root_warning` 双语键。向后兼容：`allow_root_dir_install` 为
+  serde default 字段，旧脚本行为仅受 NSIS 安全默认影响（旧包内置旧
+  安装器，行为不变）。
+- **验收**：目录页切换盘符可用空间立即变化；输入不存在盘符/非法字符
+  时「安装」禁用并提示；默认根目录被拒绝、开关打开后放行。
+
 ## 工程约束（每次迭代都要遵守）
 
 1. **纯 Rust**：不引入 C 构建链；新增依赖须在 Windows/Linux 双平台可编译。
@@ -136,6 +158,19 @@
 6. **版本号**：功能对齐批次完成后递增 `Cargo.toml` workspace version。
 
 ## 变更日志
+
+- v0.11.0（步骤 20）：**目录页空间动态刷新 + 安装目录校验**（NSIS
+  DirectoryPage / `AllowRootDirInstall` 对齐，修复用户报告缺陷）：
+  切换盘符后剩余空间不刷新——`disk_free()` 此前基于仅在开始安装时才
+  更新的 `dest`，现改为基于目录页**实时输入目录**（`current_dest()`
+  跟随 `dir_text`，去空白/包裹引号/裸盘符 `C:`→`C:\` 规范化），空间
+  显示、Enter 校验、按钮禁用三处口径统一；目录校验：空输入/相对路径/
+  非法字符（`<>|?*"` 与盘符外冒号）/**不存在的盘符**拒绝前进并显示
+  `dir_invalid` 提示，盘根/UNC 共享根默认拒绝（`dir_root_warning`），
+  `install.allow_root_dir_install = true` 放行（NSIS
+  `AllowRootDirInstall` 安全默认语义）；`disk_free_space` 无已存在
+  祖先目录时返回 None（不再误回退 C 盘）；决策纯函数下沉
+  `miedit_core::installdir`（9 项单测），core 74 项测试全过。
 
 - v0.10.0（步骤 18–19）：**完成详情停留页 + 卸载器壁纸**（NSIS
   `MUI_PAGE_INSTFILES` 完成态与 Inno 卸载背景对齐）：

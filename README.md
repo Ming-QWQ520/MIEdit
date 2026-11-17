@@ -38,7 +38,7 @@
 | 快捷方式 | 开始菜单（自动含“卸载”快捷方式）与桌面，per-machine / per-user 自适应 |
 | **默认图标** | 未配置图标时自动使用内置 **modern-install.ico / modern-uninstall.ico**（NSIS 做法），PE 资源 + 窗口图标同步替换 |
 | **EXE 版本信息** | 安装器/卸载器 EXE 嵌入 VERSIONINFO（NSIS `VIProductVersion` / `VIAddVersionKey` 对齐）：产品名/版本/公司/描述/版权，资源管理器属性可见 |
-| 磁盘空间检测 | 目录页显示需要/可用空间，不足禁用安装 |
+| 磁盘空间检测与目录校验 | 目录页可用空间**随所选驱动器实时刷新**（NSIS DirectoryPage），无效路径/不存在盘符拒绝前进；`allow_root_dir_install` 根目录安装开关（NSIS `AllowRootDirInstall` 默认禁根目录） |
 | 运行中检测 | 安装前独占探测主程序占用，重试/继续 |
 | 升级检测 | 发现旧版本记录版本号并静默卸载后升级（`InstallDirRegKey` 式目录记忆） |
 | 权限 | `per_machine = true` 启动时自动 UAC 提权重启 |
@@ -202,7 +202,7 @@ crates/
 ## 测试
 
 ```bash
-cargo test --workspace    # 65 个单元测试：归档/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/文件错误决策与提示信箱/重启替换/安装类型状态机/系统版本门槛/目录统计/组件过滤映射/slug/语言匹配与 LANGID 映射/多语言文案解析链/修复入口与修复统计/包尾 v4 与卸载数据新旧格式
+cargo test --workspace    # 74 个单元测试：归档/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/文件错误决策与提示信箱/重启替换/安装类型状态机/系统版本门槛/目录统计/组件过滤映射/slug/语言匹配与 LANGID 映射/多语言文案解析链/修复入口与修复统计/包尾 v4 与卸载数据新旧格式/安装目录解析与根路径校验
 ```
 
 已在 Windows 10 x64 实机验证：CLI 与 GUI 构建链路、静默安装/卸载全清理、组件过滤生效、

@@ -118,6 +118,9 @@ pub struct InstallConfig {
     /// 最小系统版本门槛（如 "6.1" = Windows 7，"10.0" = Windows 10）；
     /// 空 = 不检查。低于门槛时安装器启动即报错退出（Inno MinVersion 对齐）
     pub min_version: String,
+    /// 允许安装到盘根/网络共享根（NSIS `AllowRootDirInstall` 对齐，路线图步骤 20）。
+    /// 默认 false：目录页拒绝根目录安装并提示选择子文件夹（NSIS 安全默认语义）
+    pub allow_root_dir_install: bool,
 }
 
 impl Default for InstallConfig {
@@ -133,6 +136,7 @@ impl Default for InstallConfig {
             uninstall_icon: None,
             uninstall_background: None,
             min_version: String::new(),
+            allow_root_dir_install: false,
         }
     }
 }
@@ -504,6 +508,15 @@ pub static DEFAULT_TEXT_KEYS: &[(&str, &str)] = &[
         ("repair_now", "Repair"),
         ("repair_finish_title", "Repair Complete"),
         ("repair_finish_body", "{app} {version} has been repaired at:"),
+        // 步骤 20：目录页校验提示（NSIS DirectoryPage：无效路径/根目录拒绝）
+        (
+            "dir_invalid",
+            "Please enter a valid absolute install folder on an existing drive.",
+        ),
+        (
+            "dir_root_warning",
+            "For safety reasons, installing into a drive root is not allowed. Please choose a subfolder.",
+        ),
     ];
 
 /// 将文案中的 `{app}` / `{version}` 替换为实际值。
