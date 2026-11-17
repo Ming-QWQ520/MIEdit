@@ -57,6 +57,9 @@ pub struct InstallerApp {
     /// 修复模式（ARP ModifyPath 启动，路线图步骤 17）：
     /// 跳过向导页直接确认 → 全量重装，完成页切换为修复文案
     repair: bool,
+    /// 步骤 18：安装完成（后台线程 Done）——停留在安装详情页（NSIS
+    /// INSTFILES 完成态语义），点「下一步」才进入完成页
+    install_finished: bool,
 }
 
 pub fn run_gui(pkg: Arc<Package>, default_dest: PathBuf, repair: bool) -> anyhow::Result<()> {
@@ -154,6 +157,7 @@ pub fn run_gui(pkg: Arc<Package>, default_dest: PathBuf, repair: bool) -> anyhow
                 details_open: true,
                 title,
                 repair,
+                install_finished: false,
             }))
         }),
     )
@@ -234,6 +238,7 @@ impl InstallerApp {
     }
 
     fn start_install(&mut self, ctx: &egui::Context) {
+        self.install_finished = false;
         let dest = PathBuf::from(self.dir_text.trim().trim_matches('"'));
         self.dest = dest.clone();
 
@@ -315,9 +320,9 @@ impl InstallerApp {
         let s = self.state.lock().unwrap();
         match s.phase.clone() {
             Phase::Done => {
-                if self.page != Page::Finish && self.page != Page::Error {
-                    self.page = Page::Finish;
-                }
+                // 步骤 18（NSIS INSTFILES 语义）：完成后停留在安装详情页，
+                // 显示完成状态与全量日志，用户点「下一步」进入完成页
+                self.install_finished = true;
             }
             Phase::Failed(e) => {
                 if self.page != Page::Error {
@@ -413,8 +418,13 @@ impl InstallerApp {
                 }
             }
             Page::RepairConfirm => self.start_repair(ctx),
+            // 步骤 18：详情停留页完成后「下一步」→ 完成页（NSIS INSTFILES → FINISH）
+            Page::Install => {
+                if self.install_finished {
+                    self.page = Page::Finish;
+                }
+            }
             Page::Error => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-            Page::Install => {}
         }
     }
 
@@ -889,6 +899,26 @@ impl InstallerApp {
                 }
             }
             Page::Install => {
+                // 步骤 18：完成详情停留页——标题与状态行切换为完成态
+                if self.install_finished {
+                    ui.heading(
+                        egui::RichText::new(txt(cfg, self.language, "finish_title"))
+                            .color(self.theme.text)
+                            .size(28.0)
+                            .strong(),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(format!("√ {}", miedit_core::config::fill_template(
+                            &txt(cfg, self.language, "finish_body"),
+                            &cfg.app.name,
+                            &cfg.app.version,
+                        )))
+                        .color(Color32::from_rgb(0x3D, 0xD6, 0x8C))
+                        .size(14.0)
+                        .strong(),
+                    );
+                } else {
                 ui.heading(
                     egui::RichText::new(miedit_core::config::fill_template(
                         &txt(cfg, self.language, "installing"),
@@ -899,6 +929,7 @@ impl InstallerApp {
                     .size(28.0)
                     .strong(),
                 );
+                }
                 ui.add_space(10.0);
                 let (frac, cur, log, phase, done_f, total_f, done_b, speed_mb) = {
                     let s = self.state.lock().unwrap();
@@ -1203,7 +1234,15 @@ impl InstallerApp {
                         self.primary_action(ctx);
                     }
                 }
-                Page::Install => {}
+                // 步骤 18：详情停留页完成后显示「下一步」（NSIS INSTFILES → FINISH）
+                Page::Install => {
+                    if self.install_finished {
+                        let t_next2 = txt(&cfg, self.language, "next");
+                        if ui.add(theme::primary_button(&t_next2, &self.theme)).clicked() {
+                            self.primary_action(ctx);
+                        }
+                    }
+                }
                 Page::RepairConfirm => {
                     let t_repair = txt(&cfg, self.language, "repair_now");
                     if ui.add(theme::secondary_button(&t_cancel, &self.theme)).clicked() {
@@ -1295,7 +1334,7 @@ impl eframe::App for InstallerApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
-        if enter && self.page != Page::Install {
+        if enter && (self.page != Page::Install || self.install_finished) {
             self.primary_action(ctx);
         }
         // 步骤 15：语言切换后同步窗口标题（NSIS 标题栏跟随语言）

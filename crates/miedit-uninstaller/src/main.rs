@@ -25,6 +25,9 @@ const TEXT_DIM: Color32 = Color32::from_rgb(185, 191, 203);
 enum Phase {
     Confirm,
     Working,
+    /// 卸载完成详情停留页（NSIS INSTFILES 语义，路线图步骤 18）：
+    /// 显示完成状态 + 全部日志，用户点「下一步」进入完成总结页
+    Summary,
     Done,
     Failed(String),
 }
@@ -53,6 +56,8 @@ struct UninstallerApp {
     delete_user_data: bool,
     /// 应用图标纹理（内嵌于卸载器，标题栏与确认页展示）
     icon_tex: Option<egui::TextureHandle>,
+    /// 卸载器壁纸纹理（内嵌于卸载器，步骤 19；None = 内置渐变背景）
+    bg_tex: Option<egui::TextureHandle>,
     /// 卸载页“显示细节”开关（默认收起）
     show_details: bool,
     /// 主程序是否正在运行（确认页警告，可重新检测）
@@ -81,13 +86,14 @@ fn real_main(silent: bool, args: &[String]) -> Result<i32> {
         .ok_or_else(|| anyhow!("无法定位卸载器所在目录"))?
         .to_path_buf();
 
-    // NSIS 式自包含卸载器：优先读取自身尾部的内嵌清单（MIEDUNIN）；
-    // 兼容旧版：回退到 uninstall.json
-    let (manifest, icon_bytes): (UninstallManifest, Option<Vec<u8>>) =
+    // NSIS 式自包含卸载器：优先读取自身尾部的内嵌清单（MIEDUNIN，含图标与壁纸）；
+    // 兼容旧版：24B footer（无壁纸）回退，最旧版回退到 uninstall.json
+    let (manifest, icon_bytes, bg_bytes): (UninstallManifest, Option<Vec<u8>>, Option<Vec<u8>>) =
         match miedit_core::trailer::read_uninstall_data(&exe) {
-            Some((m, icon)) if !m.is_empty() => (
+            Some((m, icon, bg)) if !m.is_empty() => (
                 serde_json::from_slice(&m).context("内嵌卸载清单损坏")?,
                 Some(icon),
+                if bg.is_empty() { None } else { Some(bg) },
             ),
             _ => {
                 let manifest_path = dir.join("uninstall.json");
@@ -97,7 +103,7 @@ fn real_main(silent: bool, args: &[String]) -> Result<i32> {
                     )?,
                 )
                 .context("卸载清单损坏")?;
-                (m, None)
+                (m, None, None)
             }
         };
 
@@ -135,7 +141,7 @@ fn real_main(silent: bool, args: &[String]) -> Result<i32> {
         }
     } else {
         let app_running = main_exe_running(&manifest);
-        run_gui(manifest, icon_bytes, run, app_running)
+        run_gui(manifest, icon_bytes, bg_bytes, run, app_running)
     }
 }
 
@@ -394,14 +400,18 @@ fn secondary_button(text: &str) -> egui::Button<'_> {
 fn run_gui(
     manifest: UninstallManifest,
     icon_bytes: Option<Vec<u8>>,
+    bg_bytes: Option<Vec<u8>>,
     run: Arc<Mutex<RunState>>,
     app_running: bool,
 ) -> Result<i32> {
     // 图标：任务栏 + 标题栏 + 确认页
     let icon_data: Option<egui::IconData> = icon_bytes.and_then(|b| decode_icon(&b));
+    // 壁纸（步骤 19）：解码为 egui 纹理；有壁纸时窗口放大以充分展示
+    let bg_image: Option<egui::ColorImage> = bg_bytes.and_then(|b| decode_image(&b));
+    let win_size = if bg_image.is_some() { [800.0, 540.0] } else { [560.0, 420.0] };
     let mut viewport = egui::ViewportBuilder::default()
         .with_title(format!("卸载 {}", manifest.app_name))
-        .with_inner_size([560.0, 420.0])
+        .with_inner_size(win_size)
         .with_resizable(false)
         .with_decorations(false);
     if let Some(ic) = &icon_data {
@@ -417,6 +427,7 @@ fn run_gui(
         phase: Phase::Confirm,
         delete_user_data: false,
         icon_tex: None,
+        bg_tex: None,
         show_details: false,
         app_running,
     };
@@ -436,8 +447,13 @@ fn run_gui(
                     egui::TextureOptions::LINEAR,
                 )
             });
+            let bg_tex = bg_image.as_ref().map(|img| {
+                cc.egui_ctx
+                    .load_texture("uninstall-bg", img.clone(), egui::TextureOptions::LINEAR)
+            });
             let mut app = app;
             app.icon_tex = icon_tex;
+            app.bg_tex = bg_tex;
             Ok(Box::new(app))
         }),
     )
@@ -454,6 +470,15 @@ fn decode_icon(bytes: &[u8]) -> Option<egui::IconData> {
         height: rgba.height(),
         rgba: rgba.as_raw().clone(),
     })
+}
+
+/// 解码壁纸字节为 egui ColorImage（PNG/JPEG 等）。
+fn decode_image(bytes: &[u8]) -> Option<egui::ColorImage> {
+    let img = image::load_from_memory(bytes).ok()?;
+    Some(egui::ColorImage::from_rgba_unmultiplied(
+        [img.width() as usize, img.height() as usize],
+        img.to_rgba8().as_raw(),
+    ))
 }
 
 impl UninstallerApp {
@@ -473,6 +498,8 @@ impl UninstallerApp {
     fn primary_action(&mut self, ctx: &egui::Context) {
         match self.phase {
             Phase::Confirm => self.start_uninstall(ctx),
+            // 步骤 18：详情停留页「下一步」→ 完成总结页（NSIS INSTFILES → FINISH）
+            Phase::Summary => self.phase = Phase::Done,
             Phase::Done | Phase::Failed(_) => {
                 cleanup_after_uninstall(&self.manifest);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -481,6 +508,31 @@ impl UninstallerApp {
         }
     }
     fn paint_background(&self, painter: &egui::Painter, sr: Rect) {
+        // 步骤 19：卸载器壁纸——全窗口铺满 + 半透明遮罩保证文字可读
+        if let Some(bg) = &self.bg_tex {
+            painter.image(
+                bg.id(),
+                sr,
+                Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+            painter.rect_filled(sr, 0.0, Color32::from_black_alpha(120));
+            // 顶部品牌色细线 + 右上柔和光斑与渐变模式保持一致
+            painter.rect_filled(
+                Rect::from_min_max(sr.min, Pos2::new(sr.right(), sr.top() + 3.0)),
+                0.0,
+                ACCENT.linear_multiply(0.9),
+            );
+            for i in 0..3 {
+                let r = 220.0 - i as f32 * 55.0;
+                painter.circle_filled(
+                    Pos2::new(sr.right() - 60.0, sr.top() + 90.0),
+                    r,
+                    Color32::from_rgba_unmultiplied(0xE5, 0x48, 0x4D, (8 - i * 2).max(2)),
+                );
+            }
+            return;
+        }
         let n = 48;
         for i in 0..n {
             let t = (i as f32 + 0.5) / n as f32;
@@ -510,9 +562,72 @@ impl UninstallerApp {
         match self.phase.clone() {
             Phase::Confirm => self.page_confirm(ui),
             Phase::Working => self.page_working(ui),
+            Phase::Summary => self.page_summary(ui),
             Phase::Done => self.page_done(ui),
             Phase::Failed(err) => self.page_failed(ui, &err),
         }
+    }
+
+    /// 步骤 18：卸载完成详情停留页（NSIS INSTFILES 完成态语义）——
+    /// 完成徽标 + 统计 + 全量日志（默认展开），点「下一步」进入完成总结页。
+    fn page_summary(&mut self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(4.0);
+            draw_badge(ui, GREEN, "√");
+            ui.add_space(4.0);
+            ui.heading(
+                egui::RichText::new(format!("已成功卸载 {}", self.manifest.app_name))
+                    .color(TEXT)
+                    .size(24.0)
+                    .strong(),
+            );
+            let (fr, dr, bf, reboot) = {
+                let r = self.run.lock().unwrap();
+                (r.files_removed, r.dirs_removed, r.bytes_freed, r.reboot_scheduled)
+            };
+            ui.label(
+                egui::RichText::new(format!(
+                    "已删除 {} 个文件、{} 个目录，释放 {}",
+                    fr,
+                    dr,
+                    miedit_core::util::human_size(bf)
+                ))
+                .color(TEXT_DIM)
+                .size(13.5),
+            );
+            if reboot > 0 {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{reboot} 个文件将在系统重启后删除。"
+                    ))
+                    .color(AMBER)
+                    .size(13.0),
+                );
+            }
+        });
+        ui.add_space(6.0);
+        egui::Frame::none()
+            .fill(Color32::from_rgb(8, 10, 14))
+            .rounding(10.0)
+            .stroke(egui::Stroke::new(1.0, CARD_STROKE))
+            .inner_margin(egui::Margin::same(10.0))
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink(false)
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        let log = self.run.lock().unwrap().log.clone();
+                        for line in &log {
+                            ui.label(
+                                egui::RichText::new(line)
+                                    .color(TEXT_DIM)
+                                    .size(12.0)
+                                    .monospace(),
+                            );
+                        }
+                    });
+            });
     }
 
     fn page_confirm(&mut self, ui: &mut egui::Ui) {
@@ -698,7 +813,7 @@ impl eframe::App for UninstallerApp {
             self.primary_action(ctx);
         }
 
-        // 工作线程完成检测
+        // 工作线程完成检测（步骤 18：无错误 → Summary 详情停留页，用户点「下一步」进完成页）
         if self.phase == Phase::Working {
             let finished = self.run.lock().unwrap().finished;
             if finished {
@@ -707,7 +822,7 @@ impl eframe::App for UninstallerApp {
                     let errs = self.run.lock().unwrap().errors.clone();
                     self.phase = Phase::Failed(errs.join("\n"));
                 } else {
-                    self.phase = Phase::Done;
+                    self.phase = Phase::Summary;
                 }
             }
         }
@@ -786,6 +901,15 @@ impl eframe::App for UninstallerApp {
                                 }
                             }
                             Phase::Working => {}
+                            Phase::Summary => {
+                                if ui.add(secondary_button("取消")).clicked() {
+                                    cleanup_after_uninstall(&self.manifest);
+                                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                                }
+                                if ui.add(primary_button("下一步", GREEN)).clicked() {
+                                    self.primary_action(ctx);
+                                }
+                            }
                             Phase::Done | Phase::Failed(_) => {
                                 let label = if matches!(phase, Phase::Done) { "完成" } else { "关闭" };
                                 if ui.add(primary_button(label, if matches!(phase, Phase::Done) { GREEN } else { ACCENT })).clicked() {

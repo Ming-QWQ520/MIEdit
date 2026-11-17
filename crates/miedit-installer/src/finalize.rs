@@ -264,6 +264,7 @@ pub fn finalize_install(
     }
 
     // 5. 卸载清单内嵌进卸载器 EXE 尾部（NSIS 式自包含卸载器，不再落盘 uninstall.json）
+    //    卸载器壁纸（步骤 19）随清单/图标一起内嵌；无壁纸时空字节（32B footer bg_len=0）
     let json = serde_json::to_vec_pretty(&manifest)?;
     // 卸载器图标：优先使用内嵌的 uninstall_icon 分区，否则复用应用图标
     let mut icon_bytes: Vec<u8> = Vec::new();
@@ -279,7 +280,16 @@ pub fn finalize_install(
         f2.read_exact(&mut ib)?;
         icon_bytes = ib;
     }
-    miedit_core::trailer::write_uninstall_data(&uninst_path, &json, &icon_bytes)?;
+    // 卸载器壁纸：内嵌 uninstall_bg 分区（v4 包；旧格式包无此分区 → 空 → 卸载器走内置渐变）
+    let mut ubg_bytes: Vec<u8> = Vec::new();
+    if !pkg.trailer.uninstall_bg.is_empty() {
+        let mut f3 = fs::File::open(&pkg.path)?;
+        f3.seek(SeekFrom::Start(pkg.trailer.uninstall_bg.off))?;
+        let mut bb = vec![0u8; pkg.trailer.uninstall_bg.len as usize];
+        f3.read_exact(&mut bb)?;
+        ubg_bytes = bb;
+    }
+    miedit_core::trailer::write_uninstall_data(&uninst_path, &json, &icon_bytes, &ubg_bytes)?;
     manifest.manifest_path = String::new();
 
     push_log(

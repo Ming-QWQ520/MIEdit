@@ -26,6 +26,8 @@
 | 15 | 多语言框架（MUI 式语言选择 + 文案包） | NSIS MUI2 | **已完成**（v0.8.0） |
 | 16 | zstd 压缩档 | Inno `Compression.Zstd.pas`（等纯 Rust 编码器成熟） | **阻塞**（依赖待成熟，见步骤 16 定义） |
 | 17 | ARP ModifyPath/修复入口 | Inno `ModifyPath`/修复向导 | **已完成**（v0.9.0） |
+| 18 | 安装/卸载完成详情停留页 | NSIS `MUI_PAGE_INSTFILES`（完成后停留，点「下一步」进 Finish） | **已完成**（v0.10.0） |
+| 19 | 卸载器壁纸 | Inno 卸载向导背景图 / NSIS `BGImage` | **已完成**（v0.10.0） |
 
 ## 迭代步骤定义
 
@@ -104,6 +106,24 @@
   summarize）+ installer `--repair`/`/repair` 解析 + `Page::RepairConfirm`
   + finalize 注册表写入；静默修复等同静默安装。
 
+### 步骤 18：安装/卸载完成详情停留页（NSIS INSTFILES 完成态）
+- **做什么**：NSIS MUI2 的 INSTFILES 页在安装/卸载完成后**停留**在该页
+  （显示完成状态 + 全量日志），用户点「下一步」才进入 Finish 页；
+  此前 MIEdit 完成后直接跳完成页、跳过详情。
+- **实现**：安装器 `install_finished` 状态（poll_state 不再自动切页，
+  Install 页渲染完成横幅 + 「下一步」按钮 → Finish，Enter 放宽）；
+  卸载器新增 `Phase::Summary` 详情停留页（完成徽标 + 统计 + 全量日志
+  默认展开，「下一步」→ Done 总结页）。
+
+### 步骤 19：卸载器壁纸
+- **做什么**：卸载向导支持脚本配置背景图（对齐安装器 `ui.background`）。
+- **实现**：`install.uninstall_background`（源文件路径）→ 编译器读图
+  写入包尾新分区（**Trailer v4 `MIEDPKG4`**：v3 超集 + 卸载器壁纸
+  分区，132B；读取兼容 v2/v3）→ 安装器 finalize 把壁纸随清单/图标
+  内嵌进卸载器 EXE 尾部（**MIEDUNIN 32B footer**：+bg_len，读取兼容
+  旧 24B footer）→ 卸载器解码贴图（全窗铺满 + 半透明遮罩保证可读，
+  窗口自动放大 800×540）；无壁纸走内置渐变（旧包/缺省行为不变）。
+
 ## 工程约束（每次迭代都要遵守）
 
 1. **纯 Rust**：不引入 C 构建链；新增依赖须在 Windows/Linux 双平台可编译。
@@ -116,6 +136,19 @@
 6. **版本号**：功能对齐批次完成后递增 `Cargo.toml` workspace version。
 
 ## 变更日志
+
+- v0.10.0（步骤 18–19）：**完成详情停留页 + 卸载器壁纸**（NSIS
+  `MUI_PAGE_INSTFILES` 完成态与 Inno 卸载背景对齐）：
+  安装/卸载完成后不再直接跳完成页，而是停留在**详情页**（显示完成
+  状态 + 全量日志），用户点「下一步」进入完成页——安装器 `install_finished`
+  状态（Install 页渲染完成横幅与「下一步」，Enter 放宽），卸载器新增
+  `Phase::Summary`（完成徽标 + 统计 + 日志默认展开）；卸载器壁纸：
+  `install.uninstall_background` → 包尾新分区（Trailer **v4 MIEDPKG4**，
+  v3 超集 + 壁纸分区，132B，读取兼容 v2/v3）→ finalize 内嵌进卸载器
+  （MIEDUNIN 32B footer +bg_len，兼容旧 24B）→ 卸载器全窗贴图 +
+  半透明遮罩（窗口放大 800×540），无壁纸走内置渐变；7 项新单测
+  （v4 编解码/壁纸分区往返/旧 v3 兼容/卸载数据新旧格式往返），
+  core 65 项测试全过。
 
 - v0.9.0（步骤 17）：**ARP ModifyPath 修复入口 + 修复模式**（Inno `ModifyPath`
   / 修复向导对齐）：卸载注册表键不再写 `NoModify=1`，改写 **`ModifyPath` =

@@ -151,7 +151,7 @@ fn run_install(
     if old_exe.is_file() {
         let old_version: Option<String> =
             miedit_core::trailer::read_uninstall_data(&old_exe)
-                .and_then(|(m, _)| serde_json::from_slice::<serde_json::Value>(&m).ok())
+                .and_then(|(m, _, _)| serde_json::from_slice::<serde_json::Value>(&m).ok())
                 .and_then(|v| v.get("version").and_then(|x| x.as_str()).map(String::from))
                 .or_else(|| {
                     std::fs::read(&old_json)

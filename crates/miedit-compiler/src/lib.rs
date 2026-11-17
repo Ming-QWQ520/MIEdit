@@ -181,6 +181,26 @@ pub fn build_package(
     }
     cfg.install.uninstall_icon = None;
 
+    // 卸载器壁纸（路线图步骤 19）：源图内嵌进卸载器 EXE 尾部，
+    // 卸载向导全窗口显示；缺省走卸载器内置渐变背景
+    let mut uninstall_bg_bytes: Vec<u8> = Vec::new();
+    if let Some(bp) = &cfg.install.uninstall_background {
+        if bp.trim().is_empty() {
+            cfg.install.uninstall_background = None;
+        }
+    }
+    if let Some(bp) = &cfg.install.uninstall_background {
+        let p = base.join(bp);
+        uninstall_bg_bytes = fs::read(&p)
+            .with_context(|| format!("读取卸载器壁纸失败: {}", p.display()))?;
+        progress(&format!(
+            "卸载器壁纸: {} ({})",
+            p.display(),
+            miedit_core::util::human_size(uninstall_bg_bytes.len() as u64)
+        ));
+    }
+    cfg.install.uninstall_background = None;
+
     // 5. 校验组件引用
     for (i, comp) in cfg.components.iter().enumerate() {
         if comp.name.trim().is_empty() {
@@ -512,9 +532,16 @@ pub fn build_package(
         f.write_all(&uninstall_icon_bytes)?;
         (icon_off + icon_len, uninstall_icon_bytes.len() as u64)
     };
+    let (ubg_off, ubg_len) = if uninstall_bg_bytes.is_empty() {
+        (0u64, 0u64)
+    } else {
+        f.write_all(&uninstall_bg_bytes)?;
+        (uicon_off + uicon_len, uninstall_bg_bytes.len() as u64)
+    };
 
     // NSIS CRCCheck 对齐（路线图步骤 7）：写入 payload/config/uninstaller 三个
-    // 分区的 CRC32（MIEDPKG3 Trailer），安装器启动时流式校验，`--ncrc` 可跳过。
+    // 分区的 CRC32（MIEDPKG4 Trailer，v3 超集 + 卸载器壁纸分区），安装器启动时
+    // 流式校验，`--ncrc` 可跳过；旧格式包（v2/v3）仍可被安装器读取。
     let crc = trailer::compute_crc(&payload_bytes, &cfg_json, &unp_bytes);
     let tr = Trailer {
         payload: Range { off: payload_off, len: payload_end - payload_off },
@@ -523,6 +550,7 @@ pub fn build_package(
         background: Range { off: bg_off, len: bg_len },
         icon: Range { off: icon_off, len: icon_len },
         uninstall_icon: Range { off: uicon_off, len: uicon_len },
+        uninstall_bg: Range { off: ubg_off, len: ubg_len },
         crc: Some(crc),
     };
     trailer::write_trailer(&mut f, &tr)?;

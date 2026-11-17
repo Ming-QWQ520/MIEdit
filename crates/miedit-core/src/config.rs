@@ -112,6 +112,9 @@ pub struct InstallConfig {
     pub write_log: bool,
     /// 卸载程序图标（.ico，可选；缺省使用 app.icon）
     pub uninstall_icon: Option<String>,
+    /// 卸载器壁纸（可选，源文件路径；编译期内嵌进卸载器 EXE 尾部，
+    /// 卸载向导全窗口显示该图；缺省走内置渐变背景）
+    pub uninstall_background: Option<String>,
     /// 最小系统版本门槛（如 "6.1" = Windows 7，"10.0" = Windows 10）；
     /// 空 = 不检查。低于门槛时安装器启动即报错退出（Inno MinVersion 对齐）
     pub min_version: String,
@@ -128,6 +131,7 @@ impl Default for InstallConfig {
             overwrite: "on".into(),
             write_log: true,
             uninstall_icon: None,
+            uninstall_background: None,
             min_version: String::new(),
         }
     }

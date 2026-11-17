@@ -11,6 +11,7 @@ url = ""
 per_machine = false
 
 [install]
+uninstall_background = "assets/images/bg.png"
 dir_template = '{localappdata}\Programs\MIEdit Demo'
 run_after = "MIEditDemo.exe"
 user_data_dirs = ['{appdata}\MIEdit Demo']
