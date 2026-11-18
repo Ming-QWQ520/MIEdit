@@ -641,3 +641,52 @@
    v2 没有 un Section，与 #18 教训 4（运行时记账）对齐的后续方向
    是把 write_ini/copy/rename 的产物也登记进清单——本轮先保持
    NSIS 同语义，记账升级留给下一批。
+
+## 二十四、落地清单 · 第二十一批（NSIS 对齐 #20，0.1.0）
+
+**MI 指令注册表全类型（步骤 39）+ ExecShell/RMDir（步骤 39）+
+条件指令 IfFileExists/Abort（步骤 40）**——自研 `.mi` 语言指令集
+扩至 13 条，控制流首次进入脚本层。
+
+1. **snake_case serde 标签会"吃掉"驼峰连写**：`RmDir` 变体在
+   `#[serde(tag = "op", rename_all = "snake_case")]` 下序列化为
+   `rm_dir` 而不是 `rmdir`——NSIS 关键字是连写的（RMDir），
+   MI 指令名也按连写设计。发现于 serde 往返单测（断言
+   `"op":"rmdir"` 失败），解法是变体级显式
+   `#[serde(rename = "rmdir")]`。同理 IfFileExists →
+   `if_file_exists` 是期望行为（NSIS IfFileExists 也是分词）。
+   教训：**指令名是语言对外契约，不能交给命名规则推导**。
+2. **Rust 关键字字段用显式 rename 而不是 raw identifier**：
+   `if_file_exists` 的 else 分支字段名是关键字 `else`。可用
+   `r#else` raw identifier（serde 会正确序列化为 `"else"`），
+   但显式 `#[serde(rename = "else")]` + Rust 字段名
+   `else_branch` 更直白——字段名在 Rust 代码里可读（then/else
+   不对称一眼可见），且规避 serde derive 对 raw ident 的
+   边缘行为。两法皆可，选直白者。
+3. **SetRegView 按"每指令内联"而不是全局切换**：NSIS 的
+   `SetRegView` 是全局状态（切换后所有注册表指令都重定向，
+   用完要手动切回），脚本作者忘切回是经典 bug 源。MI 脚本把
+   视图做成 `write_reg` 的 `view` 字段（每指令独立声明），无
+   跨指令副作用可"忘记"——同一脚本里 32/64 视图交错写互不
+   干扰。这是对 NSIS 语义的**有意偏离**（更安全），文档要写明。
+4. **递归块执行的上下文要收拢成结构体**：指令执行函数原来
+   有 8 个参数（`#[allow(clippy::too_many_arguments)]`），
+   `if_file_exists` 要把同一套上下文递归传给分支块——再加
+   depth 就是 9 个。重构为 `InstCtx` 结构体（dest/vars/effects/
+   dirs/seen_dirs/st/comp_name/repaint）后，`execute_block`
+   递归只需 `(code, depth, ctx)` 三参，DetailPrint/日志/
+   error-flag 语义从组件循环和分支两处收敛为单点维护。
+   教训：**加第二个递归调用点之前先把参数包起来**。
+5. **error-flag 语义在分支块里要沿用到顶层**：NSIS 分支内的
+   指令失败同样只置 error flag 不中止（除非显式 Abort）。MI
+   实现 `execute_block` 对 then/else 与组件顶层共用同一错误
+   处理（失败记警告继续；`run.abort_on_error` 与 `abort`
+   中止）——`exec_shell` 在无 xdg-open 的 Linux 沙箱失败，
+   安装继续 exit 0，端到端日志可直接验证该语义。
+6. **嵌套深度上限要静态+运行时双层防护**：`MAX_CODE_DEPTH = 4`
+   在 `validate` 递归校验（构建器问题面板提前报错，错误位置带
+   `then>else` 分支标签）与安装器 `execute_block`（depth 参数
+   防御）各检查一次——serde 反序列化本身不递归爆炸（数据结构
+   有限），但恶意构造的手写脚本可能绕过构建器直接进安装器，
+   运行时防御不可省。验证边界：恰好 MAX 层合法、MAX+1 层报错，
+   单测钉死。

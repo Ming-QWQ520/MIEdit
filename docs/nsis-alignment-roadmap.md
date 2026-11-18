@@ -47,6 +47,8 @@
 | 36 | UAC 执行级别清单（RequestExecutionLevel + supportedOS/DPI/长路径） | NSIS `RequestExecutionLevel` / `ManifestDPIAware` | **已完成**（0.1.0，#19） |
 | 37 | MI 指令扩充：Rename/CopyFiles/WriteINIStr/Sleep | NSIS `Rename`/`CopyFiles`/`WriteINIStr`/`Sleep` | **已完成**（0.1.0，#19） |
 | 38 | 安装期磁盘空间预检（覆盖抵扣 + 余量） | NSIS 磁盘满中止语义（Error writing to file） | **已完成**（0.1.0，#19） |
+| 39 | MI 指令注册表全类型 + ExecShell + RMDir | NSIS `WriteRegBin`/`WriteRegExpandStr`/`WriteRegMultiSz`/`SetRegView`/`ExecShell`/`RMDir` | **已完成**（0.1.0，#20） |
+| 40 | MI 条件指令：if_file_exists + abort | NSIS `IfFileExists`/`Abort`（error-flag/中止语义） | **已完成**（0.1.0，#20） |
 
 ## 迭代步骤定义
 
@@ -477,6 +479,37 @@
 - **验收**：判定边界单测；双平台 check 0 error 0 warning；
   磁盘满实机验证待做（沙箱无法真实写满目标盘）。
 
+### 步骤 39：MI 指令注册表全类型 + ExecShell + RMDir（NSIS WriteRegBin/ExpandStr/MultiSz/SetRegView/ExecShell/RMDir 对齐）
+- **做什么**：① `write_reg.type` 扩至全类型：`str`（默认）/`dword`/
+  `bin`（十六进制串，复用 regspec 解析）/`expand`（REG_EXPAND_SZ）/
+  `multi_sz`（`|` 分隔多段）；新增 `view` 字段（`default`/`64`/`32`，
+  **每指令内联视图**——NSIS SetRegView 是全局切换，按指令内联更安全）。
+  ② 新指令 `exec_shell`（`ExecShell <verb> <target> [args]`：系统动词
+  打开 URL/文档，Windows = ShellExecuteW，Linux 仅 open → xdg-open，
+  其余动词报错按 error-flag 记警告继续）。③ 新指令 `rmdir`（NSIS
+  `RMDir` 默认仅删空目录、非空保留记日志、缺失静默跳过；
+  `recursive = true` 对齐 `RMDir /r` 整树删除）。
+- **验收**：validate 新分支（bin 奇数长度/multi_sz 空段/expand 空值/
+  view 非法/target 空/path 空）+ serde 往返 + describe 单测；
+  Linux 实机端到端（构建 + 静默安装 exit 0 + 指令日志逐条验证 +
+  卸载 exit 0）；双平台 check 0 error 0 warning。
+
+### 步骤 40：MI 条件指令 if_file_exists + abort（NSIS IfFileExists/Abort 对齐）
+- **做什么**：① `if_file_exists { path, then, else }` 条件分支：
+  分支内指令按序执行，沿用顶层 error-flag 语义（失败记警告继续；
+  `run.abort_on_error` 与 `abort` 中止）；嵌套深度上限
+  `MAX_CODE_DEPTH = 4`（validate 递归校验静态拒绝 + 安装器运行时
+  防御）。② `abort { message }`：中止安装（映射失败页，NSIS
+  `Abort` → "Installation aborted" 同语义；message 空 = 静默中止）。
+  安装器执行链重构：`InstCtx` 上下文结构 + `execute_block` 递归
+  块执行（组件顶层与分支共用）。serde 字段 `else` 用显式
+  `rename = "else"`（Rust 关键字规避）。
+- **验收**：validate 嵌套（合法/超限/分支标签错误定位）+ serde
+  往返（含 `"else"` 字段名断言）+ describe 单测；builder TOML
+  往返测试纳入全部新指令（6 → 11 条）；Linux 实机端到端：
+  then 分支命中执行 + rmdir 三态（空删/非空保留/缺失跳过）+
+  exec_shell 失败不中止安装；双平台 check 0 error 0 warning。
+
 1. **纯 Rust**：不引入 C 构建链；新增依赖须在 Windows/Linux 双平台可编译。
 2. **向后兼容**：旧格式安装包/卸载清单必须仍可处理（serde default / magic 回退）。
 3. **测试**：核心逻辑写成 `miedit-core` 纯函数并加单元测试；`cargo test -p miedit-core`
@@ -488,6 +521,36 @@
    不再随功能对齐批次递增；历史批次 v0.2.0–v0.13.0 保留原版本号记录）。
 
 ## 变更日志
+
+- 0.1.0（步骤 39–40，#20）：**MI 指令注册表全类型 + ExecShell/RMDir +
+  条件指令（IfFileExists/Abort）**（对齐 NSIS `WriteRegBin`/
+  `WriteRegExpandStr`/`WriteRegMultiSz`/`SetRegView`/`ExecShell`/
+  `RMDir(/r)`/`IfFileExists`/`Abort`，自研 `.mi` 语言指令集 13 条）：
+  ① **write_reg 全类型**（步骤 39）：`type` 扩至 `str`（默认）/
+  `dword`/`bin`（十六进制串）/`expand`（REG_EXPAND_SZ）/`multi_sz`
+  （`|` 分隔多段）；新增 `view` 字段（`default`/`64`/`32`，每指令
+  内联视图，不产生跨指令全局副作用——NSIS SetRegView 全局切换的
+  安全化改造）；卸载清单精确清理链路复用（新建键判定 + 值登记）。
+  ② **exec_shell**（步骤 39）：NSIS `ExecShell <verb> <target> [args]`，
+  Windows = ShellExecuteW（返回值 ≤ 32 判失败），Linux 仅 open →
+  xdg-open 后台拉起（不等待），其余动词报错按 error-flag 记警告继续。
+  ③ **rmdir**（步骤 39）：NSIS `RMDir` 裸语义（仅删空目录、非空
+  保留记日志、缺失静默跳过、目标是文件报错）+ `recursive = true`
+  对齐 `RMDir /r` 整树删除。
+  ④ **if_file_exists**（步骤 40）：`{ path, then, else }` 条件分支，
+  分支内指令按序执行沿用 error-flag 语义；嵌套深度上限
+  `MAX_CODE_DEPTH = 4`（micmd::validate 递归校验静态拒绝——错误
+  位置带 `then/else` 分支标签——+ 安装器运行时防御双层防护）。
+  ⑤ **abort**（步骤 40）：NSIS `Abort` 中止安装映射失败页
+  （message 记原因，空 = 静默中止）。
+  ⑥ **执行链重构**：installer `InstCtx` 上下文结构 + `execute_block`
+  递归块执行（组件顶层与分支共用，DetailPrint/日志/error-flag
+  语义单点维护）。
+  ⑦ **测试**：core 153 项（+12：validate 全类型/嵌套深度/serde
+  往返含 `"else"` 字段名/describe）；builder 24 项（TOML 往返
+  测试纳入全部 13 条指令 6 → 11 条）；Linux 实机端到端（构建 +
+  静默安装 exit 0 + 指令日志逐条验证：if_file_exists then 命中、
+  rmdir 三态、exec_shell 失败不中止 + 卸载 exit 0）。
 
 - 0.1.0（步骤 36–38，#19）：**UAC 执行级别清单 + MI 指令扩充 +
   安装期磁盘空间预检**（对齐 NSIS `RequestExecutionLevel` /

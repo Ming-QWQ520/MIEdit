@@ -1369,13 +1369,22 @@ code = [
   { op = "detail_print", text = "hi" },
   { op = "write_reg", key = "HKCU\\S\\D", name = "p", value = "$INSTDIR" },
   { op = "write_reg", key = "HKLM\\S\\D", name = "n", value = "1", type = "dword" },
+  { op = "write_reg", key = "HKLM\\S\\D", name = "blob", value = "CAFE", type = "bin", view = "64" },
   { op = "create_dir", path = "$INSTDIR\\logs" },
   { op = "delete_file", path = "$INSTDIR\\old.log" },
   { op = "run", cmd = "a.bat", args = "/q", abort_on_error = true },
+  { op = "exec_shell", verb = "open", target = "https://example.com" },
+  { op = "rmdir", path = "$INSTDIR\\old", recursive = true },
+  { op = "if_file_exists", path = "$INSTDIR\\old.cfg", then = [
+      { op = "delete_file", path = "$INSTDIR\\old.cfg" },
+    ], else = [
+      { op = "detail_print", text = "fresh" },
+    ] },
+  { op = "abort", message = "配置异常" },
 ]
 "#;
         let cfg: miedit_core::config::Config = toml::from_str(src).unwrap();
-        assert_eq!(cfg.components[0].code.len(), 6);
+        assert_eq!(cfg.components[0].code.len(), 11);
         // 校验干净（HKCU/HKLM 前缀 + dword 合法）
         assert!(miedit_core::micmd::validate(&cfg.components[0].code).is_empty());
         // 重新生成（builder 脏检测路径）→ 再解析 → 指令不变

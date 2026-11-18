@@ -576,12 +576,12 @@ fn run_install(
     Ok(())
 }
 
-/// MI 脚本 v2（路线图步骤 33）：执行勾选组件的 `code` 指令。
+/// MI 脚本 v2（路线图步骤 33；39/40 扩充）：执行勾选组件的 `code` 指令。
 ///
 /// NSIS Section 指令语义：组件被勾选（或 required）才执行，按脚本顺序；
 /// 未启用组件过滤（`comp_sel` 为 None）时全部组件执行。指令失败按 NSIS
 /// error-flag 语义**记警告继续**（不中断安装）；`run` 指令的
-/// `abort_on_error` 是显式选择的中止开关（对齐 `[[install.exec_before]]`）。
+/// `abort_on_error` 与 `abort` 指令是显式中止开关。
 ///
 /// 副作用登记（经 [`finalize::CodeEffects`] 进卸载清单，卸载可精确清理）：
 /// - `write_reg` → `registry_keys` + `registry_values`（新建键/既有键判定）；
@@ -591,7 +591,7 @@ fn run_component_code(
     dest: &Path,
     comp_sel: Option<&[bool]>,
     st: &Mutex<ProgressState>,
-    ctx: Option<&egui::Context>,
+    repaint: Option<&egui::Context>,
     dirs: &mut Vec<String>,
     seen_dirs: &mut HashSet<String>,
     effects: &mut finalize::CodeEffects,
@@ -619,49 +619,107 @@ fn run_component_code(
             continue;
         }
         push_log(st, format!("执行组件「{}」指令（{} 条）…", comp.name, comp.code.len()));
-        for (ii, inst) in comp.code.iter().enumerate() {
-            // NSIS DetailPrint：纯日志行
-            if let miedit_core::micmd::MiInstruction::DetailPrint { text } = inst {
-                push_log(st, format!("[{}] {}", comp.name, miedit_core::micmd::expand_vars(text, &vars)));
-                continue;
+        let res = {
+            let mut ictx = InstCtx {
+                dest,
+                vars: &vars,
+                effects: &mut *effects,
+                dirs: &mut *dirs,
+                seen_dirs: &mut *seen_dirs,
+                st,
+                comp_name: &comp.name,
+                repaint,
+            };
+            execute_block(&comp.code, 0, &mut ictx)
+        };
+        if let Err(e) = res {
+            // run.abort_on_error / abort：中止整个安装（NSIS Abort 语义）
+            anyhow::bail!("组件「{}」指令失败: {e}", comp.name);
+        }
+    }
+    Ok(())
+}
+
+/// 单条指令执行上下文（[`execute_instruction`] / [`execute_block`] 共享）。
+struct InstCtx<'a> {
+    /// 安装目录（`$INSTDIR` 与相对路径基准）
+    dest: &'a Path,
+    /// 展开后的 NSIS 常量变量表
+    vars: &'a std::collections::BTreeMap<String, String>,
+    /// 副作用登记（卸载清单）
+    effects: &'a mut finalize::CodeEffects,
+    /// 安装目录内已建目录（相对路径，卸载清单用）
+    dirs: &'a mut Vec<String>,
+    /// 目录去重集合
+    seen_dirs: &'a mut HashSet<String>,
+    /// 进度状态（详情日志）
+    st: &'a Mutex<ProgressState>,
+    /// 当前组件名（日志前缀）
+    comp_name: &'a str,
+    /// egui 重绘句柄（静默模式为 None）
+    repaint: Option<&'a egui::Context>,
+}
+
+/// 执行一段指令（组件顶层与 `if_file_exists` 分支共用）：逐条处理
+/// DetailPrint / 描述日志 / error-flag 语义。`depth` 为 `if_file_exists`
+/// 嵌套层数（0 = 顶层；运行时防御上限 [`miedit_core::micmd::MAX_CODE_DEPTH`]，
+/// 与静态校验一致）。
+fn execute_block(
+    code: &[miedit_core::micmd::MiInstruction],
+    depth: usize,
+    ictx: &mut InstCtx<'_>,
+) -> std::result::Result<(), String> {
+    for (ii, inst) in code.iter().enumerate() {
+        // NSIS DetailPrint：纯日志行
+        if let miedit_core::micmd::MiInstruction::DetailPrint { text } = inst {
+            push_log(
+                ictx.st,
+                format!("[{}] {}", ictx.comp_name, miedit_core::micmd::expand_vars(text, ictx.vars)),
+            );
+            continue;
+        }
+        let desc = miedit_core::micmd::describe(inst, Some(ictx.vars));
+        push_log(ictx.st, format!("指令 #{}: {}", ii + 1, desc));
+        let res = execute_instruction(inst, depth, ictx);
+        // NSIS error-flag 语义：指令失败默认记警告继续；`run.abort_on_error`
+        // 与 `abort` 指令是显式中止开关（中止整个安装，NSIS Abort →
+        // "Installation aborted" 同映射：中止 → 失败页）
+        let fatal = matches!(
+            inst,
+            miedit_core::micmd::MiInstruction::Run { abort_on_error: true, .. }
+                | miedit_core::micmd::MiInstruction::Abort { .. }
+        );
+        match res {
+            Err(e) if fatal => {
+                return Err(format!("指令 #{} 失败: {e}", ii + 1));
             }
-            let desc = miedit_core::micmd::describe(inst, Some(&vars));
-            push_log(st, format!("指令 #{}: {}", ii + 1, desc));
-            let res = execute_instruction(inst, dest, &vars, effects, dirs, seen_dirs, st, &comp.name);
-            // NSIS error-flag 语义：指令失败默认记警告继续；仅 `run.abort_on_error`
-            // 是显式中止开关（对齐 `[[install.exec_before]]` 契约）
-            let fatal = matches!(inst, miedit_core::micmd::MiInstruction::Run { abort_on_error: true, .. });
-            match res {
-                Err(e) if fatal => {
-                    anyhow::bail!("组件「{}」指令 #{} 失败（abort_on_error）: {e}", comp.name, ii + 1);
-                }
-                Err(e) => {
-                    push_log(st, format!("警告: 组件「{}」指令 #{} 失败（继续安装）: {e}", comp.name, ii + 1));
-                }
-                Ok(()) => {}
+            Err(e) => {
+                push_log(
+                    ictx.st,
+                    format!(
+                        "警告: 组件「{}」指令 #{} 失败（继续安装）: {e}",
+                        ictx.comp_name,
+                        ii + 1
+                    ),
+                );
             }
-            if let Some(c) = ctx {
-                c.request_repaint();
-            }
+            Ok(()) => {}
+        }
+        if let Some(c) = ictx.repaint {
+            c.request_repaint();
         }
     }
     Ok(())
 }
 
 /// 执行单条指令（`DetailPrint` 已在上层处理）；失败返回错误描述——
-/// 是否中止由上层按指令类型判定（见 `run_component_code`）。
-#[allow(clippy::too_many_arguments)]
+/// 是否中止由上层按指令类型判定（见 `execute_block`）。
 fn execute_instruction(
     inst: &miedit_core::micmd::MiInstruction,
-    dest: &Path,
-    vars: &std::collections::BTreeMap<String, String>,
-    effects: &mut finalize::CodeEffects,
-    dirs: &mut Vec<String>,
-    seen_dirs: &mut HashSet<String>,
-    st: &Mutex<ProgressState>,
-    comp_name: &str,
+    depth: usize,
+    ictx: &mut InstCtx<'_>,
 ) -> std::result::Result<(), String> {
-    let ex = |s: &str| miedit_core::micmd::expand_vars(s, vars);
+    let ex = |s: &str| miedit_core::micmd::expand_vars(s, ictx.vars);
     match inst {
         miedit_core::micmd::MiInstruction::Run { cmd, args, working_dir, abort_on_error } => {
             let spec = miedit_core::config::RunCommandSpec {
@@ -671,23 +729,25 @@ fn execute_instruction(
                 abort_on_error: *abort_on_error,
                 optional: false,
             };
-            let outcome = miedit_core::runcmd::execute(&spec, dest);
-            for line in miedit_core::runcmd::log_lines(&format!("指令（{comp_name}）"), &spec, &outcome) {
-                push_log(st, line);
+            let outcome = miedit_core::runcmd::execute(&spec, ictx.dest);
+            for line in miedit_core::runcmd::log_lines(&format!("指令（{}）", ictx.comp_name), &spec, &outcome) {
+                push_log(ictx.st, line);
             }
             if miedit_core::runcmd::should_abort(&spec, &outcome) {
                 return Err(miedit_core::runcmd::abort_reason(&spec, &outcome));
             }
             Ok(())
         }
-        miedit_core::micmd::MiInstruction::WriteReg { key, name, value, r#type } => {
+        miedit_core::micmd::MiInstruction::WriteReg { key, name, value, r#type, view } => {
             let key = ex(key);
             let name = ex(name);
             let value = ex(value);
             let ty = r#type.trim().to_ascii_lowercase();
             let (pm, rest) = miedit_core::winutil::split_hive(&key)
                 .map_err(|e| format!("注册表键无效 {key}: {e:#}"))?;
-            let view = miedit_core::winutil::RegView::Default;
+            // NSIS SetRegView：每指令内联视图（不产生跨指令全局副作用）
+            let view = miedit_core::regspec::parse_view(view)
+                .map_err(|e| format!("write_reg.view 无效: {e}"))?;
             let resolved = match ty.as_str() {
                 "" | "str" => vec![(name.clone(), miedit_core::winutil::RegValue::Str(value.clone()))],
                 "dword" => {
@@ -695,22 +755,37 @@ fn execute_instruction(
                         .map_err(|e| format!("DWORD 值无效 {name}={value}: {e}"))?;
                     vec![(name.clone(), miedit_core::winutil::RegValue::Dword(d))]
                 }
-                other => return Err(format!("write_reg.type \"{other}\" 无效（str / dword）")),
+                "bin" | "binary" => {
+                    let b = miedit_core::regspec::parse_hex_binary(&value)
+                        .map_err(|e| format!("bin 值无效 {name}: {e}"))?;
+                    vec![(name.clone(), miedit_core::winutil::RegValue::Binary(b))]
+                }
+                "expand" | "expand_sz" => {
+                    vec![(name.clone(), miedit_core::winutil::RegValue::ExpandSz(value.clone()))]
+                }
+                "multi_sz" => {
+                    // TOML 单字符串承载多段：`|` 分隔（校验与文档同口径）
+                    let segs: Vec<String> = value.split('|').map(|s| s.to_string()).collect();
+                    vec![(name.clone(), miedit_core::winutil::RegValue::MultiSz(segs))]
+                }
+                other => return Err(format!(
+                    "write_reg.type \"{other}\" 无效（str / dword / bin / expand / multi_sz）"
+                )),
             };
             // 精确清理：安装前键不存在 → 卸载可整树删除；否则只删写入的值
             let created_key = !miedit_core::winutil::registry_key_exists(pm, &rest, view);
             miedit_core::winutil::registry_create_set_view(pm, &rest, &resolved, view)
                 .map_err(|e| format!("写注册表失败 {key}\\{name}: {e:#}"))?;
-            if !effects.registry_keys.contains(&key) {
-                effects.registry_keys.push(key.clone());
+            if !ictx.effects.registry_keys.contains(&key) {
+                ictx.effects.registry_keys.push(key.clone());
             }
             let r = miedit_core::manifest::RegistryValueRef {
                 key: key.clone(),
                 name: name.clone(),
                 created_key,
             };
-            if !effects.registry_values.contains(&r) {
-                effects.registry_values.push(r);
+            if !ictx.effects.registry_values.contains(&r) {
+                ictx.effects.registry_values.push(r);
             }
             Ok(())
         }
@@ -724,17 +799,17 @@ fn execute_instruction(
                 .map_err(|e| format!("创建目录失败 {}: {e}", pb.display()))?;
             // 安装目录内 → 记相对路径（复用提取期 record_dir 逐级登记）；
             // 目录外 → 记绝对路径 extra_dirs（卸载时 NSIS RMDir 语义清理）
-            match pb.strip_prefix(dest) {
+            match pb.strip_prefix(ictx.dest) {
                 Ok(rel) => {
                     let rel = rel.to_string_lossy().replace('\\', "/");
                     if !rel.is_empty() {
-                        record_dir(dirs, seen_dirs, &rel);
+                        record_dir(ictx.dirs, ictx.seen_dirs, &rel);
                     }
                 }
                 Err(_) => {
                     let abs = pb.display().to_string();
-                    if !effects.extra_dirs.contains(&abs) {
-                        effects.extra_dirs.push(abs);
+                    if !ictx.effects.extra_dirs.contains(&abs) {
+                        ictx.effects.extra_dirs.push(abs);
                     }
                 }
             }
@@ -743,7 +818,7 @@ fn execute_instruction(
         miedit_core::micmd::MiInstruction::DeleteFile { path } => {
             let pb = PathBuf::from(ex(path).replace('\\', std::path::MAIN_SEPARATOR_STR).trim());
             match fs::remove_file(&pb) {
-                Ok(()) => push_log(st, format!("已删除: {}", pb.display())),
+                Ok(()) => push_log(ictx.st, format!("已删除: {}", pb.display())),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     // NSIS Delete：缺失静默跳过
                 }
@@ -765,7 +840,7 @@ fn execute_instruction(
             fs::rename(&from, &to).map_err(|e| {
                 format!("重命名失败 {} → {}: {e}", from.display(), to.display())
             })?;
-            push_log(st, format!("已重命名: {} → {}", from.display(), to.display()));
+            push_log(ictx.st, format!("已重命名: {} → {}", from.display(), to.display()));
             Ok(())
         }
         miedit_core::micmd::MiInstruction::CopyFiles { from, to } => {
@@ -773,7 +848,7 @@ fn execute_instruction(
             let to = PathBuf::from(ex(to).replace('\\', std::path::MAIN_SEPARATOR_STR).trim());
             let n = miedit_core::files::copy_tree(&from, &to)
                 .map_err(|e| format!("复制失败 {} → {}: {e:#}", from.display(), to.display()))?;
-            push_log(st, format!("已复制: {} → {}（{n} 字节）", from.display(), to.display()));
+            push_log(ictx.st, format!("已复制: {} → {}（{n} 字节）", from.display(), to.display()));
             Ok(())
         }
         miedit_core::micmd::MiInstruction::WriteIni { file, section, key, value } => {
@@ -794,7 +869,7 @@ fn execute_instruction(
             fs::write(&file, new_content)
                 .map_err(|e| format!("写入 INI 失败 {}: {e}", file.display()))?;
             push_log(
-                st,
+                ictx.st,
                 format!("已写入 INI: {} [{}] {}={}", file.display(), section, key, value),
             );
             Ok(())
@@ -802,6 +877,79 @@ fn execute_instruction(
         miedit_core::micmd::MiInstruction::Sleep { ms } => {
             std::thread::sleep(std::time::Duration::from_millis(*ms));
             Ok(())
+        }
+        miedit_core::micmd::MiInstruction::ExecShell { verb, target, args } => {
+            let verb = ex(verb);
+            let target = ex(target);
+            let args = ex(args);
+            miedit_core::winutil::shell_execute(&verb, &target, &args)
+                .map_err(|e| format!("ExecShell 失败: {e:#}"))?;
+            push_log(ictx.st, format!("已打开: {target}"));
+            Ok(())
+        }
+        miedit_core::micmd::MiInstruction::RmDir { path, recursive } => {
+            let pb = PathBuf::from(ex(path).replace('\\', std::path::MAIN_SEPARATOR_STR).trim());
+            if pb.is_file() {
+                return Err(format!("RMDir 目标是文件而非目录: {}", pb.display()));
+            }
+            if !pb.exists() {
+                // NSIS RMDir：缺失静默跳过
+                push_log(ictx.st, format!("目录不存在，跳过: {}", pb.display()));
+                return Ok(());
+            }
+            if *recursive {
+                // NSIS RMDir /r：整树递归删除
+                fs::remove_dir_all(&pb)
+                    .map_err(|e| format!("递归删除失败 {}: {e}", pb.display()))?;
+                push_log(ictx.st, format!("已递归删除目录: {}", pb.display()));
+            } else {
+                // NSIS RMDir：仅删空目录；非空静默保留记日志（不算失败，
+                // 与卸载器清单清理同语义）
+                let is_empty = fs::read_dir(&pb)
+                    .map(|mut d| d.next().is_none())
+                    .unwrap_or(false);
+                if !is_empty {
+                    push_log(
+                        ictx.st,
+                        format!("目录非空，保留（NSIS RMDir 语义）: {}", pb.display()),
+                    );
+                    return Ok(());
+                }
+                fs::remove_dir(&pb)
+                    .map_err(|e| format!("删除目录失败 {}: {e}", pb.display()))?;
+                push_log(ictx.st, format!("已删除空目录: {}", pb.display()));
+            }
+            Ok(())
+        }
+        miedit_core::micmd::MiInstruction::IfFileExists { path, then, else_branch } => {
+            let pb = PathBuf::from(ex(path).replace('\\', std::path::MAIN_SEPARATOR_STR).trim());
+            let exists = pb.exists();
+            push_log(
+                ictx.st,
+                format!(
+                    "条件判定 {} → {}",
+                    pb.display(),
+                    if exists { "存在，进入 then" } else { "不存在，进入 else" }
+                ),
+            );
+            // 运行时深度防御（静态校验同上限；防恶意脚本递归）
+            if depth >= miedit_core::micmd::MAX_CODE_DEPTH {
+                return Err(format!(
+                    "if_file_exists 嵌套深度超限（≤ {}）",
+                    miedit_core::micmd::MAX_CODE_DEPTH
+                ));
+            }
+            let branch = if exists { then } else { else_branch };
+            execute_block(branch, depth + 1, ictx)
+        }
+        miedit_core::micmd::MiInstruction::Abort { message } => {
+            // NSIS Abort：中止安装（message 非空记原因；空则默认文案）
+            let msg = ex(message);
+            if msg.trim().is_empty() {
+                Err("安装已中止（Abort）".to_string())
+            } else {
+                Err(format!("安装已中止（Abort）: {msg}"))
+            }
         }
         // DetailPrint 已在上层输出（纯日志不执行）
         miedit_core::micmd::MiInstruction::DetailPrint { .. } => Ok(()),

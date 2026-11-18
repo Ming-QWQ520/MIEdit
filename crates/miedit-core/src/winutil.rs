@@ -248,6 +248,57 @@ pub fn shell_open_with_args(path: &Path, args: &str) -> Result<()> {
     }
 }
 
+/// NSIS `ExecShell <verb> <target> [params]`：用系统 shell 动词打开目标
+/// （URL / 文档 / 可执行程序；不等待其退出）。Windows = `ShellExecuteW`
+/// （动词可空 → `open`，返回值 ≤ 32 视为失败）；Linux 仅支持 `open`
+/// 动词（`xdg-open` 后台拉起，不等待），其余动词报错——上层按
+/// error-flag 语义记警告继续。
+pub fn shell_execute(verb: &str, target: &str, args: &str) -> Result<()> {
+    let verb = if verb.trim().is_empty() { "open" } else { verb.trim() };
+    #[cfg(windows)]
+    {
+        use windows::core::{HSTRING, PCWSTR};
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        let v = HSTRING::from(verb);
+        let t = HSTRING::from(target);
+        let a = HSTRING::from(args);
+        let h = unsafe {
+            ShellExecuteW(
+                None,
+                PCWSTR(v.as_ptr()),
+                PCWSTR(t.as_ptr()),
+                if args.is_empty() { PCWSTR::null() } else { PCWSTR(a.as_ptr()) },
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        if h.0 as isize <= 32 {
+            return Err(anyhow!("ExecShell \"{verb}\" 失败: {target}"));
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        // xdg-open 不接收参数串（Linux 无 shell 动词语义）；显式消费防 unused
+        let _ = args;
+        if verb == "open" {
+            use std::process::{Command, Stdio};
+            Command::new("xdg-open")
+                .arg(target)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| anyhow!("ExecShell open 失败（xdg-open）: {e}"))?;
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "ExecShell 动词 \"{verb}\" 在非 Windows 平台不支持（仅 open）"
+            ))
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 快捷方式（IShellLinkW + IPersistFile）
 // ---------------------------------------------------------------------------

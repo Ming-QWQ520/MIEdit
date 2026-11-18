@@ -1,25 +1,30 @@
-//! MI 脚本 v2 指令层（NSIS Section 指令语义，路线图步骤 33）。
+//! MI 脚本 v2 指令层（NSIS Section 指令语义，路线图步骤 33/39/40）。
 //!
 //! MI 脚本 v1 是声明式 TOML（文件/注册表/快捷方式等），v2 在每个组件
 //! （NSIS `Section`）上叠加**指令式代码段**：组件被勾选后按脚本顺序执行
 //! 其 `code` 指令（未勾选的组件指令不执行——NSIS Section 语义）。
 //!
 //! 指令集（对标 NSIS 核心指令）：
-//! | MI 指令        | NSIS 等价          | 说明 |
-//! |----------------|--------------------|------|
-//! | `run`          | `Exec`/`ExecWait`  | 运行外部命令（复用 [`crate::runcmd`]） |
-//! | `write_reg`    | `WriteRegStr`/`WriteRegDWORD` | 写注册表值（str/dword） |
-//! | `create_dir`   | `CreateDirectory`  | 创建目录（含父目录） |
-//! | `delete_file`  | `Delete`           | 删除文件（缺失静默跳过） |
-//! | `rename`       | `Rename`           | 同盘重命名/移动（目标已存在则失败，NSIS 同语义） |
-//! | `copy_files`   | `CopyFiles`        | 复制文件或整个目录树到目标 |
-//! | `write_ini`    | `WriteINIStr`      | 写 INI 节键值（节/键不区分大小写，Windows API 同语义） |
-//! | `sleep`        | `Sleep`            | 暂停指定毫秒 |
-//! | `detail_print` | `DetailPrint`      | 详情日志 |
+//! | MI 指令          | NSIS 等价          | 说明 |
+//! |------------------|--------------------|------|
+//! | `run`            | `Exec`/`ExecWait`  | 运行外部命令（复用 [`crate::runcmd`]） |
+//! | `write_reg`      | `WriteRegStr`/`DWORD`/`Bin`/`ExpandStr`/`MultiSz`/`SetRegView` | 写注册表值（str/dword/bin/expand/multi_sz + 视图） |
+//! | `create_dir`     | `CreateDirectory`  | 创建目录（含父目录） |
+//! | `delete_file`    | `Delete`           | 删除文件（缺失静默跳过） |
+//! | `rename`         | `Rename`           | 同盘重命名/移动（目标已存在则失败，NSIS 同语义） |
+//! | `copy_files`     | `CopyFiles`        | 复制文件或整个目录树到目标 |
+//! | `write_ini`      | `WriteINIStr`      | 写 INI 节键值（节/键不区分大小写，Windows API 同语义） |
+//! | `sleep`          | `Sleep`            | 暂停指定毫秒 |
+//! | `detail_print`   | `DetailPrint`      | 详情日志 |
+//! | `exec_shell`     | `ExecShell`        | 系统动词打开目标（URL/文档；Linux 仅 open→xdg-open） |
+//! | `rmdir`          | `RMDir`/`RMDir /r` | 删目录（默认仅删空；`recursive = true` 整树） |
+//! | `if_file_exists` | `IfFileExists`     | 条件分支（then/else 嵌套指令块，深度 ≤ [`MAX_CODE_DEPTH`]） |
+//! | `abort`          | `Abort`            | 中止安装（message 记入失败页/日志） |
 //!
 //! 路径与参数支持 NSIS 常量变量（`$INSTDIR`/`$DESKTOP`/`$SMPROGRAMS`…），
 //! 安装期由 [`expand_vars`] 展开；[`standard_var_map`] 用真实 Shell 目录
-//! 构建变量表。校验为纯函数 [`validate`]，编辑器与安装器共用。
+//! 构建变量表。校验为纯函数 [`validate`]（递归校验嵌套块），编辑器与
+//! 安装器共用。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -75,18 +80,32 @@ pub enum MiInstruction {
         #[serde(default)]
         abort_on_error: bool,
     },
-    /// NSIS `WriteRegStr`/`WriteRegDWORD`：写单个注册表值。
-    /// `type = "str"`（REG_SZ，默认）或 `"dword"`（十进制 / `0x` 十六进制）。
+    /// NSIS `WriteRegStr`/`WriteRegDWORD`/`WriteRegBin`/`WriteRegExpandStr`/
+    /// `WriteRegMultiSz`：写单个注册表值（全类型，路线图步骤 39）。
+    ///
+    /// `type`（大小写不敏感，默认 `str`）：
+    /// - `"str"`：REG_SZ；
+    /// - `"dword"`：十进制 / `0x` 十六进制（负数按 32 位补码回绕）；
+    /// - `"bin"`：REG_BINARY，十六进制串（空白可忽略，长度偶数，空 = 零长值）；
+    /// - `"expand"`：REG_EXPAND_SZ，值内 `%VAR%` 由系统按引用展开；
+    /// - `"multi_sz"`：REG_MULTI_SZ，`value` 用 `|` 分隔多段（如 `"a|b|c"`）。
+    ///
+    /// `view`（NSIS `SetRegView`，32/64 注册表重定向）：`""`/`default`（默认）/
+    /// `"64"`/`"32"`——**每指令独立视图**，不产生跨指令的全局副作用
+    /// （NSIS SetRegView 是全局切换，这里按指令内联更安全）。
     WriteReg {
         /// 含 hive 前缀的键，如 `HKCU\Software\Demo`
         key: String,
         /// 值名
         name: String,
-        /// 值内容（str 支持 NSIS 变量与 `{install_dir}` 模板）
+        /// 值内容（str/expand 支持 NSIS 变量与 `{install_dir}` 模板）
         value: String,
-        /// `"str"`（默认）或 `"dword"`
+        /// `"str"`（默认）/ `"dword"` / `"bin"` / `"expand"` / `"multi_sz"`
         #[serde(default)]
         r#type: String,
+        /// 注册表视图：`""`/`default`/`64`/`32`（空 = default）
+        #[serde(default)]
+        view: String,
     },
     /// NSIS `CreateDirectory`：创建目录（含父目录；已存在则跳过）。
     CreateDir {
@@ -136,7 +155,66 @@ pub enum MiInstruction {
         /// 日志文本（支持 NSIS 变量）
         text: String,
     },
+    /// NSIS `ExecShell <verb> <target> [params]`：用系统 shell 动词打开目标
+    /// （URL / 文档 / 可执行程序；如安装完成后打开说明页）。verb 常用
+    /// `open`/`openas`/`print`/`runas`；空按 `open` 处理。Windows =
+    /// `ShellExecuteW`；Linux 仅支持 `open`（`xdg-open`），其余动词报错
+    /// （上层按 error-flag 记警告继续）。
+    ExecShell {
+        /// shell 动词（空 = `open`）
+        #[serde(default)]
+        verb: String,
+        /// 目标（URL / 文件路径，支持 NSIS 变量）
+        target: String,
+        /// 参数串（引号保留空格，可空）
+        #[serde(default)]
+        args: String,
+    },
+    /// NSIS `RMDir` / `RMDir /r`：删除目录。
+    ///
+    /// - `recursive = false`（默认，NSIS `RMDir` 裸语义）：**仅删除空目录**，
+    ///   非空目录静默保留记日志（不算失败）；目录缺失静默跳过。
+    /// - `recursive = true`（NSIS `RMDir /r`）：整树递归删除。
+    ///
+    /// 与卸载器清单清理（[`crate::manifest`]）同语义，仅作用于安装期
+    /// 脚本化清理（如清旧版本残留目录）；删除动作不登记卸载清单
+    /// （被删的东西卸载时自然无需清理）。
+    #[serde(rename = "rmdir")]
+    RmDir {
+        /// 目录路径（支持 NSIS 变量）
+        path: String,
+        /// `true` = `RMDir /r` 整树删除；默认仅删空目录
+        #[serde(default)]
+        recursive: bool,
+    },
+    /// NSIS `IfFileExists`：条件分支。`path` 存在执行 `then`，否则执行
+    /// `else`（两者均可为空 = 什么都不做）。分支内指令按序执行，沿用
+    /// 顶层 error-flag 语义（失败记警告继续；`run.abort_on_error` 与
+    /// `abort` 仍中止安装）。嵌套深度上限 [`MAX_CODE_DEPTH`]（[`validate`]
+    /// 静态拒绝 + 安装期运行时防御）。
+    IfFileExists {
+        /// 判定目标（文件或目录；支持 NSIS 变量）
+        path: String,
+        /// 存在时执行的指令块
+        #[serde(default)]
+        then: Vec<MiInstruction>,
+        /// 不存在时执行的指令块（serde 字段名 `else`）
+        #[serde(default, rename = "else")]
+        else_branch: Vec<MiInstruction>,
+    },
+    /// NSIS `Abort`：中止安装。`message` 非空时作为中止原因记入日志
+    /// （失败页/静默日志），空则用默认文案。安装器映射：中止 → 失败页
+    /// （NSIS Abort → "Installation aborted"）。
+    Abort {
+        /// 中止原因（可空；支持 NSIS 变量）
+        #[serde(default)]
+        message: String,
+    },
 }
+
+/// `if_file_exists` 嵌套深度上限（[`validate`] 与安装器运行时共用）。
+/// NSIS 脚本几乎没有更深的分支嵌套；4 层足以覆盖真实场景且防递归爆炸。
+pub const MAX_CODE_DEPTH: usize = 4;
 
 /// NSIS 常量变量集（[`standard_var_map`] 产出、[`expand_vars`] 消费）。
 ///
@@ -241,20 +319,36 @@ pub fn expand_vars(input: &str, vars: &BTreeMap<String, String>) -> String {
 
 /// 指令静态校验（编辑器问题面板与安装器共用；返回错误描述列表）。
 ///
-/// 只做**安装期可静态判定**的检查：必填字段、dword 数值合法性、
-/// 注册表键 hive 前缀、注册表视图枚举。变量展开后的路径是否存在
-/// 属运行期，不在静态校验范围。
+/// 只做**安装期可静态判定**的检查：必填字段、dword/bin/multi_sz 数值
+/// 合法性、注册表键 hive 前缀、注册表视图枚举、嵌套深度上限。变量展开
+/// 后的路径是否存在属运行期，不在静态校验范围。递归校验
+/// `if_file_exists` 分支块（深度 ≤ [`MAX_CODE_DEPTH`]）。
 pub fn validate(code: &[MiInstruction]) -> Vec<String> {
+    validate_at(code, 0, "")
+}
+
+/// [`validate`] 的递归内核：`depth` 为当前嵌套层数（0 = 顶层），
+/// `label` 为错误位置的分支路径前缀（如 `"then>else"`，顶层为空）。
+fn validate_at(code: &[MiInstruction], depth: usize, label: &str) -> Vec<String> {
     let mut errs = Vec::new();
+    if depth > MAX_CODE_DEPTH {
+        // 防御：超限分支块整体拒绝（正常应被下方分支检查拦住）
+        errs.push(format!("if_file_exists 嵌套深度超限（≤ {MAX_CODE_DEPTH}）"));
+        return errs;
+    }
     for (i, inst) in code.iter().enumerate() {
-        let at = format!("指令 #{}", i + 1);
+        let at = if label.is_empty() {
+            format!("指令 #{}", i + 1)
+        } else {
+            format!("指令 #{}（{label} 内）", i + 1)
+        };
         match inst {
             MiInstruction::Run { cmd, .. } => {
                 if cmd.trim().is_empty() {
                     errs.push(format!("{at}: run.cmd 为空"));
                 }
             }
-            MiInstruction::WriteReg { key, name, value, r#type } => {
+            MiInstruction::WriteReg { key, name, value, r#type, view } => {
                 let k = key.trim();
                 if k.is_empty() {
                     errs.push(format!("{at}: write_reg.key 为空"));
@@ -274,9 +368,29 @@ pub fn validate(code: &[MiInstruction]) -> Vec<String> {
                             errs.push(format!("{at}: write_reg.value 无效: {e}"));
                         }
                     }
+                    "bin" | "binary" => {
+                        if let Err(e) = crate::regspec::parse_hex_binary(value) {
+                            errs.push(format!("{at}: write_reg.bin 值无效: {e}"));
+                        }
+                    }
+                    "expand" | "expand_sz" => {
+                        if value.trim().is_empty() {
+                            errs.push(format!("{at}: write_reg.expand.value 为空"));
+                        }
+                    }
+                    "multi_sz" => {
+                        if value.split('|').any(|seg| seg.trim().is_empty()) {
+                            errs.push(format!(
+                                "{at}: write_reg.multi_sz 值含空段（`|` 分隔）: {value}"
+                            ));
+                        }
+                    }
                     other => errs.push(format!(
-                        "{at}: write_reg.type \"{other}\" 无效（str / dword）"
+                        "{at}: write_reg.type \"{other}\" 无效（str / dword / bin / expand / multi_sz）"
                     )),
+                }
+                if let Err(e) = crate::regspec::parse_view(view) {
+                    errs.push(format!("{at}: write_reg.view 无效: {e}"));
                 }
             }
             MiInstruction::CreateDir { path } => {
@@ -331,6 +445,33 @@ pub fn validate(code: &[MiInstruction]) -> Vec<String> {
             }
             MiInstruction::Sleep { .. } => {}
             MiInstruction::DetailPrint { .. } => {}
+            MiInstruction::ExecShell { target, .. } => {
+                if target.trim().is_empty() {
+                    errs.push(format!("{at}: exec_shell.target 为空"));
+                }
+            }
+            MiInstruction::RmDir { path, .. } => {
+                if path.trim().is_empty() {
+                    errs.push(format!("{at}: rmdir.path 为空"));
+                }
+            }
+            MiInstruction::IfFileExists { path, then, else_branch } => {
+                if path.trim().is_empty() {
+                    errs.push(format!("{at}: if_file_exists.path 为空"));
+                }
+                let next_depth = depth + 1;
+                if next_depth > MAX_CODE_DEPTH {
+                    errs.push(format!(
+                        "{at}: if_file_exists 嵌套深度超限（≤ {MAX_CODE_DEPTH}）"
+                    ));
+                } else {
+                    let then_label = if label.is_empty() { "then".to_string() } else { format!("{label}>then") };
+                    let else_label = if label.is_empty() { "else".to_string() } else { format!("{label}>else") };
+                    errs.extend(validate_at(then, next_depth, &then_label));
+                    errs.extend(validate_at(else_branch, next_depth, &else_label));
+                }
+            }
+            MiInstruction::Abort { .. } => {}
         }
     }
     errs
@@ -362,6 +503,36 @@ pub fn describe(inst: &MiInstruction, vars: Option<&BTreeMap<String, String>>) -
         }
         MiInstruction::Sleep { ms } => format!("{ms}ms"),
         MiInstruction::DetailPrint { text } => ex(text),
+        MiInstruction::ExecShell { verb, target, args } => {
+            let verb = if verb.trim().is_empty() { "open" } else { verb.trim() };
+            if args.trim().is_empty() {
+                format!("{verb} {}", ex(target))
+            } else {
+                format!("{verb} {} {}", ex(target), ex(args))
+            }
+        }
+        MiInstruction::RmDir { path, recursive } => {
+            if *recursive {
+                format!("递归删除 {}", ex(path))
+            } else {
+                format!("删除空目录 {}", ex(path))
+            }
+        }
+        MiInstruction::IfFileExists { path, then, else_branch } => {
+            format!(
+                "如果存在 {} → {} 条 / 否则 {} 条",
+                ex(path),
+                then.len(),
+                else_branch.len()
+            )
+        }
+        MiInstruction::Abort { message } => {
+            if message.trim().is_empty() {
+                "中止安装".to_string()
+            } else {
+                format!("中止安装: {}", ex(message))
+            }
+        }
     }
 }
 
@@ -493,18 +664,21 @@ mod tests {
                 name: "x".into(),
                 value: "1".into(),
                 r#type: String::new(),
+                view: String::new(),
             },
             MiInstruction::WriteReg {
                 key: "HKCU\\Software\\Demo".into(),
                 name: "n".into(),
                 value: "0xZZ".into(),
                 r#type: "dword".into(),
+                view: String::new(),
             },
             MiInstruction::WriteReg {
                 key: "HKLM\\Software\\Demo".into(),
                 name: "n".into(),
                 value: "42".into(),
                 r#type: "dword".into(),
+                view: String::new(),
             },
         ];
         let errs = validate(&code);
@@ -665,12 +839,173 @@ mod tests {
         assert_eq!(code.len(), 6);
         assert_eq!(code[0], MiInstruction::Run { cmd: "a.bat".into(), args: "/q".into(), working_dir: String::new(), abort_on_error: true });
         // 默认 type = str
-        assert_eq!(code[1], MiInstruction::WriteReg { key: "HKCU\\S\\D".into(), name: "Path".into(), value: "$INSTDIR".into(), r#type: String::new() });
+        assert_eq!(code[1], MiInstruction::WriteReg { key: "HKCU\\S\\D".into(), name: "Path".into(), value: "$INSTDIR".into(), r#type: String::new(), view: String::new() });
         // 往返
         let json = serde_json::to_string(&code).unwrap();
         let back: Vec<MiInstruction> = serde_json::from_str(&json).unwrap();
         assert_eq!(back, code);
         // 校验干净
         assert!(validate(&code).is_empty());
+    }
+
+    // ---- 步骤 39：注册表全类型 + ExecShell + RMDir ----
+
+    #[test]
+    fn test_validate_write_reg_full_types() {
+        let ok = vec![
+            MiInstruction::WriteReg { key: "HKLM\\S".into(), name: "b".into(), value: "DE AD\nbe".into(), r#type: "bin".into(), view: String::new() },
+            MiInstruction::WriteReg { key: "HKLM\\S".into(), name: "e".into(), value: "%PATH%".into(), r#type: "expand".into(), view: String::new() },
+            MiInstruction::WriteReg { key: "HKLM\\S".into(), name: "m".into(), value: "a|b|c".into(), r#type: "multi_sz".into(), view: "64".into() },
+            MiInstruction::WriteReg { key: "HKLM\\S".into(), name: "z".into(), value: String::new(), r#type: "bin".into(), view: String::new() }, // 空 = 零长 REG_BINARY 合法
+        ];
+        assert!(validate(&ok).is_empty(), "实际: {:?}", validate(&ok));
+        let bad = vec![
+            MiInstruction::WriteReg { key: "HKLM\\S".into(), name: "b".into(), value: "ABC".into(), r#type: "bin".into(), view: String::new() },      // 奇数长度
+            MiInstruction::WriteReg { key: "HKLM\\S".into(), name: "m".into(), value: "a||c".into(), r#type: "multi_sz".into(), view: String::new() }, // 空段
+            MiInstruction::WriteReg { key: "HKLM\\S".into(), name: "e".into(), value: "".into(), r#type: "expand".into(), view: String::new() },       // 空值
+            MiInstruction::WriteReg { key: "HKLM\\S".into(), name: "v".into(), value: "1".into(), r#type: "str".into(), view: "31".into() },           // 视图非法
+            MiInstruction::WriteReg { key: "HKLM\\S".into(), name: "t".into(), value: "1".into(), r#type: "float".into(), view: String::new() },       // 类型非法
+        ];
+        let errs = validate(&bad);
+        assert_eq!(errs.len(), 5, "实际: {errs:?}");
+        assert!(errs[0].contains("write_reg.bin 值无效"));
+        assert!(errs[1].contains("multi_sz 值含空段"));
+        assert!(errs[2].contains("write_reg.expand.value"));
+        assert!(errs[3].contains("write_reg.view 无效"));
+        assert!(errs[4].contains("bin / expand / multi_sz"));
+    }
+
+    #[test]
+    fn test_validate_shell_rmdir_abort() {
+        let code = vec![
+            MiInstruction::ExecShell { verb: String::new(), target: String::new(), args: String::new() }, // target 空
+            MiInstruction::ExecShell { verb: "runas".into(), target: "$INSTDIR\\x.exe".into(), args: String::new() }, // 合法
+            MiInstruction::RmDir { path: String::new(), recursive: false }, // path 空
+            MiInstruction::RmDir { path: "$INSTDIR\\old".into(), recursive: true }, // 合法
+            MiInstruction::Abort { message: String::new() }, // 合法（空 message = 静默中止）
+        ];
+        let errs = validate(&code);
+        assert_eq!(errs.len(), 2, "实际: {errs:?}");
+        assert!(errs[0].contains("exec_shell.target"));
+        assert!(errs[1].contains("rmdir.path"));
+    }
+
+    #[test]
+    fn test_serde_roundtrip_step39_ops() {
+        let code = vec![
+            MiInstruction::ExecShell { verb: "open".into(), target: "https://example.com".into(), args: String::new() },
+            MiInstruction::ExecShell { verb: String::new(), target: "$INSTDIR\\readme.txt".into(), args: "/p".into() },
+            MiInstruction::RmDir { path: "$INSTDIR\\old".into(), recursive: true },
+            MiInstruction::RmDir { path: "$INSTDIR\\empty".into(), recursive: false },
+            MiInstruction::WriteReg { key: "HKLM\\S".into(), name: "Blob".into(), value: "CAFE".into(), r#type: "bin".into(), view: "32".into() },
+        ];
+        let json = serde_json::to_string(&code).unwrap();
+        assert!(json.contains(r#""op":"exec_shell""#), "{json}");
+        assert!(json.contains(r#""op":"rmdir""#));
+        assert!(json.contains(r#""view":"32""#));
+        // 旧格式兼容：缺省字段（view/args/recursive）serde default 补齐
+        let legacy = r#"[
+            {"op":"write_reg","key":"HKCU\\S","name":"p","value":"v"}
+        ]"#;
+        let back: Vec<MiInstruction> = serde_json::from_str(legacy).unwrap();
+        assert_eq!(back[0], MiInstruction::WriteReg { key: "HKCU\\S".into(), name: "p".into(), value: "v".into(), r#type: String::new(), view: String::new() });
+        let round: Vec<MiInstruction> = serde_json::from_str(&json).unwrap();
+        assert_eq!(round, code);
+        assert!(validate(&round).is_empty());
+    }
+
+    // ---- 步骤 40：if_file_exists + abort ----
+
+    #[test]
+    fn test_validate_if_file_exists() {
+        // 合法嵌套（then 内 1 条、else 内 1 条）
+        let ok = vec![MiInstruction::IfFileExists {
+            path: "$INSTDIR\\old.cfg".into(),
+            then: vec![MiInstruction::DeleteFile { path: "$INSTDIR\\old.cfg".into() }],
+            else_branch: vec![MiInstruction::DetailPrint { text: "无旧配置".into() }],
+        }];
+        assert!(validate(&ok).is_empty(), "实际: {:?}", validate(&ok));
+        // path 空 + then 内错误（错误位置带分支标签）
+        let bad = vec![MiInstruction::IfFileExists {
+            path: String::new(),
+            then: vec![MiInstruction::Run { cmd: String::new(), args: String::new(), working_dir: String::new(), abort_on_error: false }],
+            else_branch: vec![],
+        }];
+        let errs = validate(&bad);
+        assert_eq!(errs.len(), 2, "实际: {errs:?}");
+        assert!(errs[0].contains("if_file_exists.path"));
+        assert!(errs[1].contains("（then 内）"));
+    }
+
+    #[test]
+    fn test_validate_if_file_exists_depth_limit() {
+        // 逐层嵌套至 MAX_CODE_DEPTH+1 层 → 超限报错
+        fn nest(level: usize) -> MiInstruction {
+            if level == 0 {
+                MiInstruction::DetailPrint { text: "leaf".into() }
+            } else {
+                MiInstruction::IfFileExists {
+                    path: "$INSTDIR\\x".into(),
+                    then: vec![nest(level - 1)],
+                    else_branch: vec![],
+                }
+            }
+        }
+        // MAX_CODE_DEPTH 层 if_file_exists：合法（叶子在深度上限内）
+        let ok = vec![nest(MAX_CODE_DEPTH)];
+        assert!(validate(&ok).is_empty(), "实际: {:?}", validate(&ok));
+        // MAX_CODE_DEPTH+1 层 → 超限
+        let over = vec![nest(MAX_CODE_DEPTH + 1)];
+        let errs = validate(&over);
+        assert_eq!(errs.len(), 1, "实际: {errs:?}");
+        assert!(errs[0].contains("嵌套深度超限"));
+    }
+
+    #[test]
+    fn test_serde_roundtrip_if_file_exists() {
+        let code = vec![MiInstruction::IfFileExists {
+            path: "$INSTDIR\\old".into(),
+            then: vec![
+                MiInstruction::RmDir { path: "$INSTDIR\\old".into(), recursive: true },
+                MiInstruction::IfFileExists {
+                    path: "$INSTDIR\\old\\m.ini".into(),
+                    then: vec![],
+                    else_branch: vec![MiInstruction::Abort { message: "旧配置缺失".into() }],
+                },
+            ],
+            else_branch: vec![MiInstruction::DetailPrint { text: "全新安装".into() }],
+        }];
+        let json = serde_json::to_string(&code).unwrap();
+        assert!(json.contains(r#""op":"if_file_exists""#), "{json}");
+        assert!(json.contains(r#""op":"abort""#));
+        // else 字段名序列化为 "else"（rename）
+        assert!(json.contains(r#""else":"#), "{json}");
+        let back: Vec<MiInstruction> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, code);
+        assert!(validate(&back).is_empty());
+    }
+
+    #[test]
+    fn test_describe_step39_40_ops() {
+        let v = vars();
+        let shell = MiInstruction::ExecShell {
+            verb: String::new(),
+            target: "https://miedit.example".into(),
+            args: String::new(),
+        };
+        assert_eq!(describe(&shell, Some(&v)), "open https://miedit.example");
+        let rmdir = MiInstruction::RmDir { path: "$INSTDIR\\old".into(), recursive: false };
+        assert_eq!(describe(&rmdir, Some(&v)), "删除空目录 C:\\Apps\\Demo\\old");
+        let rmdirtree = MiInstruction::RmDir { path: "$INSTDIR\\old".into(), recursive: true };
+        assert_eq!(describe(&rmdirtree, Some(&v)), "递归删除 C:\\Apps\\Demo\\old");
+        let cond = MiInstruction::IfFileExists {
+            path: "$INSTDIR\\old.cfg".into(),
+            then: vec![MiInstruction::DetailPrint { text: String::new() }],
+            else_branch: vec![],
+        };
+        assert_eq!(describe(&cond, Some(&v)), "如果存在 C:\\Apps\\Demo\\old.cfg → 1 条 / 否则 0 条");
+        let abort = MiInstruction::Abort { message: "用户取消".into() };
+        assert_eq!(describe(&abort, Some(&v)), "中止安装: 用户取消");
+        assert_eq!(describe(&MiInstruction::Abort { message: String::new() }, None), "中止安装");
     }
 }

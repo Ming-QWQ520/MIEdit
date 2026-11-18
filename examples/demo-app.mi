@@ -213,7 +213,9 @@ files = [1]
 # 组件被勾选后按脚本顺序执行其 code 指令，未勾选组件不执行；
 # 失败记警告继续（NSIS error-flag 语义），run 的 abort_on_error = true 显式中止。
 # op = "run"          → NSIS Exec/ExecWait
-# op = "write_reg"    → NSIS WriteRegStr / WriteRegDWORD（type = "str"|"dword"）
+# op = "write_reg"    → NSIS WriteRegStr/DWORD/Bin/ExpandStr/MultiSz（步骤 33/39）
+#   type = "str"（默认）|"dword"|"bin"|"expand"|"multi_sz"（多段用 | 分隔）
+#   view = "default"|"64"|"32"（每指令内联 SetRegView，不产生跨指令全局副作用）
 # op = "create_dir"   → NSIS CreateDirectory
 # op = "delete_file"  → NSIS Delete（缺失静默跳过）
 # op = "rename"       → NSIS Rename（同盘重命名/移动，目标已存在则失败）
@@ -221,6 +223,10 @@ files = [1]
 # op = "write_ini"    → NSIS WriteINIStr（节/键不区分大小写，文件缺失则新建）
 # op = "sleep"        → NSIS Sleep（暂停 ms 毫秒）
 # op = "detail_print" → NSIS DetailPrint
+# op = "exec_shell"   → NSIS ExecShell（系统动词打开 URL/文档；verb 空 = open）
+# op = "rmdir"        → NSIS RMDir / RMDir /r（默认仅删空目录；recursive = true 整树）
+# op = "if_file_exists" → NSIS IfFileExists（then/else 嵌套指令块，深度 ≤ 4）
+# op = "abort"        → NSIS Abort（中止安装，message 为中止原因）
 # 路径支持 NSIS 常量变量：$INSTDIR $DESKTOP $SMPROGRAMS $STARTMENU
 # $QUICKLAUNCH $APPDATA $LOCALAPPDATA $TEMP $WINDIR $SYSDIR $PROGRAMFILES $EXEDIR
 # 注意：[[components]] 是数组表，code 必须以内联表数组形式写在组件表内
@@ -236,6 +242,14 @@ files = [1]
 #   { op = "write_ini", file = "$INSTDIR\\config.ini", section = "Main", key = "Mode", value = "fast" },
 #   { op = "copy_files", from = "$INSTDIR\\docs", to = "$APPDATA\\MIEdit Demo\\docs" },
 #   { op = "rename", from = "$INSTDIR\\old.log", to = "$INSTDIR\\old.log.bak" },
+#   { op = "write_reg", key = "HKCU\\Software\\MIEdit Demo", name = "Blob", value = "DE AD BE EF", type = "bin", view = "64" },
+#   { op = "exec_shell", verb = "open", target = "https://example.com/readme" },
+#   { op = "rmdir", path = "$INSTDIR\\legacy", recursive = true },
+#   { op = "if_file_exists", path = "$INSTDIR\\old.cfg", then = [
+#       { op = "delete_file", path = "$INSTDIR\\old.cfg" },
+#     ], else = [
+#       { op = "detail_print", text = "全新安装" },
+#     ] },
 #   { op = "sleep", ms = 250 },
 #   { op = "run", cmd = "$INSTDIR\\docs\\register.bat", args = "/quiet", abort_on_error = false },
 # ]

@@ -24,7 +24,7 @@
 | --- | --- |
 | **GUI 构建向导** | HM NIS Edit / Inno Setup 式 **10 步向导 + 左栏步骤树**（全部步骤可点直达、当前高亮、完成 √）：欢迎 → 应用信息 → 安装程序选项（**实时预览**）→ 目录与授权 → 文件与组件 → 快捷方式 → 完成后运行 → 卸载与注册表 → **MI 脚本 IDE**（深度对齐 VSCode，见下）→ 构建（wpReady 式摘要 + 一键构建） |
 | **MI 脚本 IDE** | VSCode 式编辑器：文件标签（未保存圆点）+ 行号（**当前行行号亮色**）+ Dark+ 语法高亮 + **查找/替换**（Ctrl+F/H，命中计数 n/N、逐个跳转、大小写开关）+ **命令面板**（Ctrl+Shift+P）+ **转到行**（Ctrl+G）+ **minimap**（点击跳行）+ **面包屑**（`文件 › [当前节]`）+ **状态栏**（Ln/Col、选中、缩进风格、UTF-8、错误计数）+ **自动缩进/Tab 转空格/括号引号补全** + Alt+Z 自动换行 + 错误行红标 + 实时校验问题面板 |
-| 脚本驱动 | 一份 `.mi`（MI 脚本，自研轻量脚本语言，TOML 语法）描述应用、文件、组件、UI 与快捷方式，与向导完全互通；**v2 组件指令**（NSIS Section 指令语义）：组件表内 `code = [{ op = "run" / "write_reg" / "create_dir" / "delete_file" / "detail_print", ... }]`，勾选组件按序执行（未选不执行），路径支持 `$INSTDIR`/`$DESKTOP`/`$SMPROGRAMS`/`$APPDATA`/`$TEMP`/`$WINDIR` 等 12 个 NSIS 常量变量，副作用自动登记卸载清单精确清理 |
+| 脚本驱动 | 一份 `.mi`（MI 脚本，自研轻量脚本语言，TOML 语法）描述应用、文件、组件、UI 与快捷方式，与向导完全互通；**v2 组件指令**（NSIS Section 指令语义）：组件表内 `code = [{ op = "run" / "write_reg" / "create_dir" / "delete_file" / "if_file_exists" / "abort" / … }]`（**13 条指令**，含注册表全类型/ExecShell/RMDir/条件分支），勾选组件按序执行（未选不执行），路径支持 `$INSTDIR`/`$DESKTOP`/`$SMPROGRAMS`/`$APPDATA`/`$TEMP`/`$WINDIR` 等 12 个 NSIS 常量变量，副作用自动登记卸载清单精确清理 |
 | 自解压安装器 | 单文件 EXE：`[stub][payload][config][卸载器][背景图][图标][Trailer]` |
 | 现代化 UI | egui 无边框窗口、玻璃卡片、主题色可配、自绘进度条、中文字体自适应 |
 | **全窗口图片背景** | `background = "bg.png"`，`cover / contain / stretch` 三种模式 |
@@ -193,12 +193,16 @@ required = true               # 必装：勾选锁定
 files = [0, 2]                # 引用 [[files]] 规则索引；未被引用的规则始终安装
 code = [                      # MI 脚本 v2 组件指令（NSIS Section 指令语义，可选）：
                               # 组件勾选后按序执行，未选不执行；失败记警告继续
-                              # （run.abort_on_error = true 显式中止）
-                              # 指令集 9 条（NSIS 对齐）：run（Exec/ExecWait）/
+                              # （run.abort_on_error = true 与 abort 指令显式中止）
+                              # 指令集 13 条（NSIS 对齐）：run（Exec/ExecWait）/
                               # write_reg / create_dir / delete_file / rename（Rename）/
                               # copy_files（CopyFiles，目录树递归）/
                               # write_ini（WriteINIStr，节键不区分大小写）/
-                              # sleep（Sleep 毫秒） / detail_print
+                              # sleep（Sleep 毫秒） / detail_print /
+                              # exec_shell（ExecShell，动词打开 URL/文档）/
+                              # rmdir（RMDir / RMDir /r）/
+                              # if_file_exists（IfFileExists，then/else 嵌套，深度 ≤ 4）/
+                              # abort（Abort 中止安装）
   { op = "detail_print", text = "正在注册核心组件…" },
   { op = "create_dir", path = "$INSTDIR\\logs" },       # NSIS CreateDirectory
   { op = "delete_file", path = "$INSTDIR\\old.cfg" },   # NSIS Delete（缺失静默跳过）
@@ -206,9 +210,23 @@ code = [                      # MI 脚本 v2 组件指令（NSIS Section 指令�
     section = "Main", key = "Mode", value = "fast" },
   { op = "copy_files", from = "$INSTDIR\\docs",         # NSIS CopyFiles
     to = "$APPDATA\\Demo\\docs" },
-  { op = "write_reg", key = "HKCU\\Software\\Demo",     # NSIS WriteRegStr/WriteRegDWORD
-    name = "Path", value = "$INSTDIR", type = "str" },  # type = "str"（默认）| "dword"
+  { op = "write_reg", key = "HKCU\\Software\\Demo",     # NSIS WriteRegStr/WriteRegDWORD/WriteRegBin/
+    name = "Path", value = "$INSTDIR", type = "str" },  # WriteRegExpandStr/WriteRegMultiSz：
+  { op = "write_reg", key = "HKCU\\Software\\Demo",     # type = "str"（默认）|"dword"|"bin"|"expand"|"multi_sz"
+    name = "Blob", value = "DE AD BE EF",               # view = "default"|"64"|"32"（每指令内联 SetRegView）
+    type = "bin", view = "64" },
+  { op = "exec_shell", verb = "open",                   # NSIS ExecShell（verb 空 = open）
+    target = "https://example.com/readme" },
+  { op = "rmdir", path = "$INSTDIR\\legacy",            # NSIS RMDir（默认仅删空目录）
+    recursive = true },                                 # recursive = true → RMDir /r 整树删除
+  { op = "if_file_exists", path = "$INSTDIR\\old.cfg",  # NSIS IfFileExists（then/else 嵌套指令块）
+    then = [
+      { op = "delete_file", path = "$INSTDIR\\old.cfg" },
+    ], else = [
+      { op = "detail_print", text = "全新安装" },
+    ] },
   { op = "run", cmd = "$INSTDIR\\setup.bat", args = "/q", abort_on_error = false },
+  { op = "abort", message = "配置异常" },               # NSIS Abort（中止安装，message 记原因）
 ]
 # 路径可用 NSIS 常量变量：$INSTDIR $EXEDIR $DESKTOP $SMPROGRAMS $STARTMENU
 # $QUICKLAUNCH $APPDATA $LOCALAPPDATA $TEMP $WINDIR $SYSDIR $PROGRAMFILES
@@ -250,7 +268,7 @@ crates/
 ## 测试
 
 ```bash
-cargo test --workspace    # 175 个单元测试：归档（含 LZMA/Brotli 压缩算法往返）/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/文件错误决策与提示信箱/重启替换/安装类型状态机/系统版本门槛/目录统计/组件过滤映射/slug/语言匹配与 LANGID 映射/多语言文案解析链/卸载器文案键集与解析链/卸载语言匹配索引/环境变量解析与 PATH 合并去重/卸载清单新旧兼容/修复入口与修复统计/包尾 v4 与卸载数据新旧格式/安装目录解析与根路径校验/盘符切换空间刷新回归/内置模板色板/CLI 组件参数解析/LANG 参数提取与 NSIS LCID 覆盖/压缩方式别名归一化/CRC 后台校验门/MI 脚本语法高亮与脚本 IDE 纯逻辑（查找/替换/字符字节换算/自动缩进/括号补全/命令面板过滤/面包屑/缩进检测）/MI 脚本 v2 组件指令（变量展开/校验/serde 往返/互斥名构造/UAC 执行级别与 manifest XML/CopyFiles 复制内核与自嵌套防护/INI 写入语义/磁盘空间预检判定）
+cargo test --workspace    # 182 个单元测试：归档（含 LZMA/Brotli 压缩算法往返）/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/文件错误决策与提示信箱/重启替换/安装类型状态机/系统版本门槛/目录统计/组件过滤映射/slug/语言匹配与 LANGID 映射/多语言文案解析链/卸载器文案键集与解析链/卸载语言匹配索引/环境变量解析与 PATH 合并去重/卸载清单新旧兼容/修复入口与修复统计/包尾 v4 与卸载数据新旧格式/安装目录解析与根路径校验/盘符切换空间刷新回归/内置模板色板/CLI 组件参数解析/LANG 参数提取与 NSIS LCID 覆盖/压缩方式别名归一化/CRC 后台校验门/MI 脚本语法高亮与脚本 IDE 纯逻辑（查找/替换/字符字节换算/自动缩进/括号补全/命令面板过滤/面包屑/缩进检测）/MI 脚本 v2 组件指令（变量展开/校验/serde 往返/互斥名构造/UAC 执行级别与 manifest XML/CopyFiles 复制内核与自嵌套防护/INI 写入语义/磁盘空间预检判定）
 ```
 
 已在 Windows 10 x64 实机验证：CLI 与 GUI 构建链路、静默安装/卸载全清理、组件过滤生效、
