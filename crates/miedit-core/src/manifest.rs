@@ -43,6 +43,12 @@ pub struct UninstallManifest {
     /// 随清单内嵌/落盘；多于一个时卸载器先显示语言选择页（单语言直接
     /// 使用；旧清单无此字段 → 空 → 回退内置 zh-CN，行为不变）
     pub languages: Vec<crate::config::LanguageSpec>,
+    /// 安装时用户实际选定的语言 id（步骤 28，NSIS MUI 语义：安装语言页
+    /// 的选择经注册表/清单持久化，卸载器**直接跟随**，不再自行询问——
+    /// NSIS 官方模板 `un.onInit` 读回安装语言的惯例）。
+    /// 空 = 旧清单或无语言包 → 卸载器回退自动预选（多语言旧清单仍显示
+    /// 语言选择页，单语言/空清单行为不变）。
+    pub language: String,
     /// 环境变量清理引用（步骤 27）：`created_value` = 安装时新建的值
     /// （卸载时直接删除）；否则若 `path_segment` 非空则从列表中移除该段后回写
     pub env_values: Vec<EnvCleanupRef>,

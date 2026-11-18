@@ -607,6 +607,7 @@ pub static UNINSTALL_TEXT_KEYS: &[&str] = &[
     "un_log_delete",
     "un_log_reboot_delete",
     "un_log_remove_dir",
+    "un_log_dir_kept",
     "un_log_del_file_failed",
     "un_log_del_shortcut_failed",
     "un_log_del_shortcut_dir_failed",
@@ -807,6 +808,7 @@ pub static DEFAULT_TEXT_KEYS: &[(&str, &str)] = &[
         ("un_log_delete", "Deleting {file}"),
         ("un_log_reboot_delete", "Reboot-delete {file}"),
         ("un_log_remove_dir", "Removing folder {dir}"),
+        ("un_log_dir_kept", "Folder not empty, kept: {dir}"),
         ("un_log_del_file_failed", "Delete failed: {err}; scheduling reboot deletion also failed: {rerr}"),
         ("un_log_del_shortcut_failed", "Failed to delete shortcut: {path}"),
         ("un_log_del_shortcut_dir_failed", "Failed to delete shortcut folder: {path}"),
@@ -884,12 +886,13 @@ mod step_tests {
         assert_eq!(resolve_uninstall_text(&langs, Some(9), "un_btn_next"), "Next");
     }
 
-    /// 清单新字段（languages/env_values）往返；旧 JSON（无新字段）→ serde default 兼容。
+    /// 清单新字段（languages/language/env_values）往返；旧 JSON（无新字段）→ serde default 兼容。
     #[test]
     fn manifest_new_fields_roundtrip_and_old_compat() {
         let m = UninstallManifest {
             app_name: "App".into(),
             languages: vec![LanguageSpec::default()],
+            language: "zh-CN".into(),
             env_values: vec![EnvCleanupRef {
                 name: "Path".into(),
                 machine: false,
@@ -902,12 +905,14 @@ mod step_tests {
         let json = serde_json::to_string(&m).unwrap();
         let back: UninstallManifest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.languages.len(), 1);
+        assert_eq!(back.language, "zh-CN");
         assert_eq!(back.env_values.len(), 1);
         assert_eq!(back.env_values[0].path_segment, "C:\\Apps\\App");
-        // 旧清单 JSON（无 languages/env_values 字段）
+        // 旧清单 JSON（无 languages/language/env_values 字段）
         let old = r#"{"app_name":"Old","files":[]}"#;
         let old_m: UninstallManifest = serde_json::from_str(old).unwrap();
         assert!(old_m.languages.is_empty());
+        assert!(old_m.language.is_empty());
         assert!(old_m.env_values.is_empty());
     }
 

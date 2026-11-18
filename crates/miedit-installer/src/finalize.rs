@@ -119,6 +119,13 @@ pub fn finalize_install(
         exec_before_uninstall: cfg.install.exec_before_uninstall.clone(),
         // 语言包副本随清单内嵌/落盘（步骤 26，NSIS un MUI 对齐）
         languages: cfg.ui.languages.clone(),
+        // 安装时选定的语言 id（步骤 28，NSIS MUI 语义：卸载器跟随安装语言）。
+        // 单语言包安装器跳过语言页（initial_language 预选 Some(0)）→ 同样记录；
+        // 无语言包（None）→ 留空，卸载器回退内置 zh-CN（旧包行为不变）
+        language: language
+            .and_then(|i| cfg.ui.languages.get(i))
+            .map(|l| l.id.trim().to_string())
+            .unwrap_or_default(),
         // 环境变量清理引用（步骤 27，下方逐条填充）
         env_values: Vec::new(),
     };

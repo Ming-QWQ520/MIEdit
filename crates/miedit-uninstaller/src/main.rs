@@ -25,8 +25,8 @@ const TEXT_DIM: Color32 = Color32::from_rgb(185, 191, 203);
 
 #[derive(Debug, Clone, PartialEq)]
 enum Phase {
-    /// 语言选择页（步骤 26，NSIS `MUI_UNPAGE_LANGUAGE` 对齐）：
-    /// 仅当清单携带多个语言包时显示；单语言直接进确认页
+    /// 语言选择页（步骤 26 → 28 回退路径）：仅**旧清单**（未记录安装语言）
+    /// 且携带多个语言包时显示；新清单直接跟随安装时选定的语言
     Language,
     Confirm,
     Working,
@@ -140,6 +140,20 @@ fn auto_lang_idx(languages: &[LanguageSpec]) -> Option<usize> {
     Some(0)
 }
 
+/// 卸载语言解析（步骤 28，NSIS MUI 语义：**卸载语言跟随安装语言**）：
+/// 1. 清单记录了安装时选定的语言 id（`manifest.language`，安装器在安装
+///    结束时写入）→ 按精确/主标签匹配语言包直接使用——用户装的时候选了
+///    English，卸载界面即 English，不再显示语言选择页；
+/// 2. 单语言包 → 直接使用该语言（无选择页）；
+/// 3. 旧清单（#14 之前的包，未记录语言）→ 回退步骤 26 行为：按系统语言
+///    自动预选，GUI 多语言时仍显示语言选择页（向后兼容）。
+fn resolve_preselect(m: &UninstallManifest) -> Option<usize> {
+    if let Some(i) = miedit_core::langs::match_language_index(&m.languages, &m.language) {
+        return Some(i);
+    }
+    auto_lang_idx(&m.languages)
+}
+
 fn real_main(silent: bool, args: &[String]) -> Result<i32> {
     let exe = std::env::current_exe().context("获取自身路径失败")?;
     let dir = exe
@@ -168,9 +182,10 @@ fn real_main(silent: bool, args: &[String]) -> Result<i32> {
             }
         };
 
-    // 文案快照（步骤 26）：静默模式按系统语言自动预选；GUI 多语言时在
-    // 语言选择页可改（确认后重建快照），单语言/旧清单直接用预选
-    let preselect = auto_lang_idx(&manifest.languages);
+    // 文案快照（步骤 26 → 28）：静默与 GUI 共用同一预选——清单记录了安装
+    // 语言则直接跟随（用户装时选 English → 卸载即英文，NSIS un.onInit 读回
+    // 安装语言惯例）；旧清单回退系统语言自动预选
+    let preselect = resolve_preselect(&manifest);
     let texts = Texts::build(&manifest.languages, preselect);
 
     if manifest.per_machine && !winutil::is_admin() {
@@ -211,7 +226,9 @@ fn real_main(silent: bool, args: &[String]) -> Result<i32> {
         }
     } else {
         let app_running = main_exe_running(&manifest);
-        let multi_lang = manifest.languages.len() > 1;
+        // 语言选择页仅在「旧清单（未记录安装语言）+ 多语言包」时显示（步骤 26
+        // 回退行为兼容）；新清单按 manifest.language 跟随安装语言，直接进确认页
+        let multi_lang = manifest.language.trim().is_empty() && manifest.languages.len() > 1;
         run_gui(manifest, icon_bytes, bg_bytes, run, app_running, preselect, multi_lang)
     }
 }
@@ -222,6 +239,16 @@ fn main_exe_running(m: &UninstallManifest) -> bool {
         return false;
     }
     winutil::is_file_locked(&PathBuf::from(&m.install_dir).join(&m.main_exe))
+}
+
+/// 目录存在且非空（NSIS RMDir 保留判定）：目录内还有任何条目（含子目录、
+/// 用户自放文件）→ true，卸载时保留该目录并记录日志。不存在 / 无权限读取
+/// → false（交由 [`winutil::remove_dir_quiet`] 的 NotFound=Ok 语义处理）。
+fn dir_exists_and_nonempty(p: &Path) -> bool {
+    match std::fs::read_dir(p) {
+        Ok(mut rd) => rd.next().is_some(),
+        Err(_) => false,
+    }
 }
 
 fn write_silent_log(log: &[String]) {
@@ -292,8 +319,10 @@ fn do_uninstall(
         }
     }
 
-    // 1. 文件（NSIS Delete /REBOOTOK 对齐：占用中的文件转入重启删除，不算失败）
-    for f in &m.files {
+    // 1. 文件（NSIS 卸载清单语义：**按安装相反顺序删除**——UninstallLog/LIFO
+    //    惯例，最后装入的先删；Delete /REBOOTOK 对齐：占用中的文件转入重启
+    //    删除，不算失败；已不存在的文件 Delete 静默跳过）
+    for f in m.files.iter().rev() {
         let p = PathBuf::from(f);
         // 统计释放空间（尽力而为；删除失败则不计入）
         let sz = std::fs::metadata(&p).map(|md| md.len()).unwrap_or(0);
@@ -326,12 +355,23 @@ fn do_uninstall(
         }
     }
 
-    // 2. 目录（最深的先删）
+    // 2. 目录（NSIS RMDir 语义：**仅删除空目录**；目录里被用户放了文件或
+    //    存在清单外残留时保留并记录日志——不算失败，卸载绝不碰清单外内容）；
+    //    最深的先删（嵌套目录自底向上清空后父目录才可能为空）
     let mut dirs: Vec<&String> = m.dirs.iter().collect();
     dirs.sort_by_key(|d| std::cmp::Reverse(d.split('/').count()));
     for d in dirs {
-        let p = m.install_dir.trim_end_matches(['\\', '/']).to_string() + "\\" + d;
-        let removed = match winutil::remove_dir_quiet(Path::new(&p)) {
+        let p = Path::new(&m.install_dir).join(d);
+        if dir_exists_and_nonempty(&p) {
+            run
+                .lock()
+                .unwrap()
+                .log
+                .push(t.fmt("un_log_dir_kept", &[("dir", d)]));
+            tick(run, t.fmt("un_log_remove_dir", &[("dir", d)]), ctx);
+            continue;
+        }
+        let removed = match winutil::remove_dir_quiet(&p) {
             Ok(()) => true,
             Err(e) => {
                 errors.push(format!("{e:#}"));
@@ -345,8 +385,9 @@ fn do_uninstall(
         tick(run, t.fmt("un_log_remove_dir", &[("dir", d)]), ctx);
     }
 
-    // 3. 快捷方式与快捷方式目录（最深先删，子目录嵌套时避免父目录先删失败）
-    for s in &m.shortcuts {
+    // 3. 快捷方式与快捷方式目录（按安装相反顺序删除；目录沿用 NSIS RMDir
+    //    语义：非空保留记录不算失败，子目录嵌套时最深的先删）
+    for s in m.shortcuts.iter().rev() {
         let p = Path::new(s);
         let sz = std::fs::metadata(p).map(|md| md.len()).unwrap_or(0);
         if winutil::remove_file_quiet(p).is_ok() {
@@ -361,7 +402,13 @@ fn do_uninstall(
     let mut sdirs: Vec<&String> = m.shortcut_dirs.iter().collect();
     sdirs.sort_by_key(|d| std::cmp::Reverse(d.split(['\\', '/']).count()));
     for sd in sdirs {
-        if winutil::remove_dir_quiet(Path::new(sd)).is_ok() {
+        if dir_exists_and_nonempty(Path::new(sd)) {
+            run
+                .lock()
+                .unwrap()
+                .log
+                .push(t.fmt("un_log_dir_kept", &[("dir", sd)]));
+        } else if winutil::remove_dir_quiet(Path::new(sd)).is_ok() {
             let mut r = run.lock().unwrap();
             r.dirs_removed += 1;
         } else {
@@ -767,8 +814,9 @@ impl UninstallerApp {
         }
     }
 
-    /// 语言选择页（步骤 26，NSIS `MUI_UNPAGE_LANGUAGE` 对齐）：
-    /// 清单携带多个语言包时显示；预选系统语言，Enter/「确定」确认。
+    /// 语言选择页（步骤 26，NSIS `MUI_UNPAGE_LANGUAGE` 对齐；步骤 28 起仅为
+    /// 旧清单回退路径）：清单未记录安装语言且携带多个语言包时显示；
+    /// 预选系统语言，Enter/「确定」确认。新清单跟随安装语言，不再进入本页。
     fn page_language(&mut self, ui: &mut egui::Ui) {
         let t = self.texts.clone();
         ui.vertical_centered(|ui| {

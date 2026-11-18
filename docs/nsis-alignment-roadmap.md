@@ -36,6 +36,7 @@
 | 25 | 压缩格式扩充：LZMA/LZMA-solid/Brotli/Brotli-solid + 版本号固定 0.1.0 | NSIS `SetCompressor` zlib/lzma(+solid) / Inno 压缩可插拔 | **已完成**（0.1.0，#13） |
 | 26 | 卸载器多语言（语言选择页 + 全部文案随语言切换） | NSIS `MUI_UNPAGE_LANGUAGE` / un 语言链 | **已完成**（0.1.0，#14） |
 | 27 | 环境变量/PATH 管理（写入 + 广播 + 卸载精确清理） | NSIS WriteEnvStr 惯例 / Inno `ChangesEnvironment` | **已完成**（0.1.0，#14） |
+| 28 | 卸载语言跟随安装 + 卸载清单 NSIS 处理语义 | NSIS un.onInit 读回安装语言 / UninstallLog LIFO + `RMDir` 仅空删除 | **已完成**（0.1.0，#15） |
 
 ## 迭代步骤定义
 
@@ -284,6 +285,27 @@
 - **验收**：envspec 单测（含 merge→remove 往返还原）；双平台 check
   0 error；Linux 端到端（构建 + 静默安装退出码 0 + 平台桩日志）。
 
+### 步骤 28：卸载语言跟随安装 + 卸载清单 NSIS 处理语义（用户指令 2026-11-18）
+- **做什么**：① **卸载语言跟随安装**（NSIS MUI 官方模板惯例：`un.onInit`
+  读回安装语言）：卸载清单新增 `language` 字段记录安装时**实际选定**的
+  语言 id（安装器 finalize 写入；单语言包安装器跳过语言页同样记录）；
+  卸载器按精确 → 主标签匹配语言包直接使用（用户装时选 English →
+  卸载界面即 English），不再显示语言选择页；② **卸载清单 NSIS 处理
+  语义**：文件按安装**相反顺序删除**（NSIS UninstallLog/LIFO 惯例，最后
+  装入的先删，快捷方式同）、目录 **NSIS `RMDir` 语义——仅删除空目录**，
+  非空目录保留并记录日志（不算失败，卸载绝不碰清单外内容），缺失项
+  静默跳过（`Delete`/`RMDir` 语义，原有行为保留）。
+- **向后兼容**：旧清单（#14 及以前）无 `language` 字段 → 空 → 回退步骤
+  26 行为（系统语言自动预选；旧清单多语言仍显示语言选择页）；清单
+  serde default 兼容，旧包行为不变。
+- **实现**：`langs::match_language_index`（精确/主标签匹配，与
+  `initial_language` 同口径，纯函数 + 单测）；卸载器 `resolve_preselect`
+  统一静默/GUI 预选；目录判定 `dir_exists_and_nonempty`（read_dir 首
+  条目探测，read 失败交由 NotFound=Ok 语义）；顺带把目录拼接从字符串
+  `+ "\\"` 改为 `Path::join`（Linux 卸载路径修复）。
+- **验收**：match_language_index 单测 + 清单 `language` 往返/旧 JSON
+  兼容单测；双平台 check 0 error。
+
 1. **纯 Rust**：不引入 C 构建链；新增依赖须在 Windows/Linux 双平台可编译。
 2. **向后兼容**：旧格式安装包/卸载清单必须仍可处理（serde default / magic 回退）。
 3. **测试**：核心逻辑写成 `miedit-core` 纯函数并加单元测试；`cargo test -p miedit-core`
@@ -295,6 +317,25 @@
    不再随功能对齐批次递增；历史批次 v0.2.0–v0.13.0 保留原版本号记录）。
 
 ## 变更日志
+
+- 0.1.0（步骤 28，#15）：**卸载语言跟随安装 + 卸载清单 NSIS 处理语义**
+  （用户指令 2026-11-18：① 卸载器跟随安装时的语言——只选一个语言直接
+  使用；两种语言时以安装时选定的为准，装、卸界面同语言；② 卸载清单
+  仿照 NSIS 处理）：
+  ① **卸载语言跟随安装**（NSIS MUI 官方模板 `un.onInit` 读回安装语言
+  惯例）：清单新增 `language` 字段（安装时选定的语言 id，安装器
+  finalize 写入；单语言包 `initial_language` 预选 `Some(0)` 同样记录）;
+  卸载器 `resolve_preselect` 按「清单记录 → 精确/主标签匹配
+  （`langs::match_language_index`，与安装器同口径）→ 回退系统语言自动
+  预选」解析，静默/GUI 共用；语言选择页仅**旧清单**（未记录语言）
+  多语言时回退显示。旧清单 serde default 空 → 行为不变（向后兼容）。
+  ② **卸载清单 NSIS 处理语义**（UninstallLog/LIFO 惯例）：文件与快捷
+  方式按安装**相反顺序删除**；目录 **`RMDir` 语义——仅删除空目录**，
+  非空（用户放置了文件/清单外残留）保留并记录日志 `un_log_dir_kept`
+  （46 个文案键，不算失败）；缺失项静默跳过（`Delete` 语义，原有）;
+  顺带修复目录拼接为 `Path::join`（Linux 卸载路径）。新增
+  `match_language_index` 单测 + 清单 `language` 往返/旧 JSON 兼容断言，
+  core 120 项全过；双平台 check 0 error。
 
 - 0.1.0（步骤 26–27，#14）：**卸载器多语言 + 环境变量/PATH 管理**（NSIS
   卸载语言与环境惯例对齐批次）：

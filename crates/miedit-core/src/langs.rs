@@ -10,7 +10,7 @@
 //! - [`initial_language`]：启动时的语言预选（NSIS 语义——定义了多个语言时显示
 //!   语言选择页并预选系统语言；只有一个时直接使用）。
 
-use crate::config::Config;
+use crate::config::{Config, LanguageSpec};
 
 // ---------------------------------------------------------------------------
 // 内置语言包
@@ -184,6 +184,7 @@ pub static ZH_CN: BuiltinLanguage = BuiltinLanguage {
         ("un_log_delete", "删除 {file}"),
         ("un_log_reboot_delete", "重启删除 {file}"),
         ("un_log_remove_dir", "移除目录 {dir}"),
+        ("un_log_dir_kept", "目录非空，保留: {dir}"),
         (
             "un_log_del_file_failed",
             "删除失败: {err}；且无法计划重启删除: {rerr}",
@@ -424,6 +425,21 @@ pub fn initial_language(cfg: &Config) -> Option<usize> {
     Some(0)
 }
 
+/// 按语言 id 在语言包列表中定位索引（步骤 28，卸载器跟随安装语言）：
+/// 精确匹配（大小写不敏感）优先，其次 [`lang_matches`] 主标签匹配；
+/// 未找到（如脚本改版后清单中语言包被移除）返回 None，由调用方回退
+/// 自动预选。空 id 直接返回 None。
+pub fn match_language_index(languages: &[LanguageSpec], id: &str) -> Option<usize> {
+    let want = id.trim();
+    if want.is_empty() {
+        return None;
+    }
+    if let Some(i) = languages.iter().position(|l| l.id.trim().eq_ignore_ascii_case(want)) {
+        return Some(i);
+    }
+    languages.iter().position(|l| lang_matches(&l.id, want))
+}
+
 // ---------------------------------------------------------------------------
 // 测试
 // ---------------------------------------------------------------------------
@@ -559,5 +575,31 @@ mod tests {
         });
         cfg.ui.language_auto_detect = false;
         assert_eq!(initial_language(&cfg), Some(0));
+    }
+
+    #[test]
+    fn test_match_language_index() {
+        use crate::config::LanguageSpec;
+        let langs = |ids: &[&str]| -> Vec<LanguageSpec> {
+            ids.iter()
+                .map(|id| LanguageSpec {
+                    id: (*id).into(),
+                    name: String::new(),
+                    text: Default::default(),
+                })
+                .collect()
+        };
+        let two = langs(&["en-US", "zh-CN"]);
+        // 精确匹配（大小写不敏感）
+        assert_eq!(match_language_index(&two, "en-US"), Some(0));
+        assert_eq!(match_language_index(&two, "EN-us"), Some(0));
+        assert_eq!(match_language_index(&two, "zh-CN"), Some(1));
+        // 主标签匹配
+        assert_eq!(match_language_index(&two, "zh"), Some(1));
+        assert_eq!(match_language_index(&two, "en"), Some(0));
+        // 未命中 / 空 id
+        assert_eq!(match_language_index(&two, "fr-FR"), None);
+        assert_eq!(match_language_index(&two, ""), None);
+        assert_eq!(match_language_index(&langs(&[]), "zh-CN"), None);
     }
 }
