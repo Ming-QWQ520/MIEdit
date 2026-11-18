@@ -103,11 +103,11 @@ impl Theme {
             v.extreme_bg_color = Color32::from_rgb(6, 8, 12);
             v.faint_bg_color = Color32::from_rgb(18, 21, 28);
             v.selection.bg_fill = accent;
-            v.selection.stroke = Stroke::new(1.0, Color32::WHITE);
+            v.selection.stroke = Stroke::new(1.0_f32, Color32::WHITE);
             v.widgets.noninteractive.bg_stroke = Stroke::NONE;
             v.widgets.inactive.bg_fill = Color32::from_rgb(20, 23, 30);
             v.widgets.inactive.bg_stroke = Stroke::NONE;
-            v.widgets.inactive.fg_stroke = Stroke::new(1.0, text);
+            v.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, text);
             v.widgets.hovered.bg_fill = Color32::from_rgb(30, 34, 44);
             v.widgets.active.bg_fill = accent;
             v.window_rounding = egui::Rounding::same(12.0);
@@ -274,12 +274,12 @@ pub fn secondary_button<'a>(text: &'a str, t: &'a Theme) -> egui::Button<'a> {
     let (fill, stroke) = if t.glass {
         (
             Color32::from_rgba_unmultiplied(255, 255, 255, 20),
-            Stroke::new(1.0, t.stroke_color()),
+            Stroke::new(1.0_f32, t.stroke_color()),
         )
     } else {
         (
             Color32::from_rgb(18, 21, 28),
-            Stroke::new(1.0, t.card_stroke),
+            Stroke::new(1.0_f32, t.card_stroke),
         )
     };
     egui::Button::new(egui::RichText::new(text).color(t.text_dim).size(15.5))

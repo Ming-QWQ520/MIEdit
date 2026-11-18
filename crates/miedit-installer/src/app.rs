@@ -66,6 +66,10 @@ pub struct InstallerApp {
     install_finished: bool,
     /// 步骤 21（CLI 适配）：--no-shortcuts 跳过快捷方式创建
     no_shortcuts: bool,
+    /// 步骤 30：后台 CRC 校验门（提取前等待校验结果，窗口不阻塞）
+    crc_gate: Arc<install::CrcGate>,
+    /// 步骤 30：后台壁纸解码结果（解码完成后由 UI 线程上传纹理）
+    bg_shared: Arc<Mutex<Option<egui::ColorImage>>>,
 }
 
 pub fn run_gui(
@@ -74,6 +78,7 @@ pub fn run_gui(
     repair: bool,
     cli_components: Option<Vec<bool>>,
     no_shortcuts: bool,
+    ncrc: bool,
 ) -> anyhow::Result<()> {
     let cfg = &pkg.config;
     // 启动语言预选（NSIS MUI：多语言时预选系统语言，单语言直接使用，无语言包保持旧行为）
@@ -118,20 +123,50 @@ pub fn run_gui(
     }
 
     let run_title = title.clone();
+    // 步骤 30（安装包打开速度）：CRC 校验与壁纸解码全部移入后台线程——
+    // 窗口打开只依赖配置解析与图标（小）；校验在提取前完成（CrcGate），
+    // 壁纸解码完成后下一帧上传纹理（渐进式呈现，先渐变后壁纸）
+    let crc_gate = if ncrc {
+        install::CrcGate::ready(Ok(()))
+    } else {
+        let gate = Arc::new(install::CrcGate::new_pending());
+        let g2 = gate.clone();
+        let pkg2 = pkg.clone();
+        std::thread::Builder::new()
+            .name("miedit-crc".into())
+            .spawn(move || {
+                let res = miedit_core::trailer::verify_crc(&pkg2.path, &pkg2.trailer)
+                    .map_err(|e| format!("{e:#}"));
+                g2.complete(res);
+            })
+            .expect("启动 CRC 校验线程失败");
+        gate
+    };
+    // 步骤 30：壁纸解码结果共享槽（线程在窗口创建闭包内启动，以便拿到 ctx repaint）
+    let bg_shared: Arc<Mutex<Option<egui::ColorImage>>> = Arc::new(Mutex::new(None));
     eframe::run_native(
         &run_title,
         options,
         Box::new(move |cc| {
             theme::install_fonts(&cc.egui_ctx);
+            // 步骤 30：壁纸后台解码线程（IO + PNG 解码离关键路径；完成后
+            // request_repaint 让空闲中的 UI 也能换上壁纸）
+            if let Some(raw) = pkg.bg_raw.clone() {
+                let s2 = bg_shared.clone();
+                let ctx2 = cc.egui_ctx.clone();
+                std::thread::Builder::new()
+                    .name("miedit-bg".into())
+                    .spawn(move || {
+                        let img = crate::pkg::decode_image_color(&raw);
+                        *s2.lock().unwrap() = img;
+                        ctx2.request_repaint();
+                    })
+                    .expect("启动壁纸解码线程失败");
+            }
             let th = theme::Theme::from_config(&pkg);
             th.apply(&cc.egui_ctx);
-            let bg_tex = pkg
-                .bg
-                .as_ref()
-                .map(|img| {
-                    cc.egui_ctx
-                        .load_texture("bg", img.clone(), egui::TextureOptions::LINEAR)
-                });
+            // 步骤 30：壁纸初始为 None（后台解码完成后 update() 逐帧上传纹理）
+            let bg_tex: Option<TextureHandle> = None;
             let icon_tex = pkg.icon.as_ref().map(|ic| {
                 cc.egui_ctx.load_texture(
                     "app-icon",
@@ -201,6 +236,8 @@ pub fn run_gui(
                 repair,
                 install_finished: false,
                 no_shortcuts,
+                crc_gate: crc_gate.clone(),
+                bg_shared,
             }))
         }),
     )
@@ -294,7 +331,7 @@ impl InstallerApp {
                     9.0,
                     Color32::TRANSPARENT,
                     Stroke::new(
-                        1.0,
+                        1.0_f32,
                         Color32::from_rgba_unmultiplied(
                             self.theme.accent.r(),
                             self.theme.accent.g(),
@@ -322,7 +359,7 @@ impl InstallerApp {
                     dot_c,
                     3.5,
                     Color32::TRANSPARENT,
-                    Stroke::new(1.2, self.theme.text_dim.linear_multiply(0.55)),
+                    Stroke::new(1.2_f32, self.theme.text_dim.linear_multiply(0.55)),
                 );
             }
             let label = txt(cfg, self.language, key);
@@ -447,6 +484,8 @@ impl InstallerApp {
         }
 
         let rules = self.selected_rules();
+        // 步骤 30：传递后台 CRC 校验门（安装线程在提取前等待校验结果）
+        let gate = Some(self.crc_gate.clone());
         self.state = install::spawn(
             self.pkg.clone(),
             dest,
@@ -454,6 +493,7 @@ impl InstallerApp {
             rules,
             self.language,
             self.no_shortcuts,
+            gate,
         );
         self.page = Page::Install;
     }
@@ -652,7 +692,7 @@ impl InstallerApp {
                 egui::Frame::none()
                     .fill(self.theme.field)
                     .rounding(10.0)
-                    .stroke(Stroke::new(1.0, self.theme.card_stroke))
+                    .stroke(Stroke::new(1.0_f32, self.theme.card_stroke))
                     .inner_margin(egui::Margin::same(14.0))
                     .show(ui, |ui| {
                         for (i, l) in cfg.ui.languages.iter().enumerate() {
@@ -770,7 +810,7 @@ impl InstallerApp {
                 egui::Frame::none()
                     .fill(self.theme.field)
                     .rounding(10.0)
-                    .stroke(Stroke::new(1.0, self.theme.card_stroke))
+                    .stroke(Stroke::new(1.0_f32, self.theme.card_stroke))
                     .inner_margin(egui::Margin::same(14.0))
                     .show(ui, |ui| {
                         let out = egui::ScrollArea::vertical()
@@ -927,7 +967,7 @@ impl InstallerApp {
                 egui::Frame::none()
                     .fill(self.theme.field)
                     .rounding(10.0)
-                    .stroke(Stroke::new(1.0, self.theme.card_stroke))
+                    .stroke(Stroke::new(1.0_f32, self.theme.card_stroke))
                     .inner_margin(egui::Margin::same(14.0))
                     .show(ui, |ui| {
                         // 步骤 24：组件分组树（NSIS SectionGroup/SectionGroupEnd 语义）——
@@ -1068,7 +1108,7 @@ impl InstallerApp {
                 egui::Frame::none()
                     .fill(self.theme.field)
                     .rounding(10.0)
-                    .stroke(Stroke::new(1.0, self.theme.card_stroke))
+                    .stroke(Stroke::new(1.0_f32, self.theme.card_stroke))
                     .inner_margin(egui::Margin::same(12.0))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
@@ -1129,7 +1169,7 @@ impl InstallerApp {
                     egui::Frame::none()
                         .fill(self.theme.field)
                         .rounding(9.0)
-                        .stroke(Stroke::new(1.0, self.theme.card_stroke))
+                        .stroke(Stroke::new(1.0_f32, self.theme.card_stroke))
                         .inner_margin(egui::Margin::symmetric(12.0, 10.0))
                         .show(ui, |ui| {
                             ui.add_sized(
@@ -1325,7 +1365,7 @@ impl InstallerApp {
                     egui::Frame::none()
                         .fill(self.theme.field)
                         .rounding(10.0)
-                        .stroke(Stroke::new(1.0, self.theme.card_stroke))
+                        .stroke(Stroke::new(1.0_f32, self.theme.card_stroke))
                         .inner_margin(egui::Margin::same(10.0))
                         .show(ui, |ui| {
                             egui::ScrollArea::vertical()
@@ -1384,7 +1424,7 @@ impl InstallerApp {
                     egui::Frame::none()
                         .fill(amber.linear_multiply(0.12))
                         .rounding(10.0)
-                        .stroke(Stroke::new(1.0, amber.linear_multiply(0.5)))
+                        .stroke(Stroke::new(1.0_f32, amber.linear_multiply(0.5)))
                         .inner_margin(egui::Margin::same(10.0))
                         .show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
@@ -1476,7 +1516,7 @@ impl InstallerApp {
                 egui::Frame::none()
                     .fill(self.theme.field)
                     .rounding(10.0)
-                    .stroke(Stroke::new(1.0, self.theme.card_stroke))
+                    .stroke(Stroke::new(1.0_f32, self.theme.card_stroke))
                     .inner_margin(egui::Margin::same(12.0))
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
@@ -1573,6 +1613,7 @@ impl InstallerApp {
                             rules,
                             self.language,
                             self.no_shortcuts,
+                            Some(self.crc_gate.clone()),
                         );
                         self.page = Page::Install;
                     }
@@ -1599,7 +1640,7 @@ fn txt(cfg: &miedit_core::config::Config, lang: Option<usize>, key: &str) -> Str
 fn chip_small(ui: &mut egui::Ui, text: String, accent: Color32) {
     egui::Frame::none()
         .fill(accent.linear_multiply(0.16))
-        .stroke(Stroke::new(1.0, accent.linear_multiply(0.5)))
+        .stroke(Stroke::new(1.0_f32, accent.linear_multiply(0.5)))
         .rounding(999.0)
         .inner_margin(egui::Margin::symmetric(8.0, 2.0))
         .show(ui, |ui| {
@@ -1612,7 +1653,7 @@ fn chip_label(ui: &mut egui::Ui, text: &str, accent: Color32) {
         .fill(accent.linear_multiply(0.18))
         .rounding(999.0)
         .inner_margin(egui::Margin::symmetric(12.0, 5.0))
-        .stroke(Stroke::new(1.0, accent.linear_multiply(0.55)));
+        .stroke(Stroke::new(1.0_f32, accent.linear_multiply(0.55)));
     frame.show(ui, |ui| {
         ui.label(
             egui::RichText::new(text.to_uppercase())
@@ -1655,7 +1696,20 @@ impl eframe::App for InstallerApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(new_title));
         }
         self.poll_state();
-
+        // 步骤 30：后台 CRC 失败 → 立即转错误页（不等用户点安装才发现）；
+        // 壁纸解码完成 → 上传纹理（渐进式呈现：先渐变，解码完自动换壁纸）
+        if self.page != Page::Error {
+            if let Some(msg) = self.crc_gate.failed_msg() {
+                self.page = Page::Error;
+                self.err_msg = msg;
+            }
+        }
+        if self.bg_tex.is_none() {
+            if let Some(img) = self.bg_shared.lock().unwrap().take() {
+                self.bg_tex = Some(ctx.load_texture("bg", img, egui::TextureOptions::LINEAR));
+                ctx.request_repaint();
+            }
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::none())
             .show(ctx, |ui| {
@@ -1704,8 +1758,8 @@ impl eframe::App for InstallerApp {
                 }
                 let c = close_rect.center();
                 let (s1, s2) = (Vec2::new(5.0, 5.0), Vec2::new(-5.0, 5.0));
-                ui.painter().line_segment([c - s1, c + s1], Stroke::new(1.6, self.theme.text_dim));
-                ui.painter().line_segment([c - s2, c + s2], Stroke::new(1.6, self.theme.text_dim));
+                ui.painter().line_segment([c - s1, c + s1], Stroke::new(1.6_f32, self.theme.text_dim));
+                ui.painter().line_segment([c - s2, c + s2], Stroke::new(1.6_f32, self.theme.text_dim));
                 if crect.clicked() {
                     ctx.send_viewport_cmd(ViewportCommand::Close);
                 }
@@ -1719,7 +1773,7 @@ impl eframe::App for InstallerApp {
                 let m = min_rect.center();
                 ui.painter().line_segment(
                     [Pos2::new(m.x - 5.0, m.y), Pos2::new(m.x + 5.0, m.y)],
-                    Stroke::new(1.6, self.theme.text_dim),
+                    Stroke::new(1.6_f32, self.theme.text_dim),
                 );
                 if mrect.clicked() {
                     ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
@@ -1735,7 +1789,7 @@ impl eframe::App for InstallerApp {
                     card,
                     18.0,
                     Color32::TRANSPARENT,
-                    Stroke::new(1.0, self.theme.stroke_color()),
+                    Stroke::new(1.0_f32, self.theme.stroke_color()),
                 );
                 // 步骤导航栏（HM NIS Edit 向导式，路线图步骤 21）：
                 // 左列步骤列表 + 当前步高亮 + 已完成勾点；仅指示不点击
@@ -1800,7 +1854,7 @@ impl eframe::App for InstallerApp {
                     egui::Frame::none()
                         .fill(self.theme.card)
                         .rounding(14.0)
-                        .stroke(Stroke::new(1.0, self.theme.card_stroke))
+                        .stroke(Stroke::new(1.0_f32, self.theme.card_stroke))
                         .inner_margin(egui::Margin::same(20.0))
                         .show(ui, |ui| {
                             ui.set_min_width(w);

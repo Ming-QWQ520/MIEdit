@@ -7,11 +7,13 @@ description = "MIEdit 核心库：安装包格式、脚本配置、卸载清单�
 [dependencies]
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 flate2 = "1"
 brotli = "9"
 lzma-rust = { version = "0.1.7", features = ["encoder"] }
 walkdir = "2"
+
+[dev-dependencies]
+serde_json = "1"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"

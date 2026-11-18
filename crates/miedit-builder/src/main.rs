@@ -1,7 +1,7 @@
 //! MIEdit 安装包构建向导（GUI）—— HM NIS Edit / Inno Setup 式分步向导。
 //!
 //! 左侧项目表单（应用/安装/外观/文件/快捷方式/注册表/文案），
-//! 右侧实时预览安装界面 + 一键构建。项目与 CLI 脚本（.miedit.toml）完全互通。
+//! 右侧实时预览安装界面 + 一键构建。项目与 CLI 脚本（.mi，MI 脚本语言）完全互通。
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #![allow(deprecated)] // allocate_ui_at_rect 在 0.29 仍稳定可用（0.31 才移除）

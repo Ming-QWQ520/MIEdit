@@ -2,7 +2,7 @@
 //!
 //! 用法：
 //! ```text
-//! miedit-compiler build <script.miedit.toml> [-o output.exe]
+//! miedit-compiler build <script.mi> [-o output.exe]
 //! ```
 
 use anyhow::{bail, Context, Result};
@@ -21,11 +21,11 @@ fn print_usage() {
     println!(
         "MIEdit (Ming-Install-Edit) 编译器 v{}\n\n\
          用法:\n  \
-         miedit-compiler build <script.miedit.toml> [-o <output.exe>]\n         \
+         miedit-compiler build <script.mi> [-o <output.exe>]\n         \
          [--stub <installer.exe>] [--uninstaller <uninstaller.exe>]\n\n\
          提示: 也可使用 GUI 构建器（miedit-builder）可视化制作安装包。\n\n\
          示例:\n  \
-         miedit-compiler build examples/demo-app.miedit.toml -o out/Demo-Setup.exe\n\n\
+         miedit-compiler build examples/demo-app.mi -o out/Demo-Setup.exe\n\n\
          默认从可执行文件同目录查找 miedit-installer.exe / miedit-uninstaller.exe（cargo build --release 产物）。",
         miedit_core::VERSION
     );
@@ -74,7 +74,7 @@ fn cmd_build(args: &[String]) -> Result<()> {
         }
     }
     let script_path = PathBuf::from(script.ok_or_else(|| {
-        anyhow::anyhow!("缺少脚本参数。用法: miedit-compiler build <script.miedit.toml>")
+        anyhow::anyhow!("缺少脚本参数。用法: miedit-compiler build <script.mi>")
     })?);
     let base = script_path
         .parent()

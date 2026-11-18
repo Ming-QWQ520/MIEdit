@@ -82,7 +82,14 @@ fn real_main(
     no_shortcuts: bool,
     args: &[String],
 ) -> Result<i32> {
-    let pkg = pkg::load_self_package(ncrc)?;
+    let pkg = if silent {
+        // 静默模式：同步校验 CRC（确定性退出码，损坏包拒绝安装）
+        pkg::load_self_package(ncrc)?
+    } else {
+        // GUI 模式（步骤 30 打开速度优化）：只解析配置与图标，CRC 校验与
+        // 壁纸解码移入后台线程（提取前由 CrcGate 保证校验完成）
+        pkg::load_self_package_fast()?
+    };
     let cfg = &pkg.config;
 
     if cfg.app.name.is_empty() {
@@ -181,7 +188,7 @@ fn real_main(
                 sel,
             )
         });
-        let st = install::spawn(pkg.clone(), dest, None, rules, language, no_shortcuts);
+        let st = install::spawn(pkg.clone(), dest, None, rules, language, no_shortcuts, None);
         // 等待安装线程结束（join handle 未暴露，轮询即可）
         loop {
             {
@@ -202,7 +209,7 @@ fn real_main(
         write_silent_log(&log);
         Ok(miedit_core::cliargs::EXIT_OK)
     } else {
-        app::run_gui(pkg, dest, repair, cli_components, no_shortcuts)?;
+        app::run_gui(pkg, dest, repair, cli_components, no_shortcuts, ncrc)?;
         Ok(miedit_core::cliargs::EXIT_OK)
     }
 }

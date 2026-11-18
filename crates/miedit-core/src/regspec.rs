@@ -110,7 +110,6 @@ pub fn view_of(spec: &RegistrySpec) -> Result<RegView, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
 
     fn spec() -> RegistrySpec {
         RegistrySpec::default()

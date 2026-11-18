@@ -78,7 +78,7 @@ pub fn draw(ui: &mut egui::Ui, tex: Option<&TextureHandle>, cfg: &Config, avail_
         Pos2::new(rect.right() - s_(44.0), rect.bottom() - s_(104.0)),
     );
     p.rect_filled(card, s_(18.0), CARD.linear_multiply(0.62));
-    p.rect(card, s_(18.0), Color32::TRANSPARENT, egui::Stroke::new(1.0, Color32::from_rgb(52, 56, 66)));
+    p.rect(card, s_(18.0), Color32::TRANSPARENT, egui::Stroke::new(1.0_f32, Color32::from_rgb(52, 56, 66)));
 
     // ---- 欢迎内容 ----
     let inner = Rect::from_min_max(

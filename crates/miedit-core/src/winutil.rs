@@ -680,6 +680,7 @@ pub fn registry_delete_tree(per_machine: bool, key_path: &str) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// 机器级环境区键路径（HKLM）。
+#[cfg(windows)]
 const ENV_KEY_MACHINE: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
 
 /// 环境区键路径（per_machine = HKLM 机器级，否则 HKCU 用户级 `Environment`）。

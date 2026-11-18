@@ -2,7 +2,7 @@
 name = "miedit-compiler"
 version.workspace = true
 edition.workspace = true
-description = "MIEdit 安装包编译器：读取 .miedit.toml 脚本产出自解压安装包 EXE"
+description = "MIEdit 安装包编译器：读取 .mi 脚本产出自解压安装包 EXE"
 
 [[bin]]
 name = "miedit-compiler"

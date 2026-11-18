@@ -601,7 +601,7 @@ fn apply_style(ctx: &egui::Context) {
         v.selection.bg_fill = ACCENT;
         v.widgets.inactive.bg_fill = Color32::from_black_alpha(90);
         v.widgets.inactive.bg_stroke = Stroke::NONE;
-        v.widgets.inactive.fg_stroke = Stroke::new(1.0, TEXT);
+        v.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, TEXT);
         v.widgets.hovered.bg_fill = Color32::from_black_alpha(140);
         v.widgets.active.bg_fill = Color32::from_black_alpha(180);
         st.spacing.item_spacing = Vec2::new(10.0, 10.0);
@@ -840,9 +840,9 @@ impl UninstallerApp {
                     Color32::from_black_alpha(60)
                 };
                 let stroke = if selected {
-                    egui::Stroke::new(1.2, ACCENT)
+                    egui::Stroke::new(1.2_f32, ACCENT)
                 } else {
-                    egui::Stroke::new(1.0, CARD_STROKE)
+                    egui::Stroke::new(1.0_f32, CARD_STROKE)
                 };
                 let label = if lang.name.trim().is_empty() {
                     lang.id.clone()
@@ -914,7 +914,7 @@ impl UninstallerApp {
         egui::Frame::none()
             .fill(Color32::from_rgb(8, 10, 14))
             .rounding(10.0)
-            .stroke(egui::Stroke::new(1.0, CARD_STROKE))
+            .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
             .inner_margin(egui::Margin::same(10.0))
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
@@ -1037,7 +1037,7 @@ impl UninstallerApp {
             egui::Frame::none()
                 .fill(Color32::from_rgb(8, 10, 14))
                 .rounding(10.0)
-                .stroke(egui::Stroke::new(1.0, CARD_STROKE))
+                .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
                 .inner_margin(egui::Margin::same(10.0))
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical()
@@ -1202,7 +1202,7 @@ impl eframe::App for UninstallerApp {
                 ui.painter().rect_filled(close_rect, 7.0, Color32::from_white_alpha(26));
             }
             let c = close_rect.center();
-            let stroke = Stroke::new(1.6, TEXT_DIM);
+            let stroke = Stroke::new(1.6_f32, TEXT_DIM);
             ui.painter().line_segment([c - Vec2::new(5.0, 5.0), c + Vec2::new(5.0, 5.0)], stroke);
             ui.painter().line_segment([c - Vec2::new(-5.0, 5.0), c + Vec2::new(-5.0, 5.0)], stroke);
             if crect.clicked() {
@@ -1215,7 +1215,7 @@ impl eframe::App for UninstallerApp {
                 Pos2::new(sr.right() - 28.0, sr.bottom() - 88.0),
             );
             ui.painter().rect_filled(card, 16.0, CARD);
-            ui.painter().rect(card, 16.0, Color32::TRANSPARENT, Stroke::new(1.0, CARD_STROKE));
+            ui.painter().rect(card, 16.0, Color32::TRANSPARENT, Stroke::new(1.0_f32, CARD_STROKE));
 
             ui.allocate_ui_at_rect(card.shrink2(Vec2::new(22.0, 18.0)), |ui| {
                 self.content(ui, ctx);
@@ -1277,7 +1277,7 @@ impl eframe::App for UninstallerApp {
 fn small_toggle_button<'a>(text: &'a str) -> egui::Button<'a> {
     egui::Button::new(egui::RichText::new(text).color(TEXT_DIM).size(12.5))
         .fill(Color32::from_black_alpha(110))
-        .stroke(egui::Stroke::new(1.0, CARD_STROKE))
+        .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
         .rounding(8.0)
         .min_size(Vec2::new(0.0, 28.0))
 }

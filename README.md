@@ -22,8 +22,8 @@
 
 | 能力 | 说明 |
 | --- | --- |
-| **GUI 构建向导** | HM NIS Edit / Inno Setup 式 **10 步向导**：欢迎 → 应用信息 → 安装程序选项（**实时预览**）→ 目录与授权 → 文件与组件 → 快捷方式 → 完成后运行 → 卸载与注册表 → **项目脚本**（查看/编辑/应用 `.miedit.toml`）→ 构建（wpReady 式摘要 + 一键构建） |
-| 脚本驱动 | 一份 `.miedit.toml` 描述应用、文件、组件、UI 与快捷方式，与向导完全互通 |
+| **GUI 构建向导** | HM NIS Edit / Inno Setup 式 **10 步向导 + 左栏步骤树**（全部步骤可点直达、当前高亮、完成 √）：欢迎 → 应用信息 → 安装程序选项（**实时预览**）→ 目录与授权 → 文件与组件 → 快捷方式 → 完成后运行 → 卸载与注册表 → **MI 脚本 IDE**（VSCode 式：文件标签 + 行号 + 语法高亮 + 实时校验 + 问题面板，`.mi`）→ 构建（wpReady 式摘要 + 一键构建） |
+| 脚本驱动 | 一份 `.mi`（MI 脚本，自研轻量脚本语言，TOML 语法）描述应用、文件、组件、UI 与快捷方式，与向导完全互通 |
 | 自解压安装器 | 单文件 EXE：`[stub][payload][config][卸载器][背景图][图标][Trailer]` |
 | 现代化 UI | egui 无边框窗口、玻璃卡片、主题色可配、自绘进度条、中文字体自适应 |
 | **全窗口图片背景** | `background = "bg.png"`，`cover / contain / stretch` 三种模式 |
@@ -49,6 +49,7 @@
 | 升级检测 | 发现旧版本记录版本号并静默卸载后升级（`InstallDirRegKey` 式目录记忆） |
 | 权限 | `per_machine = true` 启动时自动 UAC 提权重启 |
 | 静默模式 | 安装器/卸载器均支持 `--silent`（NSIS `/S` 风格）与 `--dir=`，可自动化测试 |
+| **打开速度** | 安装器 GUI 关键路径只解析包尾+配置+图标：CRC32 校验移后台（提取前 `CrcGate` 把关，损坏包仍拒绝安装、`--ncrc` 不变），壁纸解码后台化（先渐变后壁纸）；release 实测 256MB 包关键路径 637ms→0ms |
 | **覆盖策略** | NSIS `SetOverwrite` 对齐：`on / off / try / ifnewer`；安装后保留源文件时间戳，`ifnewer` 仅在源更新时覆盖 |
 | **快捷方式增强** | Inno `[Icons]` 对齐：`[[shortcuts.entries]]` 自定义名称/子目录/参数/图标/工作目录/描述，位置多选（开始菜单/桌面/快速启动栏），与简单开关叠加兼容 |
 | **最小系统版本门槛** | Inno `MinVersion` 对齐：`install.min_version`，RtlGetVersion 取真实版本（不受兼容性垫片影响），低于门槛启动即拒 |
@@ -83,13 +84,13 @@ cargo build --release
 ```bash
 target/release/miedit-builder.exe
 # 或直接打开示例项目（跳到第 2 步）
-target/release/miedit-builder.exe examples/demo-app.miedit.toml
+target/release/miedit-builder.exe examples/demo-app.mi
 ```
 
 ### 用 CLI 编译
 
 ```bash
-target/release/miedit-compiler.exe build examples/demo-app.miedit.toml -o out/MIEdit-Demo-Setup.exe
+target/release/miedit-compiler.exe build examples/demo-app.mi -o out/MIEdit-Demo-Setup.exe
 ```
 
 ### 安装 / 卸载
@@ -104,9 +105,9 @@ out/MIEdit-Demo-Setup.exe --silent --dir="C:\My Apps\Demo"
 "%LOCALAPPDATA%\Programs\MIEdit Demo\uninstall.exe" --silent    # 静默卸载（保留用户数据）
 ```
 
-## 脚本参考（`.miedit.toml`）
+## 脚本参考（`.mi` — MI 脚本语言）
 
-完整示例见 [`examples/demo-app.miedit.toml`](examples/demo-app.miedit.toml)。
+完整示例见 [`examples/demo-app.mi`](examples/demo-app.mi)。
 
 ```toml
 [app]
@@ -223,7 +224,7 @@ crates/
 ## 测试
 
 ```bash
-cargo test --workspace    # 120 个单元测试：归档（含 LZMA/Brotli 压缩算法往返）/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/文件错误决策与提示信箱/重启替换/安装类型状态机/系统版本门槛/目录统计/组件过滤映射/slug/语言匹配与 LANGID 映射/多语言文案解析链/卸载器文案键集与解析链/卸载语言匹配索引/环境变量解析与 PATH 合并去重/卸载清单新旧兼容/修复入口与修复统计/包尾 v4 与卸载数据新旧格式/安装目录解析与根路径校验/盘符切换空间刷新回归/内置模板色板/CLI 组件参数解析/压缩方式别名归一化
+cargo test --workspace    # 130 个单元测试：归档（含 LZMA/Brotli 压缩算法往返）/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/文件错误决策与提示信箱/重启替换/安装类型状态机/系统版本门槛/目录统计/组件过滤映射/slug/语言匹配与 LANGID 映射/多语言文案解析链/卸载器文案键集与解析链/卸载语言匹配索引/环境变量解析与 PATH 合并去重/卸载清单新旧兼容/修复入口与修复统计/包尾 v4 与卸载数据新旧格式/安装目录解析与根路径校验/盘符切换空间刷新回归/内置模板色板/CLI 组件参数解析/压缩方式别名归一化/CRC 后台校验门/MI 脚本语法高亮
 ```
 
 已在 Windows 10 x64 实机验证：CLI 与 GUI 构建链路、静默安装/卸载全清理、组件过滤生效、

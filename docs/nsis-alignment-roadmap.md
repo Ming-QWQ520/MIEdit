@@ -37,6 +37,9 @@
 | 26 | 卸载器多语言（语言选择页 + 全部文案随语言切换） | NSIS `MUI_UNPAGE_LANGUAGE` / un 语言链 | **已完成**（0.1.0，#14） |
 | 27 | 环境变量/PATH 管理（写入 + 广播 + 卸载精确清理） | NSIS WriteEnvStr 惯例 / Inno `ChangesEnvironment` | **已完成**（0.1.0，#14） |
 | 28 | 卸载语言跟随安装 + 卸载清单 NSIS 处理语义 | NSIS un.onInit 读回安装语言 / UninstallLog LIFO + `RMDir` 仅空删除 | **已完成**（0.1.0，#15） |
+| 29 | MI 脚本语言（.mi）+ VSCode 式脚本 IDE 页 + HM Edit 式导航栏 | HM NIS Edit 向导树 / VSCode 编辑器（行号+语法高亮+校验状态栏） | **已完成**（0.1.0，#16） |
+| 30 | 安装包打开速度优化（CRC/壁纸后台化） | NSIS CRCCheck 语义保留、窗口先开（体验优先） | **已完成**（0.1.0，#16） |
+| 31 | 全仓 warning 清零（float fallback/未用符号/依赖归位） | rustc `float_literal_f32_fallback`（未来硬错误） | **已完成**（0.1.0，#16） |
 
 ## 迭代步骤定义
 
@@ -306,6 +309,38 @@
 - **验收**：match_language_index 单测 + 清单 `language` 往返/旧 JSON
   兼容单测；双平台 check 0 error。
 
+### 步骤 29：MI 脚本语言（.mi）+ VSCode 式脚本 IDE 页 + HM Edit 式导航栏（用户指令 2026-11-18）
+- **做什么**：① **脚本后缀正式定为 `.mi`**（MI 脚本语言 v1：TOML 语法，像
+  NIS 是 NSIS 的脚本一样是 MIEdit 的脚本）——builder 文件对话框、示例
+  （`examples/demo-app.mi`）、编译器 CLI 用法、README 全部改名；打开
+  兼容旧 `.toml`/`.mris.toml`；② **脚本页升级为 VSCode 式轻量 IDE**：
+  文件标签栏（文件名 + 未保存圆点）→ 工具栏（重新生成/应用到向导/
+  保存脚本/另存为）→ 编辑器（`TextEdit::layouter` 实现行号 gutter +
+  MI 脚本语法高亮：注释绿/节头蓝/键浅蓝/字符串橙/数值紫/布尔蓝，纯
+  函数 `mi_script_job` 无第三方依赖）→ 状态栏（行数/字符数/实时校验）
+  → 问题面板（解析错误就地显示）；只适配本项目的脚本；③ **导航优化
+  （借鉴 HM NIS Edit）**：builder 新增左栏步骤树（全部步骤可点直达，
+  当前步高亮、已完成步 √ 徽标），跳转与页脚「下一步」共用 `goto_step`
+  （进入脚本页按脏状态重新生成）。
+- **验收**：`mi_script_job` 5 项单测（行号/节头/键/字符串/数值/布尔/
+  字符串内 `#` 不误判）；双平台 check 0 error。
+- **后继（步骤 32 规划）**：MI 脚本 v2 指令式扩展（NSIS Section/指令层，
+  如 `Run`/`SectionSet` 钩子），保持 TOML 为基础语法向上叠加。
+
+### 步骤 30：安装包打开速度优化（用户指令 2026-11-18）
+- **做什么**：GUI 模式关键路径只保留「包尾解析 + 配置解析 + 图标解码」；
+  **CRC32 校验移入后台线程**（`CrcGate`：安装线程在提取任何文件之前
+  等待校验结果——损坏包仍然拒绝安装、`--ncrc` 语义不变，只是不再阻塞
+  窗口；CRC 失败立即转错误页）；**壁纸解码（IO + PNG）移入后台线程**
+  （先渐变后壁纸的渐进式呈现）。静默模式保持同步校验（确定性退出码）。
+- **实测**（release，Linux，表驱动 CRC32 ~400MB/s）：8MB 包关键路径
+  19ms→0ms；64MB 包 160ms→0ms；**256MB 包 637ms→0ms**（基准测试
+  `compiler/tests/startup_bench.rs`，`--ignored` 按需运行）。壁纸 PNG
+  解码（数百 ms 级）同步移出。
+- **验收**：Linux 实机端到端——干净包静默装 exit 0；篡改 payload 一字节
+  → 静默装 exit 1 + 明确报错；`--ncrc` 跳过校验（损坏数据在解压时自然
+  失败，NSIS `/NCRC` 同语义）；`CrcGate` 3 项单测。
+
 1. **纯 Rust**：不引入 C 构建链；新增依赖须在 Windows/Linux 双平台可编译。
 2. **向后兼容**：旧格式安装包/卸载清单必须仍可处理（serde default / magic 回退）。
 3. **测试**：核心逻辑写成 `miedit-core` 纯函数并加单元测试；`cargo test -p miedit-core`
@@ -318,7 +353,33 @@
 
 ## 变更日志
 
-- 0.1.0（步骤 28，#15）：**卸载语言跟随安装 + 卸载清单 NSIS 处理语义**
+- 0.1.0（步骤 29–31，#16）：**MI 脚本（.mi）+ VSCode 式脚本 IDE + 打开
+  速度优化 + warning 清零**（用户指令 2026-11-18：修复 warning / 脚本
+  编辑页像 VSCode 轻型 IDE、脚本后缀改 .mi 自研轻量脚本语言 / 优化编译
+  后 exe 安装包打开速度）：
+  ① **warning 清零**（步骤 31）：46 处 `Stroke::new` 浮点字面量
+  `float_literal_f32_fallback`（rustc 1.100 起为 future-hard-error）全部
+  显式 `_f32`；`ENV_KEY_MACHINE` 补 `#[cfg(windows)]`；`serde_json` 移入
+  core `[dev-dependencies]`（仅测试使用）；regspec/versioninfo 测试未用
+  导入/变量清理。build + test 双 0 warning。
+  ② **MI 脚本语言（.mi）+ VSCode 式脚本 IDE 页 + HM Edit 式导航栏**
+  （步骤 29）：脚本后缀正式定为 `.mi`（TOML 语法，示例/CLI/文档同步；
+  打开兼容旧 .toml）；脚本页重构为轻量 IDE——文件标签栏（未保存圆点）、
+  工具栏（重新生成/应用/保存/另存为）、编辑器（`TextEdit::layouter`
+  实现**行号 + MI 脚本语法高亮**：注释/节头/键/字符串/数值/布尔分色，
+  纯函数 `mi_script_job` 零依赖）、状态栏（行数/字符数/实时校验）、
+  问题面板（解析错误就地显示）；builder 新增 **HM NIS Edit 式左栏步骤
+  树**（全部步骤可点直达、当前高亮、完成 √，`goto_step` 与页脚共用）。
+  新增 5 项 `mi_script_job` 单测。
+  ③ **安装包打开速度优化**（步骤 30）：GUI 关键路径只留包尾+配置+图标；
+  CRC32 校验移后台线程（`CrcGate`：提取前等待，损坏包仍拒绝安装、
+  `--ncrc` 不变、失败立即转错误页）；壁纸解码移后台（先渐变后壁纸）。
+  release 实测 256MB 包关键路径 **637ms→0ms**、64MB 160ms→0ms；
+  Linux 端到端：干净包 exit 0 / 篡改 payload exit 1 报 CRC 错误 /
+  `--ncrc` 跳过校验；新增 `CrcGate` 3 项单测。全仓 130 项单测全过；
+  双平台 check 0 error 0 warning。
+
+- 0.1.0（步骤 28，#15）：**卸载语言跟随安装 + 卸载清单 NSIS 处理语义**- 0.1.0（步骤 28，#15）：**卸载语言跟随安装 + 卸载清单 NSIS 处理语义**
   （用户指令 2026-11-18：① 卸载器跟随安装时的语言——只选一个语言直接
   使用；两种语言时以安装时选定的为准，装、卸界面同语言；② 卸载清单
   仿照 NSIS 处理）：

@@ -52,7 +52,7 @@ pub fn apply_style(ctx: &egui::Context) {
         v.widgets.noninteractive.bg_stroke = egui::Stroke::NONE;
         v.widgets.inactive.bg_fill = Color32::from_rgb(32, 36, 46);
         v.widgets.inactive.bg_stroke = egui::Stroke::NONE;
-        v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, TEXT);
+        v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, TEXT);
         v.widgets.hovered.bg_fill = Color32::from_rgb(42, 47, 60);
         v.widgets.active.bg_fill = Color32::from_rgb(0x4F, 0x8C, 0xFF);
         st.spacing.item_spacing = Vec2::new(8.0, 8.0);
@@ -97,9 +97,26 @@ const STEP_TITLES: [(&str, &str); 10] = [
     ("应用程序快捷方式", "请指定为应用程序创建哪些快捷方式。"),
     ("安装完成后运行", "请指定安装程序完成时要运行的任务。"),
     ("卸载程序与注册表", "请指定卸载相关属性与注册表写入项。"),
-    ("项目脚本（.miedit.toml）", "查看或编辑生成的项目脚本（高级用户）。"),
+    ("MI 脚本（.mi）", "像 VSCode 一样直接编辑 MI 脚本（自研轻量脚本，TOML 语法）。"),
     ("构建安装程序", "确认配置并生成自解压安装程序。"),
 ];
+
+/// 左栏导航短名（HM NIS Edit 步骤树）
+const STEP_SHORT: [&str; 10] = [
+    "欢迎",
+    "应用信息",
+    "安装选项",
+    "目录与许可",
+    "文件与组件",
+    "快捷方式",
+    "完成后运行",
+    "卸载与注册表",
+    "MI 脚本",
+    "构建",
+];
+
+/// 左栏当前步底色（accent 低透明近似值，深色主题）
+const RAIL_CURRENT_BG: Color32 = Color32::from_rgb(45, 58, 96);
 
 struct RegRow {
     key: String,
@@ -121,6 +138,8 @@ pub struct BuilderApp {
     /// 第 9 步：脚本编辑缓冲与脏标记
     script_text: String,
     script_dirty: bool,
+    /// 左栏导航待跳转步骤（egui 借用规则：rail 内记录，update 末尾执行）
+    pending_jump: Option<usize>,
 }
 
 impl BuilderApp {
@@ -140,6 +159,7 @@ impl BuilderApp {
             files_stat: (0, 0),
             script_text: String::new(),
             script_dirty: false,
+            pending_jump: None,
         };
         if let Some(p) = project {
             if let Err(e) = app.open_project(&p, ctx) {
@@ -309,8 +329,8 @@ impl BuilderApp {
                     },
                 );
                 match rfd::FileDialog::new()
-                    .set_file_name(format!("{slug}.miedit.toml"))
-                    .add_filter("MIEdit 项目脚本", &["mris.toml", "toml"])
+                    .set_file_name(format!("{slug}.mi"))
+                    .add_filter("MI 脚本（.mi）", &["mi", "toml"])
                     .save_file()
                 {
                     Some(p) => p,
@@ -390,7 +410,7 @@ fn text_input(ui: &mut egui::Ui, text: &mut String, hint: &str, width: f32) -> e
     egui::Frame::none()
         .fill(FIELD)
         .rounding(8.0)
-        .stroke(egui::Stroke::new(1.0, CARD_STROKE))
+        .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
         .inner_margin(egui::Margin::symmetric(10.0, 7.0))
         .show(ui, |ui| {
             ui.add_sized(
@@ -431,7 +451,7 @@ fn nav_button<'a>(text: &'a str, accent: Option<Color32>) -> egui::Button<'a> {
             .min_size(Vec2::new(104.0, 34.0)),
         None => egui::Button::new(egui::RichText::new(text).color(TEXT).size(14.0))
             .fill(Color32::from_rgb(32, 36, 46))
-            .stroke(egui::Stroke::new(1.0, CARD_STROKE))
+            .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
             .rounding(8.0)
             .min_size(Vec2::new(104.0, 34.0)),
     }
@@ -440,7 +460,7 @@ fn nav_button<'a>(text: &'a str, accent: Option<Color32>) -> egui::Button<'a> {
 fn small_button<'a>(text: &'a str) -> egui::Button<'a> {
     egui::Button::new(egui::RichText::new(text).color(TEXT_DIM).size(12.5))
         .fill(Color32::from_rgb(32, 36, 46))
-        .stroke(egui::Stroke::new(1.0, CARD_STROKE))
+        .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
         .rounding(7.0)
         .min_size(Vec2::new(0.0, 30.0))
 }
@@ -448,7 +468,7 @@ fn small_button<'a>(text: &'a str) -> egui::Button<'a> {
 fn chip(ui: &mut egui::Ui, text: &str, color: Color32) {
     egui::Frame::none()
         .fill(color.linear_multiply(0.16))
-        .stroke(egui::Stroke::new(1.0, color.linear_multiply(0.5)))
+        .stroke(egui::Stroke::new(1.0_f32, color.linear_multiply(0.5)))
         .rounding(999.0)
         .inner_margin(egui::Margin::symmetric(10.0, 3.0))
         .show(ui, |ui| {
@@ -460,7 +480,7 @@ fn log_lines(ui: &mut egui::Ui, log: &[String]) {
     egui::Frame::none()
         .fill(FIELD)
         .rounding(8.0)
-        .stroke(egui::Stroke::new(1.0, CARD_STROKE))
+        .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
         .inner_margin(egui::Margin::same(8.0))
         .show(ui, |ui| {
             egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
@@ -556,7 +576,7 @@ impl BuilderApp {
                     ui.add_space(10.0);
                     ui.label(
                         egui::RichText::new(
-                            "向导并不会涵盖 MIEdit 的所有功能。生成的项目脚本（.miedit.toml）可保存后继续用本向导编辑，或使用 miedit-compiler 命令行编译。",
+                            "向导并不会涵盖 MIEdit 的所有功能。生成的 MI 脚本（.mi，自研轻量脚本语言，TOML 语法）可在「MI 脚本」页像 VSCode 一样直接编辑，或使用 miedit-compiler 命令行编译。",
                         )
                         .color(TEXT_DIM)
                         .size(14.0),
@@ -571,11 +591,11 @@ impl BuilderApp {
                     let mut open = false;
                     ui.checkbox(
                         &mut open,
-                        egui::RichText::new("打开现有项目（.miedit.toml）").color(TEXT).size(13.5),
+                        egui::RichText::new("打开现有项目（.mi / .toml）").color(TEXT).size(13.5),
                     );
                     if open {
                         if let Some(p) = rfd::FileDialog::new()
-                            .add_filter("MIEdit 项目脚本", &["mris.toml", "toml"])
+                            .add_filter("MI 脚本（.mi）", &["mi", "toml"])
                             .pick_file()
                         {
                             if let Err(e) = self.open_project(&p, ctx) {
@@ -681,7 +701,7 @@ impl BuilderApp {
                     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::click());
                     ui.painter().rect_filled(rect, 6.0, color);
                     if on {
-                        ui.painter().rect_stroke(rect, 6.0, egui::Stroke::new(2.0, Color32::WHITE));
+                        ui.painter().rect_stroke(rect, 6.0, egui::Stroke::new(2.0_f32, Color32::WHITE));
                     }
                     if resp.on_hover_text(*tip).clicked() {
                         self.cfg.ui.accent = hex.to_string();
@@ -799,7 +819,7 @@ impl BuilderApp {
                 egui::Frame::none()
                     .fill(FIELD)
                     .rounding(8.0)
-                    .stroke(egui::Stroke::new(1.0, CARD_STROKE))
+                    .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
                     .inner_margin(egui::Margin::same(10.0))
                     .show(ui, |ui| {
                         egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
@@ -836,7 +856,7 @@ impl BuilderApp {
                         egui::Frame::none()
                             .fill(CARD)
                             .rounding(8.0)
-                            .stroke(egui::Stroke::new(1.0, CARD_STROKE))
+                            .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
                             .inner_margin(egui::Margin::symmetric(8.0, 6.0))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
@@ -879,7 +899,7 @@ impl BuilderApp {
                         egui::Frame::none()
                             .fill(CARD)
                             .rounding(8.0)
-                            .stroke(egui::Stroke::new(1.0, CARD_STROKE))
+                            .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
                             .inner_margin(egui::Margin::symmetric(8.0, 6.0))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
@@ -936,7 +956,7 @@ impl BuilderApp {
                         egui::Frame::none()
                             .fill(CARD)
                             .rounding(8.0)
-                            .stroke(egui::Stroke::new(1.0, CARD_STROKE))
+                            .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
                             .inner_margin(egui::Margin::symmetric(8.0, 6.0))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
@@ -1029,7 +1049,7 @@ impl BuilderApp {
             egui::Frame::none()
                 .fill(CARD)
                 .rounding(8.0)
-                .stroke(egui::Stroke::new(1.0, CARD_STROKE))
+                .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
                 .inner_margin(egui::Margin::symmetric(8.0, 6.0))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
@@ -1099,7 +1119,7 @@ impl BuilderApp {
             egui::Frame::none()
                 .fill(CARD)
                 .rounding(8.0)
-                .stroke(egui::Stroke::new(1.0, CARD_STROKE))
+                .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
                 .inner_margin(egui::Margin::symmetric(8.0, 6.0))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
@@ -1156,6 +1176,51 @@ impl BuilderApp {
     }
 
     fn page_script(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        // VSCode 编辑器标签栏：文件名 + 未保存圆点 + 语法标注
+        let tab_name = self
+            .project_file
+            .as_ref()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .unwrap_or_else(|| {
+                let slug = miedit_core::util::slugify(
+                    if self.cfg.app.name.trim().is_empty() {
+                        "project"
+                    } else {
+                        &self.cfg.app.name
+                    },
+                );
+                format!("{slug}.mi")
+            });
+        egui::Frame::none()
+            .fill(FIELD)
+            .rounding(8.0)
+            .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
+            .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("  {tab_name}"))
+                            .color(if self.script_dirty { TEXT } else { TEXT })
+                            .size(13.5)
+                            .strong(),
+                    );
+                    if self.script_dirty {
+                        // VSCode 未保存圆点
+                        let (r, _) = ui.allocate_exact_size(Vec2::new(10.0, 10.0), Sense::hover());
+                        ui.painter_at(r).circle_filled(r.center(), 4.0, AMBER);
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new("MI 脚本 · TOML 语法 · 与向导互通")
+                                .color(Color32::from_rgb(110, 116, 130))
+                                .size(11.0),
+                        );
+                    });
+                });
+            });
+
+        // 工具栏（VSCode 活动条风格操作）：重新生成 / 应用到向导 / 保存 / 另存为
+        ui.add_space(6.0);
         ui.horizontal(|ui| {
             if self.script_dirty {
                 chip(ui, "有未应用的修改", AMBER);
@@ -1186,6 +1251,15 @@ impl BuilderApp {
                     Err(e) => self.set_flash(format!("脚本解析失败: {e}")),
                 }
             }
+            if ui.add(small_button("保存脚本")).clicked() {
+                match self.project_file.clone() {
+                    Some(p) => {
+                        let _ = std::fs::write(&p, self.script_text.as_str());
+                        self.set_flash(format!("已保存 {}", p.display()));
+                    }
+                    None => self.save_project(),
+                }
+            }
             if ui.add(small_button("另存为脚本...")).clicked() {
                 let slug = miedit_core::util::slugify(
                     if self.cfg.app.name.trim().is_empty() {
@@ -1195,11 +1269,13 @@ impl BuilderApp {
                     },
                 );
                 if let Some(p) = rfd::FileDialog::new()
-                    .set_file_name(format!("{slug}.miedit.toml"))
-                    .add_filter("MIEdit 项目脚本", &["mris.toml", "toml"])
+                    .set_file_name(format!("{slug}.mi"))
+                    .add_filter("MI 脚本（.mi）", &["mi", "toml"])
                     .save_file()
                 {
                     let _ = std::fs::write(&p, self.script_text.as_str());
+                    self.project_file = Some(p);
+                    self.set_flash("脚本已另存");
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1212,20 +1288,79 @@ impl BuilderApp {
         });
         ui.add_space(6.0);
 
+        // 编辑器主体（VSCode 风格：深色代码区 + MI 脚本语法高亮 + 行号）
         egui::Frame::none()
-            .fill(FIELD)
+            .fill(Color32::from_rgb(10, 12, 17))
             .rounding(10.0)
-            .stroke(egui::Stroke::new(1.0, CARD_STROKE))
-            .inner_margin(egui::Margin::same(12.0))
+            .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
+            .inner_margin(egui::Margin::same(10.0))
             .show(ui, |ui| {
+                let mut layouter =
+                    |ui: &egui::Ui, text: &str, wrap_width: f32| -> std::sync::Arc<egui::Galley> {
+                        let mut job = mi_script_job(text);
+                        job.wrap.max_width = wrap_width;
+                        ui.fonts(|f| f.layout_job(job))
+                    };
                 ui.add(
                     egui::TextEdit::multiline(&mut self.script_text)
+                        .id_salt("mi-script-editor")
                         .font(egui::TextStyle::Monospace)
                         .code_editor()
-                        .desired_rows(26)
-                        .desired_width(ui.available_width() - 16.0),
+                        .desired_rows(22)
+                        .desired_width(ui.available_width() - 16.0)
+                        .frame(false)
+                        .layouter(&mut layouter),
                 );
             });
+
+        // 状态栏（VSCode 状态条）：行数 / 字符数 / 实时校验结果
+        let line_count = self.script_text.lines().count().max(if self.script_text.is_empty() { 0 } else { 1 });
+        let parse_ok = toml::from_str::<Config>(&self.script_text).is_ok();
+        ui.add_space(6.0);
+        egui::Frame::none()
+            .fill(FIELD)
+            .rounding(8.0)
+            .inner_margin(egui::Margin::symmetric(10.0, 5.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!(" {} 行 · {} 字符 ", line_count, self.script_text.chars().count()))
+                            .color(Color32::from_rgb(110, 116, 130))
+                            .size(11.5),
+                    );
+                    ui.separator();
+                    let (mark, color) = if parse_ok {
+                        ("MI 脚本校验：通过", GREEN)
+                    } else {
+                        ("MI 脚本校验：失败（检查下方提示）", AMBER)
+                    };
+                    ui.label(egui::RichText::new(mark).color(color).size(11.5).strong());
+                    if self.script_dirty {
+                        ui.separator();
+                        ui.label(
+                            egui::RichText::new("未应用")
+                                .color(AMBER)
+                                .size(11.5),
+                        );
+                    }
+                });
+            });
+
+        // 问题面板（VSCode Problems）：解析失败时显示首个错误
+        if let Err(e) = toml::from_str::<Config>(&self.script_text) {
+            ui.add_space(4.0);
+            egui::Frame::none()
+                .fill(Color32::from_rgba_unmultiplied(90, 50, 20, 70))
+                .rounding(8.0)
+                .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(format!("× 脚本解析错误：{e}"))
+                            .color(AMBER)
+                            .size(12.0),
+                    );
+                });
+        }
 
         // 脏检测：脚本内容与当前配置的序列化结果不同即视为脏（配置很小，序列化开销可忽略）
         let regenerated = toml::to_string_pretty(&self.cfg).unwrap_or_default();
@@ -1257,7 +1392,7 @@ impl BuilderApp {
         egui::Frame::none()
             .fill(FIELD)
             .rounding(8.0)
-            .stroke(egui::Stroke::new(1.0, CARD_STROKE))
+            .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
             .inner_margin(egui::Margin::same(12.0))
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
@@ -1380,7 +1515,7 @@ impl BuilderApp {
         }
         ui.add_space(8.0);
         ui.label(
-            egui::RichText::new("建议先「保存项目」（页脚）将配置存为 .miedit.toml，以便后续继续编辑或用 miedit-compiler 命令行编译。")
+            egui::RichText::new("建议先「保存项目」（页脚）将配置存为 .mi（MI 脚本），以便后续继续编辑或用 miedit-compiler 命令行编译。")
                 .color(Color32::from_rgb(110, 116, 130))
                 .size(11.5),
         );
@@ -1420,7 +1555,7 @@ impl BuilderApp {
                 let accent = self.accent();
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::hover());
                 ui.painter().rect_filled(rect, 10.0, accent.linear_multiply(0.2));
-                ui.painter().rect_stroke(rect, 10.0, egui::Stroke::new(1.0, accent.linear_multiply(0.7)));
+                ui.painter().rect_stroke(rect, 10.0, egui::Stroke::new(1.0_f32, accent.linear_multiply(0.7)));
                 ui.painter().text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
@@ -1442,7 +1577,7 @@ impl BuilderApp {
             // 左：项目操作
             if ui.add(small_button("打开项目")).clicked() {
                 if let Some(p) = rfd::FileDialog::new()
-                    .add_filter("MIEdit 项目脚本", &["mris.toml", "toml"])
+                    .add_filter("MI 脚本（.mi）", &["mi", "toml"])
                     .pick_file()
                 {
                     if let Err(e) = self.open_project(&p, ctx) {
@@ -1506,8 +1641,14 @@ impl BuilderApp {
     }
 
     fn advance(&mut self, ctx: &egui::Context) {
+        self.goto_step(ctx, self.step_index() + 1);
+    }
+
+    /// 跳转到指定步骤（页脚「下一步」与左栏导航共用；HM NIS Edit 向导
+    /// 允许点击任意步骤直达，进入脚本页时按脏状态重新生成脚本）。
+    fn goto_step(&mut self, ctx: &egui::Context, idx: usize) {
         self.apply_reg_to_cfg();
-        self.step = Step::from_index(self.step_index() + 1);
+        self.step = Step::from_index(idx);
         if self.step == Step::Options {
             // 进入外观页时刷新预览纹理
             self.load_background(ctx);
@@ -1527,6 +1668,78 @@ impl BuilderApp {
                 };
             }
         }
+    }
+
+    /// 左栏步骤导航（HM NIS Edit 式，路线图步骤 29）：全部步骤可点直达；
+    /// 当前步高亮（accent 底色），已完成步带 √ 徽标，未到步暗淡。
+    fn step_rail(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(10.0);
+        ui.label(
+            egui::RichText::new("构建向导")
+                .color(TEXT_DIM)
+                .size(11.5)
+                .strong(),
+        );
+        ui.add_space(6.0);
+        for i in 0..STEP_SHORT.len() {
+            let current = i == self.step_index();
+            let done = i < self.step_index();
+            let (bg, stroke) = if current {
+                (RAIL_CURRENT_BG, egui::Stroke::new(1.0_f32, accent_color(&self.cfg)))
+            } else {
+                (Color32::TRANSPARENT, egui::Stroke::NONE)
+            };
+            let badge_color = if current {
+                accent_color(&self.cfg)
+            } else if done {
+                GREEN
+            } else {
+                Color32::from_rgb(90, 96, 110)
+            };
+            let resp = egui::Frame::none()
+                .fill(bg)
+                .rounding(8.0)
+                .stroke(stroke)
+                .inner_margin(egui::Margin::symmetric(8.0, 5.0))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let (r, _) = ui.allocate_exact_size(Vec2::new(20.0, 20.0), Sense::hover());
+                        let p = ui.painter_at(r);
+                        p.circle_filled(
+                            r.center(),
+                            10.0,
+                            badge_color.linear_multiply(if current || done { 0.85 } else { 0.5 }),
+                        );
+                        let label = if done { "√".to_string() } else { format!("{}", i + 1) };
+                        p.text(
+                            r.center(),
+                            egui::Align2::CENTER_CENTER,
+                            label,
+                            FontId::proportional(11.0),
+                            Color32::WHITE,
+                        );
+                        let name_color = if current { TEXT } else { TEXT_DIM };
+                        ui.label(egui::RichText::new(STEP_SHORT[i]).color(name_color).size(13.0));
+                    });
+                })
+                .response
+                .interact(egui::Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if resp.clicked() {
+                self.pending_jump = Some(i);
+            }
+            ui.add_space(1.0);
+        }
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new("MI 脚本（.mi）与向导完全互通：
+向导页改动会同步进脚本，
+脚本页「应用修改」回填向导。")
+                .color(Color32::from_rgb(110, 116, 130))
+                .size(11.0),
+        );
     }
 
     fn content(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -1617,6 +1830,22 @@ impl eframe::App for BuilderApp {
                 self.footer(ui, ctx);
             });
 
+        // 左栏步骤导航（HM NIS Edit 式，路线图步骤 29）
+        egui::SidePanel::left("wizard-rail")
+            .resizable(false)
+            .exact_width(188.0)
+            .frame(egui::Frame::none().fill(BG_TOP))
+            .show(ctx, |ui| {
+                self.step_rail(ui);
+            });
+
+        // 左栏点击跳转（rail 中只记录，此处执行以避免借用冲突）
+        if let Some(i) = self.pending_jump.take() {
+            if i != self.step_index() {
+                self.goto_step(ctx, i);
+            }
+        }
+
         // 中间内容
         egui::CentralPanel::default()
             .frame(
@@ -1644,5 +1873,202 @@ impl eframe::App for BuilderApp {
                         ui.add_space(20.0);
                     });
             });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MI 脚本语法高亮（步骤 29，VSCode 式轻量 IDE：只需适配 .mi / TOML 语法）
+// ---------------------------------------------------------------------------
+
+/// MI 脚本默认文本色
+const MI_TEXT: Color32 = Color32::from_rgb(212, 217, 226);
+/// 行号（gutter）色
+const MI_LINENO: Color32 = Color32::from_rgb(86, 92, 108);
+/// 注释色（VSCode 绿）
+const MI_COMMENT: Color32 = Color32::from_rgb(106, 153, 130);
+/// 节头 `[section]` / `[[array]]` 色（VSCode 蓝）
+const MI_SECTION: Color32 = Color32::from_rgb(86, 156, 214);
+/// 键名色（VSCode 浅蓝）
+const MI_KEY: Color32 = Color32::from_rgb(156, 220, 254);
+/// 字符串色（VSCode 橙）
+const MI_STRING: Color32 = Color32::from_rgb(206, 145, 120);
+/// 数值色（VSCode 紫）
+const MI_NUMBER: Color32 = Color32::from_rgb(197, 134, 192);
+/// 布尔色（VSCode 蓝）
+const MI_BOOL: Color32 = Color32::from_rgb(86, 156, 214);
+
+/// 构建 MI 脚本（TOML 语法）的着色布局：逐行行号 + 注释/节头/键/字符串/
+/// 数值/布尔分色。行号与正文在同一布局里生成，天然对齐（无独立 gutter）。
+/// 纯函数，供脚本页 `TextEdit::layouter` 使用；编辑缓冲不受影响。
+pub fn mi_script_job(text: &str) -> egui::text::LayoutJob {
+    let font = egui::FontId::monospace(13.0);
+    let fmt = |color: Color32| egui::text::TextFormat {
+        font_id: font.clone(),
+        color,
+        ..Default::default()
+    };
+    let mut job = egui::text::LayoutJob::default();
+    for (i, line) in text.split('\n').enumerate() {
+        job.append(&format!("{:>3}  ", i + 1), 0.0, fmt(MI_LINENO));
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') {
+            job.append(line, 0.0, fmt(MI_COMMENT));
+        } else if trimmed.starts_with('[') {
+            job.append(line, 0.0, fmt(MI_SECTION));
+        } else {
+            match line.find('=') {
+                Some(eq) if !line[..eq].trim().is_empty() => {
+                    job.append(&line[..eq], 0.0, fmt(MI_KEY));
+                    job.append("=", 0.0, fmt(MI_TEXT));
+                    push_mi_value(&line[eq + 1..], &mut job, &font);
+                }
+                _ => job.append(line, 0.0, fmt(MI_TEXT)),
+            }
+        }
+        job.append("\n", 0.0, fmt(MI_TEXT));
+    }
+    job
+}
+
+/// 值部分分色：字符串（引号内的 = 等字符不算分隔）整段上色，
+/// 其余按数值 / 布尔 / 默认色。多行字符串按行独立处理（轻量 IDE 定位）。
+fn push_mi_value(rest: &str, job: &mut egui::text::LayoutJob, font: &egui::FontId) {
+    let fmt = |color: Color32| egui::text::TextFormat {
+        font_id: font.clone(),
+        color,
+        ..Default::default()
+    };
+    let mut start = 0usize;
+    let mut in_str: Option<char> = None;
+    let mut i = 0usize;
+    for c in rest.chars() {
+        let end = i + c.len_utf8();
+        match in_str {
+            Some(q) => {
+                if c == q {
+                    job.append(&rest[start..end], 0.0, fmt(MI_STRING));
+                    start = end;
+                    in_str = None;
+                }
+            }
+            None => {
+                if c == '"' || c == '\'' {
+                    push_mi_token(&rest[start..i], job, &fmt);
+                    start = i;
+                    in_str = Some(c);
+                }
+            }
+        }
+        i = end;
+    }
+    push_mi_token(&rest[start..], job, &fmt);
+}
+
+/// 单个裸 token 分色：数值 / 布尔 / 默认。
+fn push_mi_token(
+    tok: &str,
+    job: &mut egui::text::LayoutJob,
+    fmt: &dyn Fn(Color32) -> egui::text::TextFormat,
+) {
+    if tok.is_empty() {
+        return;
+    }
+    let t = tok.trim();
+    if t.parse::<f64>().is_ok() {
+        job.append(tok, 0.0, fmt(MI_NUMBER));
+    } else if t == "true" || t == "false" {
+        job.append(tok, 0.0, fmt(MI_BOOL));
+    } else {
+        job.append(tok, 0.0, fmt(MI_TEXT));
+    }
+}
+
+#[cfg(test)]
+mod script_ide_tests {
+    use super::*;
+
+    /// 段颜色序列辅助：取 job 中每段的颜色与文本。
+    fn colored(job: &egui::text::LayoutJob) -> Vec<(Color32, String)> {
+        job.sections
+            .iter()
+            .map(|sec| {
+                let text = job.text[sec.byte_range.clone()].to_string();
+                (sec.format.color, text)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn mi_script_job_line_numbers_and_comment() {
+        let job = mi_script_job("# hello\n");
+        let parts = colored(&job);
+        // 第一段 = 行号 "  1  "（gutter 色）
+        assert_eq!(parts[0].0, MI_LINENO);
+        assert_eq!(parts[0].1, "  1  ");
+        // 第二段 = 注释行（注释色）
+        assert_eq!(parts[1].0, MI_COMMENT);
+        assert_eq!(parts[1].1, "# hello");
+    }
+
+    #[test]
+    fn mi_script_job_section_key_string_number_bool() {
+        let src = "[app]\nname = \"Demo App\"\nversion = 1\nenabled = true\n";
+        let job = mi_script_job(src);
+        let parts = colored(&job);
+        let find = |needle: &str| -> Color32 {
+            parts
+                .iter()
+                .find(|(_, t)| t == needle)
+                .map(|(c, _)| *c)
+                .unwrap_or_else(|| panic!("段未找到: {needle}"))
+        };
+        assert_eq!(find("[app]"), MI_SECTION);
+        assert_eq!(find("name "), MI_KEY);
+        assert_eq!(find("\"Demo App\""), MI_STRING);
+        assert_eq!(find(" 1"), MI_NUMBER);
+        assert_eq!(find(" true"), MI_BOOL);
+        // 行号与正文段数一致：5 行（含末尾换行）→ 5 个行号段
+        let lineno_count = parts.iter().filter(|(c, _)| *c == MI_LINENO).count();
+        assert_eq!(lineno_count, 5);
+    }
+
+    #[test]
+    fn mi_script_job_hash_inside_string_not_comment() {
+        // 行以键开头，字符串内的 # 不应把内容误判为注释
+        let src = "title = \"a # b\"\n";
+        let job = mi_script_job(src);
+        let parts = colored(&job);
+        assert!(
+            parts.iter().any(|(c, t)| *c == MI_KEY && t.contains("title")),
+            "键名未识别"
+        );
+        assert!(parts.iter().any(|(c, _)| *c == MI_STRING), "字符串未识别");
+        assert!(
+            !parts.iter().any(|(c, _)| *c == MI_COMMENT),
+            "字符串内 # 误判为注释"
+        );
+    }
+
+    #[test]
+    fn mi_script_job_plain_line_default_color() {
+        let job = mi_script_job("\nplain line\n");
+        let parts = colored(&job);
+        assert!(
+            parts.iter().any(|(c, t)| *c == MI_TEXT && t == "plain line"),
+            "无等号行应走默认色"
+        );
+    }
+
+    #[test]
+    fn mi_script_job_line_number_count_matches_lines() {
+        // 3 行内容 + 尾随换行产生第 4 个空行（与 VSCode 一样给末行编号）
+        let src = "a = 1\nb = 2\nc = 3\n";
+        let job = mi_script_job(src);
+        let n = job
+            .sections
+            .iter()
+            .filter(|sec| sec.format.color == MI_LINENO)
+            .count();
+        assert_eq!(n, 4);
     }
 }

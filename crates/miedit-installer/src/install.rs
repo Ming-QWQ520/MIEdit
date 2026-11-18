@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum Phase {
@@ -76,10 +76,67 @@ fn wait_file_error_choice(
     }
 }
 
+/// CRC 后台校验门（步骤 30 安装包打开速度优化）：GUI 模式窗口先开，
+/// CRC 在后台线程验证；安装线程在**提取任何文件之前**等待校验结果——
+/// 损坏包仍然拒绝安装（NSIS CRCCheck 语义不变），只是不再阻塞窗口打开。
+/// None（已完成）状态用于静默模式：同步校验后直接放行。
+pub struct CrcGate {
+    result: Mutex<Option<Result<(), String>>>,
+    cv: Condvar,
+}
+
+impl CrcGate {
+    pub fn new_pending() -> Self {
+        Self {
+            result: Mutex::new(None),
+            cv: Condvar::new(),
+        }
+    }
+
+    /// 后台校验线程写结果并唤醒等待者。
+    pub fn complete(&self, res: Result<(), String>) {
+        let mut g = self.result.lock().unwrap();
+        *g = Some(res);
+        self.cv.notify_all();
+    }
+
+    /// 安装线程在提取前调用：阻塞至校验完成，失败则 bail（不写任何文件）。
+    pub fn wait_ok(&self, ctx: Option<&egui::Context>) -> Result<()> {
+        let mut g = self.result.lock().unwrap();
+        while g.is_none() {
+            if let Some(c) = ctx {
+                c.request_repaint();
+            }
+            g = self.cv.wait(g).unwrap();
+        }
+        match g.as_ref().unwrap() {
+            Ok(()) => Ok(()),
+            Err(msg) => Err(anyhow::anyhow!("{msg}")),
+        }
+    }
+
+    /// 已完成状态（静默模式 / --ncrc）：直接返回，不等待。
+    pub fn ready(verified: Result<(), String>) -> Arc<Self> {
+        let g = Self::new_pending();
+        g.complete(verified);
+        Arc::new(g)
+    }
+
+    /// UI 轮询：后台校验已失败则返回错误文案（立即转错误页，
+    /// 不等到用户点安装才发现）。
+    pub fn failed_msg(&self) -> Option<String> {
+        match &*self.result.lock().unwrap() {
+            Some(Err(msg)) => Some(msg.clone()),
+            _ => None,
+        }
+    }
+}
+
 /// 启动后台安装线程，返回共享进度状态。
 /// `selected_rules`：组件过滤后允许安装的 `[[files]]` 规则索引；None = 全部安装。
 /// `language`：选中语言索引（步骤 15 多语言；None = 无语言包，文案用英文默认）。
 /// `shortcuts_enabled`：是否创建快捷方式（步骤 21：CLI `--no-shortcuts`；GUI 默认 true）。
+/// `crc_gate`：后台 CRC 校验门（步骤 30；None = 已验证）。
 pub fn spawn(
     pkg: Arc<Package>,
     dest: PathBuf,
@@ -87,6 +144,7 @@ pub fn spawn(
     selected_rules: Option<std::collections::HashSet<usize>>,
     language: Option<usize>,
     shortcuts_enabled: bool,
+    crc_gate: Option<Arc<CrcGate>>,
 ) -> Arc<Mutex<ProgressState>> {
     let st = Arc::new(Mutex::new(ProgressState {
         phase: Phase::Extracting,
@@ -99,6 +157,22 @@ pub fn spawn(
     std::thread::Builder::new()
         .name("mris-install".into())
         .spawn(move || {
+            // 步骤 30：提取前等待后台 CRC 校验完成（窗口已先开，
+            // 若用户比校验更快点到了安装页，这里短暂等待；损坏包拒绝安装）
+            if let Some(gate) = &crc_gate {
+                push_log(&st2, "正在校验安装包完整性…");
+                if let Err(e) = gate.wait_ok(ctx.as_ref()) {
+                    let mut s = st2.lock().unwrap();
+                    s.phase = Phase::Failed(format!("{e:#}"));
+                    s.log.push(format!("× 安装失败: {e:#}"));
+                    drop(s);
+                    if let Some(c) = ctx {
+                        c.request_repaint();
+                    }
+                    return;
+                }
+                push_log(&st2, "√ 安装包校验通过");
+            }
             let res = run_install(
                 &pkg,
                 &dest,
@@ -480,6 +554,39 @@ fn run_install(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    // 步骤 30：CRC 后台校验门——安装线程在提取前等待校验完成
+    #[test]
+    fn crc_gate_pending_then_ok() {
+        let gate = Arc::new(CrcGate::new_pending());
+        let g2 = gate.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            g2.complete(Ok(()));
+        });
+        // wait_ok 阻塞至后台完成（30ms 内返回 Ok）
+        gate.wait_ok(None).unwrap();
+    }
+
+    #[test]
+    fn crc_gate_failed_blocks_install() {
+        let gate = CrcGate::ready(Err("安装包已损坏（CRC32 校验失败: payload 分区）".into()));
+        let err = gate
+            .wait_ok(None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("CRC32"), "失败原因应透传: {err}");
+        assert_eq!(gate.failed_msg().as_deref().unwrap(), "安装包已损坏（CRC32 校验失败: payload 分区）");
+    }
+
+    #[test]
+    fn crc_gate_ready_passes_immediately() {
+        let gate = CrcGate::ready(Ok(()));
+        gate.wait_ok(None).unwrap();
+        assert!(gate.failed_msg().is_none());
+    }
+
     // 组件过滤契约：选中规则 → 展开为允许安装的包内路径集合
     #[test]
     fn test_component_filter_mapping() {

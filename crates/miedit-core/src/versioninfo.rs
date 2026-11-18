@@ -307,7 +307,7 @@ mod tests {
         let (l1, v1, t1, k1, ke1) = block_head(&b, children_start);
         assert_eq!(k1, "StringFileInfo");
         assert_eq!((v1, t1), (0, 1));
-        let (l2, v2, t2, k2, ke2) = block_head(&b, align4(children_start + l1));
+        let (_l2, v2, t2, k2, ke2) = block_head(&b, align4(children_start + l1));
         assert_eq!(k2, "VarFileInfo");
         assert_eq!((v2, t2), (0, 1));
 
