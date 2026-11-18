@@ -8,6 +8,7 @@ use crate::{
     accent_color, default_config, preview, ACCENT_PRESETS, AMBER, BG_BOTTOM, BG_TOP, CARD,
     CARD_STROKE, FIELD, GREEN, RED, TEXT, TEXT_DEFAULTS_ZH, TEXT_DIM, WINDOW_HINT,
 };
+use crate::scriptide::{self, IdeAction};
 use anyhow::Context as _;
 use eframe::egui::{self, Color32, FontId, Pos2, Rect, Sense, TextureHandle, Vec2};
 use miedit_compiler::{build_package, locate_components, BuildOptions, BuildSummary};
@@ -138,6 +139,8 @@ pub struct BuilderApp {
     /// 第 9 步：脚本编辑缓冲与脏标记
     script_text: String,
     script_dirty: bool,
+    /// VSCode 式 IDE 状态（查找/面板/转到行/换行开关，路线图步骤 32）
+    ide: scriptide::IdeState,
     /// 左栏导航待跳转步骤（egui 借用规则：rail 内记录，update 末尾执行）
     pending_jump: Option<usize>,
 }
@@ -159,6 +162,7 @@ impl BuilderApp {
             files_stat: (0, 0),
             script_text: String::new(),
             script_dirty: false,
+            ide: scriptide::IdeState::default(),
             pending_jump: None,
         };
         if let Some(p) = project {
@@ -1175,10 +1179,392 @@ impl BuilderApp {
         );
     }
 
+    /// VSCode 式脚本编辑页（路线图步骤 32）：菜单栏 + 标签栏 + 面包屑 +
+    /// Dark+ 代码区（行号/当前行/查找命中/错误行高亮）+ minimap + 查找替换 +
+    /// 命令面板 + 转到行 + 状态栏 + 问题面板 + 自动缩进/括号补全。
     fn page_script(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        // VSCode 编辑器标签栏：文件名 + 未保存圆点 + 语法标注
-        let tab_name = self
-            .project_file
+        let editor_id = egui::Id::new("mi-script-editor");
+        let tab_label = self.tab_label();
+        // 实时校验（一处解析：状态栏 / 问题面板 / 错误行高亮共用）
+        let parse_result = toml::from_str::<Config>(&self.script_text);
+        let error_pos =
+            parse_result.as_ref().err().and_then(|e| scriptide::parse_toml_error_pos(&e.to_string()));
+        let has_error = parse_result.is_err();
+        let accent = self.accent();
+
+        // 上一帧光标（行号高亮 / 面包屑用；编辑后的新光标由状态栏重读）
+        let prev_caret = egui::TextEdit::load_state(ctx, editor_id)
+            .and_then(|st| st.cursor.char_range())
+            .map(|r| r.primary.index);
+        let caret_line_prev =
+            prev_caret.map(|c| scriptide::line_of_char(&self.script_text, c)).unwrap_or(1);
+
+        let mut actions: Vec<IdeAction> = Vec::new();
+
+        // ---- VSCode 快捷键（仅脚本页生效）----
+        ctx.input(|i| {
+            let m = i.modifiers;
+            let pressed = |k: egui::Key| i.key_pressed(k);
+            let a = if m.ctrl && m.shift && pressed(egui::Key::P) {
+                Some(IdeAction::TogglePalette)
+            } else if m.ctrl && pressed(egui::Key::F) {
+                Some(IdeAction::ToggleFind)
+            } else if m.ctrl && pressed(egui::Key::H) {
+                Some(IdeAction::ToggleReplace)
+            } else if m.ctrl && pressed(egui::Key::G) {
+                Some(IdeAction::GotoLine)
+            } else if m.ctrl && pressed(egui::Key::S) {
+                Some(IdeAction::Save)
+            } else if m.alt && pressed(egui::Key::Z) {
+                Some(IdeAction::ToggleWrap)
+            } else {
+                None
+            };
+            if let Some(a) = a {
+                actions.push(a);
+            }
+        });
+
+        // Esc 分层关闭：命令面板 → 转到行 → 查找（VSCode 语义）
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if self.ide.palette.open {
+                self.ide.palette.open = false;
+            } else if self.ide.goto.open {
+                self.ide.goto.open = false;
+            } else if self.ide.find.open {
+                self.ide.find.open = false;
+            }
+        }
+
+        // ---- 菜单栏（VSCode 顶部菜单；RefCell 规避嵌套闭包可变借用）----
+        let picked = std::cell::RefCell::new(None::<IdeAction>);
+        egui::menu::bar(ui, |ui| {
+            ui.menu_button("文件", |ui| {
+                for (label, a) in [
+                    ("保存脚本　Ctrl+S", IdeAction::Save),
+                    ("另存为脚本...", IdeAction::SaveAs),
+                    ("打开项目...", IdeAction::OpenProject),
+                ] {
+                    if ui.button(label).clicked() {
+                        *picked.borrow_mut() = Some(a);
+                        ui.close_menu();
+                    }
+                }
+            });
+            ui.menu_button("编辑", |ui| {
+                for (label, a) in [
+                    ("查找　Ctrl+F", IdeAction::ToggleFind),
+                    ("替换　Ctrl+H", IdeAction::ToggleReplace),
+                    ("转到行　Ctrl+G", IdeAction::GotoLine),
+                ] {
+                    if ui.button(label).clicked() {
+                        *picked.borrow_mut() = Some(a);
+                        ui.close_menu();
+                    }
+                }
+            });
+            ui.menu_button("查看", |ui| {
+                let wrap_label = if self.ide.wrap {
+                    "自动换行（开）　Alt+Z"
+                } else {
+                    "自动换行（关）　Alt+Z"
+                };
+                for (label, a) in [
+                    ("命令面板　Ctrl+Shift+P", IdeAction::TogglePalette),
+                    (wrap_label, IdeAction::ToggleWrap),
+                ] {
+                    if ui.button(label).clicked() {
+                        *picked.borrow_mut() = Some(a);
+                        ui.close_menu();
+                    }
+                }
+            });
+            ui.menu_button("工具", |ui| {
+                for (label, a) in [
+                    ("应用修改到向导", IdeAction::Apply),
+                    ("重新生成脚本（丢弃编辑）", IdeAction::Regenerate),
+                    ("转到构建页", IdeAction::OpenBuild),
+                ] {
+                    if ui.button(label).clicked() {
+                        *picked.borrow_mut() = Some(a);
+                        ui.close_menu();
+                    }
+                }
+            });
+            ui.menu_button("帮助", |ui| {
+                if ui.button("MI 脚本语法说明").clicked() {
+                    *picked.borrow_mut() = Some(IdeAction::HelpSyntax);
+                    ui.close_menu();
+                }
+            });
+        });
+        if let Some(a) = picked.into_inner() {
+            actions.push(a);
+        }
+
+        // ---- 标签栏（VSCode 编辑器标签：文件图标 + 名称 + 未保存圆点）----
+        egui::Frame::none()
+            .fill(FIELD)
+            .rounding(8.0)
+            .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
+            .inner_margin(egui::Margin::symmetric(10.0, 5.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    egui::Frame::none()
+                        .fill(scriptide::VSC_BG)
+                        .rounding(6.0)
+                        .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let (r, _) =
+                                    ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+                                let p = ui.painter_at(r);
+                                p.rect_filled(r, 3.0, scriptide::VSC_SECTION);
+                                p.text(
+                                    r.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    "T",
+                                    FontId::proportional(10.0),
+                                    Color32::WHITE,
+                                );
+                                ui.label(
+                                    egui::RichText::new(&tab_label).color(TEXT).size(13.0).strong(),
+                                );
+                                if self.script_dirty {
+                                    // VSCode 未保存圆点
+                                    let (r, _) =
+                                        ui.allocate_exact_size(Vec2::new(9.0, 9.0), Sense::hover());
+                                    ui.painter_at(r).circle_filled(r.center(), 3.5, AMBER);
+                                }
+                            });
+                        });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // 面包屑：文件 › [当前节]（VSCode Breadcrumbs）
+                        if let Some((sec, _)) =
+                            scriptide::breadcrumb_section(&self.script_text, caret_line_prev)
+                        {
+                            ui.label(
+                                egui::RichText::new(format!("› [{sec}]"))
+                                    .color(Color32::from_rgb(140, 146, 160))
+                                    .size(11.5),
+                            );
+                        }
+                        ui.label(
+                            egui::RichText::new(&tab_label)
+                                .color(Color32::from_rgb(120, 126, 140))
+                                .size(11.5),
+                        );
+                    });
+                });
+            });
+
+        // ---- 工具栏（快捷操作行）----
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if self.script_dirty {
+                chip(ui, "有未应用的修改", AMBER);
+            }
+            if ui.add(small_button("应用修改到向导")).clicked() {
+                actions.push(IdeAction::Apply);
+            }
+            if ui.add(small_button("保存脚本")).clicked() {
+                actions.push(IdeAction::Save);
+            }
+            if ui.add(small_button("另存为脚本...")).clicked() {
+                actions.push(IdeAction::SaveAs);
+            }
+            if ui.add(small_button("重新生成（丢弃编辑）")).clicked() {
+                actions.push(IdeAction::Regenerate);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(
+                        "Ctrl+F 查找 · Ctrl+H 替换 · Ctrl+G 转到行 · Ctrl+Shift+P 命令面板",
+                    )
+                    .color(Color32::from_rgb(110, 116, 130))
+                    .size(11.0),
+                );
+            });
+        });
+        ui.add_space(6.0);
+
+        // ---- 编辑器主体（VSCode Dark+ 代码区 + 行号 + 高亮层 + minimap）----
+        let query = self.ide.find.query.clone();
+        let matches = if query.is_empty() {
+            Vec::new()
+        } else {
+            scriptide::find_matches(&self.script_text, &query, self.ide.find.case_sensitive)
+        };
+        let n_matches = matches.len();
+        // 查询变化时回到第一个命中（VSCode 行为：输入即跳转）
+        if self.ide.find.query != self.ide.last_query {
+            self.ide.last_query = self.ide.find.query.clone();
+            if n_matches > 0 {
+                self.ide.find.current = 0;
+            }
+        }
+        let hl = scriptide::Highlight {
+            current: if matches.is_empty() {
+                None
+            } else {
+                Some(self.ide.find.current.min(matches.len() - 1))
+            },
+            matches,
+            caret_line: Some(caret_line_prev),
+            error_line: error_pos.map(|(l, _)| l),
+        };
+        egui::Frame::none()
+            .fill(scriptide::VSC_BG)
+            .rounding(8.0)
+            .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
+            .inner_margin(egui::Margin::same(8.0))
+            .show(ui, |ui| {
+                // 编辑前采集编辑意图（供自动缩进 / 括号补全后处理）
+                let events = ctx.input(|i| i.events.clone());
+                let intents = scriptide::EditIntents::collect(&events);
+
+                let mut layouter =
+                    |ui: &egui::Ui, text: &str, wrap_width: f32| -> std::sync::Arc<egui::Galley> {
+                        let mut job = scriptide::mi_script_job_hl(text, Some(caret_line_prev));
+                        job.wrap.max_width = if self.ide.wrap { wrap_width } else { f32::INFINITY };
+                        ui.fonts(|f| f.layout_job(job))
+                    };
+                let editor_w = (ui.available_width() - 104.0).max(320.0);
+                let out = ui
+                    .horizontal(|ui| {
+                        let out = egui::TextEdit::multiline(&mut self.script_text)
+                            .id_salt("mi-script-editor")
+                            .font(egui::TextStyle::Monospace)
+                            .code_editor()
+                            .desired_rows(22)
+                            .desired_width(editor_w)
+                            .frame(false)
+                            .layouter(&mut layouter)
+                            .show(ui);
+                        // 高亮层：当前行 / 查找命中 / 错误行
+                        scriptide::paint_highlight(ui, &out, &self.script_text, &hl);
+                        // minimap（点击跳行，VSCode 右侧缩略图）
+                        let mm = scriptide::minimap(
+                            ui,
+                            &self.script_text,
+                            caret_line_prev,
+                            92.0,
+                            out.response.rect.height(),
+                            accent,
+                        );
+                        if let Some(line) = mm {
+                            actions.push(IdeAction::JumpLine(line));
+                        }
+                        self.ide.editor_rect = out.text_clip_rect;
+                        out
+                    })
+                    .inner;
+
+                // 自动缩进 / Tab 转空格 / 括号引号补全与跨越（后处理，仅编辑器聚焦时）
+                if out.response.has_focus() {
+                    if let Some(caret) = scriptide::caret_char(&out) {
+                        let edit = if intents.enter {
+                            scriptide::auto_indent_after_newline(&self.script_text, caret, 4)
+                        } else if intents.tab {
+                            scriptide::expand_tab_at(&self.script_text, caret, 4)
+                        } else if let Some(c) = intents.quote {
+                            if self.script_text.chars().nth(caret) == Some(c) {
+                                scriptide::skip_over_closer(&self.script_text, caret, c)
+                            } else {
+                                scriptide::auto_close_pair(&self.script_text, caret, c)
+                            }
+                        } else if let Some(c) = intents.open {
+                            scriptide::auto_close_pair(&self.script_text, caret, c)
+                        } else if let Some(c) = intents.closer {
+                            scriptide::skip_over_closer(&self.script_text, caret, c)
+                        } else {
+                            None
+                        };
+                        if let Some((new_text, new_caret)) = edit {
+                            self.script_text = new_text;
+                            let mut st = out.state.clone();
+                            st.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+                                egui::text::CCursor::new(new_caret),
+                            )));
+                            st.store(ctx, editor_id);
+                        }
+                    }
+                }
+            });
+
+        // ---- 浮层：查找/替换、命令面板、转到行 ----
+        let editor_rect = self.ide.editor_rect;
+        if let Some(a) = scriptide::show_find(ctx, &mut self.ide.find, editor_rect, n_matches) {
+            actions.push(a);
+        }
+        let cmds = Self::ide_commands();
+        if let Some(a) = scriptide::show_palette(ctx, &mut self.ide.palette, &cmds) {
+            actions.push(a);
+        }
+        if let Some(line) = scriptide::show_goto(ctx, &mut self.ide.goto) {
+            actions.push(IdeAction::JumpLine(line));
+        }
+
+        // ---- 执行动作（统一入口）----
+        for a in actions {
+            self.handle_ide_action(a, ctx, editor_id);
+        }
+
+        // ---- 状态栏（VSCode 蓝条：Ln/Col、选中、缩进、换行、编码、语言）----
+        let cursor = egui::TextEdit::load_state(ctx, editor_id)
+            .and_then(|st| st.cursor.char_range());
+        let caret_now = cursor.map(|r| r.primary.index).unwrap_or(0);
+        let sel = cursor
+            .map(|r| r.primary.index.abs_diff(r.secondary.index))
+            .unwrap_or(0);
+        let (ln, col) = scriptide::line_col_of_char(
+            &self.script_text,
+            caret_now.min(self.script_text.chars().count()),
+        );
+        let (indent_label, _) = scriptide::detect_indent(&self.script_text);
+        ui.add_space(4.0);
+        scriptide::status_bar(
+            ui,
+            &scriptide::IdeStatus {
+                tab_label: &tab_label,
+                line: ln,
+                col,
+                sel,
+                indent_label,
+                errors: usize::from(has_error),
+                wrap: self.ide.wrap,
+                dirty: self.script_dirty,
+            },
+            accent,
+        );
+
+        // ---- 问题面板（VSCode Problems）：解析失败时显示首个错误与位置 ----
+        if let Err(e) = &parse_result {
+            ui.add_space(4.0);
+            egui::Frame::none()
+                .fill(Color32::from_rgba_unmultiplied(90, 50, 20, 70))
+                .rounding(8.0)
+                .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+                .show(ui, |ui| {
+                    let pos_txt = error_pos
+                        .map(|(l, c)| format!("行 {l}, 列 {c}"))
+                        .unwrap_or_else(|| "位置未知".to_string());
+                    ui.label(
+                        egui::RichText::new(format!("× 脚本解析错误（{pos_txt}）：{e}"))
+                            .color(AMBER)
+                            .size(12.0),
+                    );
+                });
+        }
+
+        // 脏检测：脚本内容与当前配置的序列化结果不同即视为脏（配置很小，序列化开销可忽略）
+        let regenerated = toml::to_string_pretty(&self.cfg).unwrap_or_default();
+        self.script_dirty = !self.script_text.is_empty() && self.script_text != regenerated;
+    }
+
+    /// 编辑器标签名（项目文件名，未保存时用应用名 slug 兜底）。
+    fn tab_label(&self) -> String {
+        self.project_file
             .as_ref()
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
             .unwrap_or_else(|| {
@@ -1190,48 +1576,30 @@ impl BuilderApp {
                     },
                 );
                 format!("{slug}.mi")
-            });
-        egui::Frame::none()
-            .fill(FIELD)
-            .rounding(8.0)
-            .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
-            .inner_margin(egui::Margin::symmetric(10.0, 6.0))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(format!("  {tab_name}"))
-                            .color(if self.script_dirty { TEXT } else { TEXT })
-                            .size(13.5)
-                            .strong(),
-                    );
-                    if self.script_dirty {
-                        // VSCode 未保存圆点
-                        let (r, _) = ui.allocate_exact_size(Vec2::new(10.0, 10.0), Sense::hover());
-                        ui.painter_at(r).circle_filled(r.center(), 4.0, AMBER);
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            egui::RichText::new("MI 脚本 · TOML 语法 · 与向导互通")
-                                .color(Color32::from_rgb(110, 116, 130))
-                                .size(11.0),
-                        );
-                    });
-                });
-            });
+            })
+    }
 
-        // 工具栏（VSCode 活动条风格操作）：重新生成 / 应用到向导 / 保存 / 另存为
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            if self.script_dirty {
-                chip(ui, "有未应用的修改", AMBER);
-            }
-            if ui.add(small_button("重新生成（丢弃编辑）")).clicked() {
-                self.apply_reg_to_cfg();
-                self.script_text = toml::to_string_pretty(&self.cfg)
-                    .unwrap_or_else(|e| format!("# 序列化失败: {e}"));
-                self.script_dirty = false;
-            }
-            if ui.add(small_button("应用修改到向导")).clicked() {
+    /// 命令面板命令表（标签, 说明, 动作）。
+    fn ide_commands() -> Vec<(&'static str, &'static str, IdeAction)> {
+        vec![
+            ("应用修改到向导", "回填向导各页", IdeAction::Apply),
+            ("保存脚本", "Ctrl+S", IdeAction::Save),
+            ("另存为脚本...", "", IdeAction::SaveAs),
+            ("打开项目...", "", IdeAction::OpenProject),
+            ("重新生成脚本（丢弃编辑）", "", IdeAction::Regenerate),
+            ("查找", "Ctrl+F", IdeAction::ToggleFind),
+            ("替换", "Ctrl+H", IdeAction::ToggleReplace),
+            ("转到行", "Ctrl+G", IdeAction::GotoLine),
+            ("自动换行", "Alt+Z", IdeAction::ToggleWrap),
+            ("转到构建页", "", IdeAction::OpenBuild),
+            ("MI 脚本语法说明", "", IdeAction::HelpSyntax),
+        ]
+    }
+
+    /// 执行一个 IDE 动作（菜单栏 / 工具栏 / 命令面板 / 查找小部件 / minimap 共用）。
+    fn handle_ide_action(&mut self, a: IdeAction, ctx: &egui::Context, editor_id: egui::Id) {
+        match a {
+            IdeAction::Apply => {
                 match toml::from_str::<Config>(&self.script_text) {
                     Ok(cfg) => {
                         self.cfg = cfg;
@@ -1251,16 +1619,14 @@ impl BuilderApp {
                     Err(e) => self.set_flash(format!("脚本解析失败: {e}")),
                 }
             }
-            if ui.add(small_button("保存脚本")).clicked() {
-                match self.project_file.clone() {
-                    Some(p) => {
-                        let _ = std::fs::write(&p, self.script_text.as_str());
-                        self.set_flash(format!("已保存 {}", p.display()));
-                    }
-                    None => self.save_project(),
+            IdeAction::Save => match self.project_file.clone() {
+                Some(p) => {
+                    let _ = std::fs::write(&p, self.script_text.as_str());
+                    self.set_flash(format!("已保存 {}", p.display()));
                 }
-            }
-            if ui.add(small_button("另存为脚本...")).clicked() {
+                None => self.save_project(),
+            },
+            IdeAction::SaveAs => {
                 let slug = miedit_core::util::slugify(
                     if self.cfg.app.name.trim().is_empty() {
                         "project"
@@ -1278,93 +1644,123 @@ impl BuilderApp {
                     self.set_flash("脚本已另存");
                 }
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    egui::RichText::new("「应用修改」会把脚本内容回填到向导各页")
-                        .color(Color32::from_rgb(110, 116, 130))
-                        .size(11.5),
-                );
-            });
-        });
-        ui.add_space(6.0);
-
-        // 编辑器主体（VSCode 风格：深色代码区 + MI 脚本语法高亮 + 行号）
-        egui::Frame::none()
-            .fill(Color32::from_rgb(10, 12, 17))
-            .rounding(10.0)
-            .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
-            .inner_margin(egui::Margin::same(10.0))
-            .show(ui, |ui| {
-                let mut layouter =
-                    |ui: &egui::Ui, text: &str, wrap_width: f32| -> std::sync::Arc<egui::Galley> {
-                        let mut job = mi_script_job(text);
-                        job.wrap.max_width = wrap_width;
-                        ui.fonts(|f| f.layout_job(job))
-                    };
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.script_text)
-                        .id_salt("mi-script-editor")
-                        .font(egui::TextStyle::Monospace)
-                        .code_editor()
-                        .desired_rows(22)
-                        .desired_width(ui.available_width() - 16.0)
-                        .frame(false)
-                        .layouter(&mut layouter),
-                );
-            });
-
-        // 状态栏（VSCode 状态条）：行数 / 字符数 / 实时校验结果
-        let line_count = self.script_text.lines().count().max(if self.script_text.is_empty() { 0 } else { 1 });
-        let parse_ok = toml::from_str::<Config>(&self.script_text).is_ok();
-        ui.add_space(6.0);
-        egui::Frame::none()
-            .fill(FIELD)
-            .rounding(8.0)
-            .inner_margin(egui::Margin::symmetric(10.0, 5.0))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(format!(" {} 行 · {} 字符 ", line_count, self.script_text.chars().count()))
-                            .color(Color32::from_rgb(110, 116, 130))
-                            .size(11.5),
-                    );
-                    ui.separator();
-                    let (mark, color) = if parse_ok {
-                        ("MI 脚本校验：通过", GREEN)
-                    } else {
-                        ("MI 脚本校验：失败（检查下方提示）", AMBER)
-                    };
-                    ui.label(egui::RichText::new(mark).color(color).size(11.5).strong());
-                    if self.script_dirty {
-                        ui.separator();
-                        ui.label(
-                            egui::RichText::new("未应用")
-                                .color(AMBER)
-                                .size(11.5),
-                        );
+            IdeAction::Regenerate => {
+                self.apply_reg_to_cfg();
+                self.script_text = toml::to_string_pretty(&self.cfg)
+                    .unwrap_or_else(|e| format!("# 序列化失败: {e}"));
+                self.script_dirty = false;
+            }
+            IdeAction::OpenProject => {
+                if let Some(p) = rfd::FileDialog::new()
+                    .add_filter("MI 脚本（.mi）", &["mi", "toml"])
+                    .pick_file()
+                {
+                    if let Err(e) = self.open_project(&p, ctx) {
+                        self.set_flash(format!("打开项目失败: {e:#}"));
                     }
-                });
-            });
-
-        // 问题面板（VSCode Problems）：解析失败时显示首个错误
-        if let Err(e) = toml::from_str::<Config>(&self.script_text) {
-            ui.add_space(4.0);
-            egui::Frame::none()
-                .fill(Color32::from_rgba_unmultiplied(90, 50, 20, 70))
-                .rounding(8.0)
-                .inner_margin(egui::Margin::symmetric(10.0, 6.0))
-                .show(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new(format!("× 脚本解析错误：{e}"))
-                            .color(AMBER)
-                            .size(12.0),
+                }
+            }
+            IdeAction::OpenBuild => {
+                self.pending_jump = Some(Step::Build as usize);
+            }
+            IdeAction::ToggleFind => {
+                self.ide.find.open = true;
+                self.ide.find.replace_open = false;
+                self.ide.find.want_focus = true;
+            }
+            IdeAction::ToggleReplace => {
+                self.ide.find.open = true;
+                self.ide.find.replace_open = true;
+                self.ide.find.want_focus = true;
+            }
+            IdeAction::GotoLine => {
+                self.ide.goto.open = true;
+            }
+            IdeAction::ToggleWrap => {
+                self.ide.wrap = !self.ide.wrap;
+            }
+            IdeAction::TogglePalette => {
+                self.ide.palette.open = !self.ide.palette.open;
+                self.ide.palette.query.clear();
+                self.ide.palette.selected = 0;
+            }
+            IdeAction::CaseToggle => {
+                self.ide.find.case_sensitive = !self.ide.find.case_sensitive;
+            }
+            IdeAction::CloseFind => {
+                self.ide.find.open = false;
+            }
+            IdeAction::FindNext | IdeAction::FindPrev => {
+                let ms = scriptide::find_matches(
+                    &self.script_text,
+                    &self.ide.find.query,
+                    self.ide.find.case_sensitive,
+                );
+                if ms.is_empty() {
+                    self.set_flash("查找：无结果");
+                } else {
+                    let n = ms.len();
+                    self.ide.find.current = if a == IdeAction::FindNext {
+                        (self.ide.find.current + 1) % n
+                    } else {
+                        self.ide.find.current.checked_sub(1).unwrap_or(n - 1)
+                    };
+                    let (s0, e0) = ms[self.ide.find.current.min(n - 1)];
+                    scriptide::select_range(ctx, editor_id, s0, e0);
+                }
+            }
+            IdeAction::ReplaceOne => {
+                let ms = scriptide::find_matches(
+                    &self.script_text,
+                    &self.ide.find.query,
+                    self.ide.find.case_sensitive,
+                );
+                if ms.is_empty() {
+                    self.set_flash("替换：无结果");
+                } else {
+                    let idx = self.ide.find.current.min(ms.len() - 1);
+                    let (new_text, caret) = scriptide::replace_one(
+                        &self.script_text,
+                        &ms,
+                        idx,
+                        &self.ide.find.replacement,
                     );
-                });
+                    self.script_text = new_text;
+                    scriptide::set_caret(ctx, editor_id, caret);
+                }
+            }
+            IdeAction::ReplaceAll => {
+                let ms = scriptide::find_matches(
+                    &self.script_text,
+                    &self.ide.find.query,
+                    self.ide.find.case_sensitive,
+                );
+                let n = ms.len();
+                if n == 0 {
+                    self.set_flash("替换：无结果");
+                } else {
+                    self.script_text = scriptide::replace_matches(
+                        &self.script_text,
+                        &ms,
+                        &self.ide.find.replacement,
+                    );
+                    self.set_flash(format!("已替换 {n} 处"));
+                }
+            }
+            IdeAction::JumpLine(line) => {
+                // 选中整行并定位（TextEdit 会自动滚动到光标）
+                let total = self.script_text.chars().count();
+                let start = scriptide::goto_line_char(&self.script_text, line);
+                let end = scriptide::goto_line_char(&self.script_text, line + 1);
+                let end = if end <= start { total } else { end.saturating_sub(1) };
+                scriptide::select_range(ctx, editor_id, start, end);
+            }
+            IdeAction::HelpSyntax => {
+                self.set_flash(
+                    "MI 脚本（.mi）＝ TOML 语法：[节头] 分节；键 = \"值\"；# 注释；数组 [a, b]；布尔 true/false。与向导各页完全互通。",
+                );
+            }
         }
-
-        // 脏检测：脚本内容与当前配置的序列化结果不同即视为脏（配置很小，序列化开销可忽略）
-        let regenerated = toml::to_string_pretty(&self.cfg).unwrap_or_default();
-        self.script_dirty = !self.script_text.is_empty() && self.script_text != regenerated;
     }
 
     fn page_build(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -1873,202 +2269,5 @@ impl eframe::App for BuilderApp {
                         ui.add_space(20.0);
                     });
             });
-    }
-}
-
-// ---------------------------------------------------------------------------
-// MI 脚本语法高亮（步骤 29，VSCode 式轻量 IDE：只需适配 .mi / TOML 语法）
-// ---------------------------------------------------------------------------
-
-/// MI 脚本默认文本色
-const MI_TEXT: Color32 = Color32::from_rgb(212, 217, 226);
-/// 行号（gutter）色
-const MI_LINENO: Color32 = Color32::from_rgb(86, 92, 108);
-/// 注释色（VSCode 绿）
-const MI_COMMENT: Color32 = Color32::from_rgb(106, 153, 130);
-/// 节头 `[section]` / `[[array]]` 色（VSCode 蓝）
-const MI_SECTION: Color32 = Color32::from_rgb(86, 156, 214);
-/// 键名色（VSCode 浅蓝）
-const MI_KEY: Color32 = Color32::from_rgb(156, 220, 254);
-/// 字符串色（VSCode 橙）
-const MI_STRING: Color32 = Color32::from_rgb(206, 145, 120);
-/// 数值色（VSCode 紫）
-const MI_NUMBER: Color32 = Color32::from_rgb(197, 134, 192);
-/// 布尔色（VSCode 蓝）
-const MI_BOOL: Color32 = Color32::from_rgb(86, 156, 214);
-
-/// 构建 MI 脚本（TOML 语法）的着色布局：逐行行号 + 注释/节头/键/字符串/
-/// 数值/布尔分色。行号与正文在同一布局里生成，天然对齐（无独立 gutter）。
-/// 纯函数，供脚本页 `TextEdit::layouter` 使用；编辑缓冲不受影响。
-pub fn mi_script_job(text: &str) -> egui::text::LayoutJob {
-    let font = egui::FontId::monospace(13.0);
-    let fmt = |color: Color32| egui::text::TextFormat {
-        font_id: font.clone(),
-        color,
-        ..Default::default()
-    };
-    let mut job = egui::text::LayoutJob::default();
-    for (i, line) in text.split('\n').enumerate() {
-        job.append(&format!("{:>3}  ", i + 1), 0.0, fmt(MI_LINENO));
-        let trimmed = line.trim_start();
-        if trimmed.starts_with('#') {
-            job.append(line, 0.0, fmt(MI_COMMENT));
-        } else if trimmed.starts_with('[') {
-            job.append(line, 0.0, fmt(MI_SECTION));
-        } else {
-            match line.find('=') {
-                Some(eq) if !line[..eq].trim().is_empty() => {
-                    job.append(&line[..eq], 0.0, fmt(MI_KEY));
-                    job.append("=", 0.0, fmt(MI_TEXT));
-                    push_mi_value(&line[eq + 1..], &mut job, &font);
-                }
-                _ => job.append(line, 0.0, fmt(MI_TEXT)),
-            }
-        }
-        job.append("\n", 0.0, fmt(MI_TEXT));
-    }
-    job
-}
-
-/// 值部分分色：字符串（引号内的 = 等字符不算分隔）整段上色，
-/// 其余按数值 / 布尔 / 默认色。多行字符串按行独立处理（轻量 IDE 定位）。
-fn push_mi_value(rest: &str, job: &mut egui::text::LayoutJob, font: &egui::FontId) {
-    let fmt = |color: Color32| egui::text::TextFormat {
-        font_id: font.clone(),
-        color,
-        ..Default::default()
-    };
-    let mut start = 0usize;
-    let mut in_str: Option<char> = None;
-    let mut i = 0usize;
-    for c in rest.chars() {
-        let end = i + c.len_utf8();
-        match in_str {
-            Some(q) => {
-                if c == q {
-                    job.append(&rest[start..end], 0.0, fmt(MI_STRING));
-                    start = end;
-                    in_str = None;
-                }
-            }
-            None => {
-                if c == '"' || c == '\'' {
-                    push_mi_token(&rest[start..i], job, &fmt);
-                    start = i;
-                    in_str = Some(c);
-                }
-            }
-        }
-        i = end;
-    }
-    push_mi_token(&rest[start..], job, &fmt);
-}
-
-/// 单个裸 token 分色：数值 / 布尔 / 默认。
-fn push_mi_token(
-    tok: &str,
-    job: &mut egui::text::LayoutJob,
-    fmt: &dyn Fn(Color32) -> egui::text::TextFormat,
-) {
-    if tok.is_empty() {
-        return;
-    }
-    let t = tok.trim();
-    if t.parse::<f64>().is_ok() {
-        job.append(tok, 0.0, fmt(MI_NUMBER));
-    } else if t == "true" || t == "false" {
-        job.append(tok, 0.0, fmt(MI_BOOL));
-    } else {
-        job.append(tok, 0.0, fmt(MI_TEXT));
-    }
-}
-
-#[cfg(test)]
-mod script_ide_tests {
-    use super::*;
-
-    /// 段颜色序列辅助：取 job 中每段的颜色与文本。
-    fn colored(job: &egui::text::LayoutJob) -> Vec<(Color32, String)> {
-        job.sections
-            .iter()
-            .map(|sec| {
-                let text = job.text[sec.byte_range.clone()].to_string();
-                (sec.format.color, text)
-            })
-            .collect()
-    }
-
-    #[test]
-    fn mi_script_job_line_numbers_and_comment() {
-        let job = mi_script_job("# hello\n");
-        let parts = colored(&job);
-        // 第一段 = 行号 "  1  "（gutter 色）
-        assert_eq!(parts[0].0, MI_LINENO);
-        assert_eq!(parts[0].1, "  1  ");
-        // 第二段 = 注释行（注释色）
-        assert_eq!(parts[1].0, MI_COMMENT);
-        assert_eq!(parts[1].1, "# hello");
-    }
-
-    #[test]
-    fn mi_script_job_section_key_string_number_bool() {
-        let src = "[app]\nname = \"Demo App\"\nversion = 1\nenabled = true\n";
-        let job = mi_script_job(src);
-        let parts = colored(&job);
-        let find = |needle: &str| -> Color32 {
-            parts
-                .iter()
-                .find(|(_, t)| t == needle)
-                .map(|(c, _)| *c)
-                .unwrap_or_else(|| panic!("段未找到: {needle}"))
-        };
-        assert_eq!(find("[app]"), MI_SECTION);
-        assert_eq!(find("name "), MI_KEY);
-        assert_eq!(find("\"Demo App\""), MI_STRING);
-        assert_eq!(find(" 1"), MI_NUMBER);
-        assert_eq!(find(" true"), MI_BOOL);
-        // 行号与正文段数一致：5 行（含末尾换行）→ 5 个行号段
-        let lineno_count = parts.iter().filter(|(c, _)| *c == MI_LINENO).count();
-        assert_eq!(lineno_count, 5);
-    }
-
-    #[test]
-    fn mi_script_job_hash_inside_string_not_comment() {
-        // 行以键开头，字符串内的 # 不应把内容误判为注释
-        let src = "title = \"a # b\"\n";
-        let job = mi_script_job(src);
-        let parts = colored(&job);
-        assert!(
-            parts.iter().any(|(c, t)| *c == MI_KEY && t.contains("title")),
-            "键名未识别"
-        );
-        assert!(parts.iter().any(|(c, _)| *c == MI_STRING), "字符串未识别");
-        assert!(
-            !parts.iter().any(|(c, _)| *c == MI_COMMENT),
-            "字符串内 # 误判为注释"
-        );
-    }
-
-    #[test]
-    fn mi_script_job_plain_line_default_color() {
-        let job = mi_script_job("\nplain line\n");
-        let parts = colored(&job);
-        assert!(
-            parts.iter().any(|(c, t)| *c == MI_TEXT && t == "plain line"),
-            "无等号行应走默认色"
-        );
-    }
-
-    #[test]
-    fn mi_script_job_line_number_count_matches_lines() {
-        // 3 行内容 + 尾随换行产生第 4 个空行（与 VSCode 一样给末行编号）
-        let src = "a = 1\nb = 2\nc = 3\n";
-        let job = mi_script_job(src);
-        let n = job
-            .sections
-            .iter()
-            .filter(|sec| sec.format.color == MI_LINENO)
-            .count();
-        assert_eq!(n, 4);
     }
 }

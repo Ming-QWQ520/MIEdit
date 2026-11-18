@@ -8,6 +8,7 @@
 
 mod app;
 mod preview;
+mod scriptide;
 
 use anyhow::Result;
 use eframe::egui::{self, Color32};
