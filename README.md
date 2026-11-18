@@ -48,6 +48,7 @@
 | **命令行安装** | `--silent` `--dir=` `--components=` `--no-shortcuts` `--lang=` `--repair` `--help` `--version`，退出码 0/1/2（NSIS `/S` + Inno `/COMPONENTS` 语义） |
 | **单实例互斥** | NSIS CreateMutex 惯例 / Inno `AppMutex` 对齐：安装器/卸载器 `Global\MIEDIT-<app_id>[-uninstall]` 命名互斥，已有实例运行时 GUI 弹框/静默日志 + 退出（多会话覆盖） |
 | **语言命令行覆盖** | NSIS `/LANG=<十进制 LCID>` 语义：`--lang=2052` / `/LANG=1033` / `0x` 十六进制 / 语言 id 均可，GUI+静默同生效，优先于自动预选与清单记录语言，无效值宽容回退 |
+| **UAC 执行级别清单** | NSIS `RequestExecutionLevel` 对齐：`install.request_execution_level = user/highest/admin`（缺省按 per_machine 推导），编译器向安装器/卸载器 EXE 嵌入 RT_MANIFEST（requestedExecutionLevel + supportedOS Vista…Win11 + DPI/长路径感知），非法级别构建期报错 |
 | 运行中检测 | 安装前独占探测主程序占用，重试/继续 |
 | 升级检测 | 发现旧版本记录版本号并静默卸载后升级（`InstallDirRegKey` 式目录记忆） |
 | 权限 | `per_machine = true` 启动时自动 UAC 提权重启 |
@@ -193,9 +194,18 @@ files = [0, 2]                # 引用 [[files]] 规则索引；未被引用的�
 code = [                      # MI 脚本 v2 组件指令（NSIS Section 指令语义，可选）：
                               # 组件勾选后按序执行，未选不执行；失败记警告继续
                               # （run.abort_on_error = true 显式中止）
+                              # 指令集 9 条（NSIS 对齐）：run（Exec/ExecWait）/
+                              # write_reg / create_dir / delete_file / rename（Rename）/
+                              # copy_files（CopyFiles，目录树递归）/
+                              # write_ini（WriteINIStr，节键不区分大小写）/
+                              # sleep（Sleep 毫秒） / detail_print
   { op = "detail_print", text = "正在注册核心组件…" },
   { op = "create_dir", path = "$INSTDIR\\logs" },       # NSIS CreateDirectory
   { op = "delete_file", path = "$INSTDIR\\old.cfg" },   # NSIS Delete（缺失静默跳过）
+  { op = "write_ini", file = "$INSTDIR\\cfg.ini",       # NSIS WriteINIStr
+    section = "Main", key = "Mode", value = "fast" },
+  { op = "copy_files", from = "$INSTDIR\\docs",         # NSIS CopyFiles
+    to = "$APPDATA\\Demo\\docs" },
   { op = "write_reg", key = "HKCU\\Software\\Demo",     # NSIS WriteRegStr/WriteRegDWORD
     name = "Path", value = "$INSTDIR", type = "str" },  # type = "str"（默认）| "dword"
   { op = "run", cmd = "$INSTDIR\\setup.bat", args = "/q", abort_on_error = false },
@@ -240,7 +250,7 @@ crates/
 ## 测试
 
 ```bash
-cargo test --workspace    # 160 个单元测试：归档（含 LZMA/Brotli 压缩算法往返）/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/文件错误决策与提示信箱/重启替换/安装类型状态机/系统版本门槛/目录统计/组件过滤映射/slug/语言匹配与 LANGID 映射/多语言文案解析链/卸载器文案键集与解析链/卸载语言匹配索引/环境变量解析与 PATH 合并去重/卸载清单新旧兼容/修复入口与修复统计/包尾 v4 与卸载数据新旧格式/安装目录解析与根路径校验/盘符切换空间刷新回归/内置模板色板/CLI 组件参数解析/LANG 参数提取与 NSIS LCID 覆盖/压缩方式别名归一化/CRC 后台校验门/MI 脚本语法高亮与脚本 IDE 纯逻辑（查找/替换/字符字节换算/自动缩进/括号补全/命令面板过滤/面包屑/缩进检测）/MI 脚本 v2 组件指令（变量展开/校验/serde 往返/互斥名构造）
+cargo test --workspace    # 175 个单元测试：归档（含 LZMA/Brotli 压缩算法往返）/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/文件错误决策与提示信箱/重启替换/安装类型状态机/系统版本门槛/目录统计/组件过滤映射/slug/语言匹配与 LANGID 映射/多语言文案解析链/卸载器文案键集与解析链/卸载语言匹配索引/环境变量解析与 PATH 合并去重/卸载清单新旧兼容/修复入口与修复统计/包尾 v4 与卸载数据新旧格式/安装目录解析与根路径校验/盘符切换空间刷新回归/内置模板色板/CLI 组件参数解析/LANG 参数提取与 NSIS LCID 覆盖/压缩方式别名归一化/CRC 后台校验门/MI 脚本语法高亮与脚本 IDE 纯逻辑（查找/替换/字符字节换算/自动缩进/括号补全/命令面板过滤/面包屑/缩进检测）/MI 脚本 v2 组件指令（变量展开/校验/serde 往返/互斥名构造/UAC 执行级别与 manifest XML/CopyFiles 复制内核与自嵌套防护/INI 写入语义/磁盘空间预检判定）
 ```
 
 已在 Windows 10 x64 实机验证：CLI 与 GUI 构建链路、静默安装/卸载全清理、组件过滤生效、

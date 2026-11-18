@@ -11,6 +11,10 @@
 //! | `write_reg`    | `WriteRegStr`/`WriteRegDWORD` | 写注册表值（str/dword） |
 //! | `create_dir`   | `CreateDirectory`  | 创建目录（含父目录） |
 //! | `delete_file`  | `Delete`           | 删除文件（缺失静默跳过） |
+//! | `rename`       | `Rename`           | 同盘重命名/移动（目标已存在则失败，NSIS 同语义） |
+//! | `copy_files`   | `CopyFiles`        | 复制文件或整个目录树到目标 |
+//! | `write_ini`    | `WriteINIStr`      | 写 INI 节键值（节/键不区分大小写，Windows API 同语义） |
+//! | `sleep`        | `Sleep`            | 暂停指定毫秒 |
 //! | `detail_print` | `DetailPrint`      | 详情日志 |
 //!
 //! 路径与参数支持 NSIS 常量变量（`$INSTDIR`/`$DESKTOP`/`$SMPROGRAMS`…），
@@ -93,6 +97,39 @@ pub enum MiInstruction {
     DeleteFile {
         /// 文件路径（支持 NSIS 变量）
         path: String,
+    },
+    /// NSIS `Rename`：同盘重命名/移动文件。目标已存在时失败
+    /// （NSIS 同语义：不覆盖既有目标）；失败按 error flag 记警告继续。
+    Rename {
+        /// 源路径（支持 NSIS 变量）
+        from: String,
+        /// 目标路径（支持 NSIS 变量）
+        to: String,
+    },
+    /// NSIS `CopyFiles`：复制文件或整个目录树到目标。源不存在报错
+    /// （NSIS error flag 语义）；目标父目录自动创建，同名文件覆盖。
+    CopyFiles {
+        /// 源路径（文件或目录，支持 NSIS 变量）
+        from: String,
+        /// 目标路径（复制目录时为目标根，自动创建）
+        to: String,
+    },
+    /// NSIS `WriteINIStr`：写 INI 文件节键值。节/键匹配不区分大小写
+    /// （Windows `GetPrivateProfileString` 同语义）；文件不存在则创建。
+    WriteIni {
+        /// INI 文件路径（支持 NSIS 变量）
+        file: String,
+        /// 节名（不含方括号）
+        section: String,
+        /// 键名
+        key: String,
+        /// 值（支持 NSIS 变量）
+        value: String,
+    },
+    /// NSIS `Sleep`：暂停指定毫秒（脚本式等待外部进程落盘等场景）。
+    Sleep {
+        /// 毫秒数（NSIS `Sleep 1000` 语义）
+        ms: u64,
     },
     /// NSIS `DetailPrint`：向安装详情页/日志输出一行。
     DetailPrint {
@@ -252,6 +289,47 @@ pub fn validate(code: &[MiInstruction]) -> Vec<String> {
                     errs.push(format!("{at}: delete_file.path 为空"));
                 }
             }
+            MiInstruction::Rename { from, to } => {
+                if from.trim().is_empty() {
+                    errs.push(format!("{at}: rename.from 为空"));
+                }
+                if to.trim().is_empty() {
+                    errs.push(format!("{at}: rename.to 为空"));
+                }
+                if !from.trim().is_empty()
+                    && from.trim().eq_ignore_ascii_case(to.trim())
+                {
+                    errs.push(format!("{at}: rename.from 与 to 相同: {from}"));
+                }
+            }
+            MiInstruction::CopyFiles { from, to } => {
+                if from.trim().is_empty() {
+                    errs.push(format!("{at}: copy_files.from 为空"));
+                }
+                if to.trim().is_empty() {
+                    errs.push(format!("{at}: copy_files.to 为空"));
+                }
+                // 目标在源内部会自嵌套复制（CopyFiles 不允许，NSIS 同语义）
+                if let (Some(f), Some(t)) = (norm_path(from), norm_path(to)) {
+                    if t.starts_with(&format!("{f}\\")) {
+                        errs.push(format!(
+                            "{at}: copy_files.to 在 from 内部（会无限自复制）: {from} → {to}"
+                        ));
+                    }
+                }
+            }
+            MiInstruction::WriteIni { file, section, key, .. } => {
+                if file.trim().is_empty() {
+                    errs.push(format!("{at}: write_ini.file 为空"));
+                }
+                if section.trim().is_empty() {
+                    errs.push(format!("{at}: write_ini.section 为空"));
+                }
+                if key.trim().is_empty() {
+                    errs.push(format!("{at}: write_ini.key 为空"));
+                }
+            }
+            MiInstruction::Sleep { .. } => {}
             MiInstruction::DetailPrint { .. } => {}
         }
     }
@@ -277,8 +355,97 @@ pub fn describe(inst: &MiInstruction, vars: Option<&BTreeMap<String, String>>) -
         }
         MiInstruction::CreateDir { path } => ex(path),
         MiInstruction::DeleteFile { path } => ex(path),
+        MiInstruction::Rename { from, to } => format!("{} → {}", ex(from), ex(to)),
+        MiInstruction::CopyFiles { from, to } => format!("{} → {}", ex(from), ex(to)),
+        MiInstruction::WriteIni { file, section, key, value } => {
+            format!("{} [{}] {}={}", ex(file), ex(section), ex(key), ex(value))
+        }
+        MiInstruction::Sleep { ms } => format!("{ms}ms"),
         MiInstruction::DetailPrint { text } => ex(text),
     }
+}
+
+/// 路径归一（静态校验用）：反斜杠→正斜杠、去尾部分隔符、大小写不敏感。
+fn norm_path(p: &str) -> Option<String> {
+    let t = p.trim().replace('/', "\\");
+    let t = t.trim_end_matches('\\').to_ascii_lowercase();
+    if t.is_empty() {
+        None
+    } else {
+        Some(t)
+    }
+}
+
+/// NSIS `WriteINIStr` 的 INI 写入语义（Windows `GetPrivateProfileInt` 家族）：
+/// 节名与键名匹配**不区分大小写**；键已存在则原位替换，不存在则插入节内
+/// 末尾；节不存在则在文件末尾追加；空文件/新文件直接生成两行。
+/// 其余行原样保留（含注释与空行）。
+/// 纯函数：输入原文件内容，输出新内容；调用方负责读写磁盘。
+pub fn write_ini_str(content: &str, section: &str, key: &str, value: &str) -> String {
+    let section = section.trim();
+    let key = key.trim();
+    let sec_head = format!("[{section}]");
+    let sec_cmp = sec_head.to_ascii_lowercase();
+    let key_cmp = key.to_ascii_lowercase();
+
+    let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + 3);
+    let mut in_sec = false;
+    let mut sec_found = false;
+    let mut key_written = false;
+
+    for line in &lines {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            // 进入新节：若此前还在目标节里且键没写，先补键再开新节
+            if in_sec && !key_written {
+                out.push(format!("{key}={value}"));
+                key_written = true;
+            }
+            in_sec = trimmed.eq_ignore_ascii_case(&sec_cmp);
+            if in_sec {
+                sec_found = true;
+            }
+            out.push(line.clone());
+            continue;
+        }
+        if in_sec {
+            // 目标节内的键行：name=value（不区分大小写替换）
+            if let Some((k, _)) = trimmed.split_once('=') {
+                if k.trim().eq_ignore_ascii_case(&key_cmp) {
+                    out.push(format!("{key}={value}"));
+                    key_written = true;
+                    continue;
+                }
+            }
+        }
+        out.push(line.clone());
+    }
+    if in_sec && !key_written {
+        // 文件在目标节内结束：补键
+        out.push(format!("{key}={value}"));
+    }
+    if !sec_found {
+        // 节不存在（或文件为空）：末尾追加节头与键
+        if !out.is_empty() {
+            let last = out.last().map(|s| s.as_str()).unwrap_or("");
+            if !last.trim().is_empty() {
+                out.push(String::new());
+            }
+        }
+        out.push(sec_head);
+        out.push(format!("{key}={value}"));
+    }
+    let mut res = out.join("\n");
+    if !content.ends_with('\n') || content.is_empty() {
+        // 保持“无尾换行”形态；空内容时保证以换行收尾更友好
+        if content.is_empty() {
+            res.push('\n');
+        }
+    } else {
+        res.push('\n');
+    }
+    res
 }
 
 #[cfg(test)]
@@ -357,6 +524,117 @@ mod tests {
         let errs = validate(&code);
         assert_eq!(errs.len(), 1);
         assert!(errs[0].contains("delete_file.path"));
+    }
+
+    #[test]
+    fn test_validate_new_instructions() {
+        let code = vec![
+            MiInstruction::Rename { from: String::new(), to: "b".into() },
+            MiInstruction::Rename { from: "C:\\a".into(), to: "c:\\A".into() },
+            MiInstruction::CopyFiles { from: "".into(), to: String::new() },
+            MiInstruction::CopyFiles {
+                from: "$INSTDIR".into(),
+                to: "$INSTDIR\\sub".into(),
+            },
+            MiInstruction::WriteIni {
+                file: "a.ini".into(),
+                section: String::new(),
+                key: String::new(),
+                value: String::new(),
+            },
+            MiInstruction::Sleep { ms: 0 },
+        ];
+        let errs = validate(&code);
+        // ① rename.from 空；② rename 同名（不区分大小写）；③④ copy 双空各一；
+        // ⑤ copy 自嵌套；⑥⑦ write_ini section/key 空；⑧ sleep 合法（无错）
+        assert_eq!(errs.len(), 7, "实际: {errs:?}");
+        assert!(errs[0].contains("rename.from"));
+        assert!(errs[1].contains("rename.from 与 to 相同"));
+        assert!(errs[2].contains("copy_files.from"));
+        assert!(errs[3].contains("copy_files.to"));
+        assert!(errs[4].contains("copy_files.to 在 from 内部"));
+        assert!(errs[5].contains("write_ini.section"));
+        assert!(errs[6].contains("write_ini.key"));
+    }
+
+    #[test]
+    fn test_describe_new_instructions() {
+        let v = vars();
+        let rename = MiInstruction::Rename {
+            from: "$INSTDIR\\old.ini".into(),
+            to: "$INSTDIR\\new.ini".into(),
+        };
+        assert_eq!(
+            describe(&rename, Some(&v)),
+            "C:\\Apps\\Demo\\old.ini → C:\\Apps\\Demo\\new.ini"
+        );
+        let ini = MiInstruction::WriteIni {
+            file: "$INSTDIR\\cfg.ini".into(),
+            section: "Main".into(),
+            key: "Path".into(),
+            value: "$INSTDIR".into(),
+        };
+        assert_eq!(
+            describe(&ini, Some(&v)),
+            "C:\\Apps\\Demo\\cfg.ini [Main] Path=C:\\Apps\\Demo"
+        );
+        let sl = MiInstruction::Sleep { ms: 750 };
+        assert_eq!(describe(&sl, None), "750ms");
+    }
+
+    #[test]
+    fn test_serde_roundtrip_new_instructions() {
+        let code = vec![
+            MiInstruction::Rename { from: "a.ini".into(), to: "b.ini".into() },
+            MiInstruction::CopyFiles { from: "$INSTDIR\\plugins".into(), to: "$INSTDIR\\bak".into() },
+            MiInstruction::WriteIni {
+                file: "$INSTDIR\\cfg.ini".into(),
+                section: "Main".into(),
+                key: "Mode".into(),
+                value: "fast".into(),
+            },
+            MiInstruction::Sleep { ms: 500 },
+        ];
+        let json = serde_json::to_string(&code).unwrap();
+        assert!(json.contains(r#""op":"rename""#), "{json}");
+        assert!(json.contains(r#""op":"copy_files""#));
+        assert!(json.contains(r#""op":"write_ini""#));
+        assert!(json.contains(r#""op":"sleep""#));
+        let back: Vec<MiInstruction> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, code);
+        assert!(validate(&back).is_empty());
+    }
+
+    #[test]
+    fn test_write_ini_new_section_and_empty_file() {
+        // 空文件 → 直接生成节 + 键
+        let out = write_ini_str("", "Main", "Path", "C:\\x");
+        assert_eq!(out, "[Main]\nPath=C:\\x\n");
+        // 既有内容追加新节（前空行分隔）
+        let src = "[Old]\na=1\n";
+        let out = write_ini_str(src, "Main", "Path", "C:\\x");
+        assert_eq!(out, "[Old]\na=1\n\n[Main]\nPath=C:\\x\n");
+    }
+
+    #[test]
+    fn test_write_ini_existing_section_key() {
+        // 节存在、键存在：原位替换（节/键匹配不区分大小写，写入用调用方
+        // 键名写法——WritePrivateProfileString 语义），其余键保留
+        let src = "[Main]\nMode=slow\nPath=old\n[Other]\nk=v\n";
+        let out = write_ini_str(src, "main", "Path", "new");
+        assert_eq!(out, "[Main]\nMode=slow\nPath=new\n[Other]\nk=v\n");
+    }
+
+    #[test]
+    fn test_write_ini_insert_into_section_end() {
+        // 节存在、键不存在：插在节内末尾（下个节头前）
+        let src = "[Main]\nMode=slow\n[Other]\nk=v\n";
+        let out = write_ini_str(src, "Main", "Extra", "1");
+        assert_eq!(out, "[Main]\nMode=slow\nExtra=1\n[Other]\nk=v\n");
+        // 文件在目标节内结束：文件末尾补键
+        let src2 = "[Main]\nMode=slow\n";
+        let out2 = write_ini_str(src2, "Main", "Extra", "1");
+        assert_eq!(out2, "[Main]\nMode=slow\nExtra=1\n");
     }
 
     #[test]

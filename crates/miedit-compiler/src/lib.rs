@@ -440,6 +440,26 @@ pub fn build_package(
         ..vi_installer.clone()
     };
 
+    // 6.6 UAC 执行级别清单（NSIS RequestExecutionLevel 对齐，路线图步骤 36）：
+    //     安装器与卸载器 EXE 均嵌入 RT_MANIFEST（requestedExecutionLevel +
+    //     supportedOS + DPI/长路径感知）。未声明时按 per_machine 推导；
+    //     非法取值在构建期报错（NSIS 同语义）。非 Windows 构建跳过。
+    let exec_level = miedit_core::uac::parse_level(
+        cfg.install.request_execution_level.as_deref(),
+        cfg.app.per_machine,
+    )
+    .map_err(|e| anyhow::anyhow!("[install] {e}"))?;
+    let manifest_bytes = miedit_core::uac::manifest_xml(exec_level).into_bytes();
+    progress(&format!(
+        "UAC 执行级别: {}（{}）",
+        exec_level.attr(),
+        match exec_level {
+            miedit_core::uac::ExecLevel::User => "按用户安装",
+            miedit_core::uac::ExecLevel::Highest => "可提权则提权",
+            miedit_core::uac::ExecLevel::Admin => "全机安装",
+        }
+    ));
+
     // 卸载器 EXE 预写 VERSIONINFO：写临时文件 → UpdateResourceW(RT_VERSION) → 读回；
     // 失败（如非 Windows 环境）仅警告，回退为原始字节（不阻断构建）。
     let unp_bytes = {
@@ -447,7 +467,7 @@ pub fn build_package(
         let patched = (|| -> Result<Vec<u8>> {
             fs::write(&tmp, &unp_bytes)
                 .with_context(|| format!("写入卸载器临时文件失败: {}", tmp.display()))?;
-            icon::patch_pe_resources(&tmp, None, Some(&vi_uninstaller.build()))?;
+            icon::patch_pe_resources(&tmp, None, Some(&vi_uninstaller.build()), Some(&manifest_bytes))?;
             Ok(fs::read(&tmp)?)
         })();
         let _ = fs::remove_file(&tmp);
@@ -478,7 +498,7 @@ pub fn build_package(
         let patched = (|| -> Result<Vec<u8>> {
             fs::copy(&stub_path, &tmp)
                 .with_context(|| format!("复制 stub 失败: {}", tmp.display()))?;
-            icon::patch_pe_resources(&tmp, Some(&icon_ico), Some(&vi_installer.build()))?;
+            icon::patch_pe_resources(&tmp, Some(&icon_ico), Some(&vi_installer.build()), Some(&manifest_bytes))?;
             Ok(fs::read(&tmp)?)
         })();
         let _ = fs::remove_file(&tmp);

@@ -415,6 +415,20 @@ fn run_install(
             continue;
         }
 
+        // 磁盘空间预检（步骤 38，NSIS 磁盘满中止语义）：目标盘剩余空间
+        // 覆盖不住「新文件 + 余量」时中止（覆盖写可抵扣旧文件占位）。
+        // 剩余空间不可知（disk_free_space = None）时跳过检查不误报。
+        if entry.orig_len > 0 {
+            if let Some(free) = miedit_core::winutil::disk_free_space(&target) {
+                let existing = target.metadata().map(|m| m.len()).unwrap_or(0);
+                if miedit_core::files::is_space_insufficient(free, entry.orig_len, existing) {
+                    let msg = miedit_core::files::space_error_text(free, entry.orig_len, &rel);
+                    push_log(st, format!("错误: {msg}"));
+                    anyhow::bail!(msg);
+                }
+            }
+        }
+
         // 写入；失败时进入 NSIS 文件错误处置（步骤 8 重试/忽略/中止 + 步骤 9 重启替换）
         let do_write = || -> Result<()> {
             let mut out = BufWriter::new(fs::File::create(&target).with_context(|| {
@@ -735,6 +749,58 @@ fn execute_instruction(
                 }
                 Err(e) => return Err(format!("删除失败 {}: {e}", pb.display())),
             }
+            Ok(())
+        }
+        miedit_core::micmd::MiInstruction::Rename { from, to } => {
+            let from = PathBuf::from(ex(from).replace('\\', std::path::MAIN_SEPARATOR_STR).trim());
+            let to = PathBuf::from(ex(to).replace('\\', std::path::MAIN_SEPARATOR_STR).trim());
+            // NSIS Rename：目标已存在则失败（不覆盖既有目标）
+            if to.exists() {
+                return Err(format!(
+                    "重命名失败：目标已存在 {} → {}",
+                    from.display(),
+                    to.display()
+                ));
+            }
+            fs::rename(&from, &to).map_err(|e| {
+                format!("重命名失败 {} → {}: {e}", from.display(), to.display())
+            })?;
+            push_log(st, format!("已重命名: {} → {}", from.display(), to.display()));
+            Ok(())
+        }
+        miedit_core::micmd::MiInstruction::CopyFiles { from, to } => {
+            let from = PathBuf::from(ex(from).replace('\\', std::path::MAIN_SEPARATOR_STR).trim());
+            let to = PathBuf::from(ex(to).replace('\\', std::path::MAIN_SEPARATOR_STR).trim());
+            let n = miedit_core::files::copy_tree(&from, &to)
+                .map_err(|e| format!("复制失败 {} → {}: {e:#}", from.display(), to.display()))?;
+            push_log(st, format!("已复制: {} → {}（{n} 字节）", from.display(), to.display()));
+            Ok(())
+        }
+        miedit_core::micmd::MiInstruction::WriteIni { file, section, key, value } => {
+            let file = PathBuf::from(ex(file).replace('\\', std::path::MAIN_SEPARATOR_STR).trim());
+            let section = ex(section);
+            let key = ex(key);
+            let value = ex(value);
+            // 读 → 纯函数改写（缺失文件视为空内容，即新建）→ 写回
+            let content = match fs::read_to_string(&file) {
+                Ok(c) => c,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(e) => {
+                    return Err(format!("读取 INI 失败 {}: {e}", file.display()))
+                }
+            };
+            let new_content =
+                miedit_core::micmd::write_ini_str(&content, &section, &key, &value);
+            fs::write(&file, new_content)
+                .map_err(|e| format!("写入 INI 失败 {}: {e}", file.display()))?;
+            push_log(
+                st,
+                format!("已写入 INI: {} [{}] {}={}", file.display(), section, key, value),
+            );
+            Ok(())
+        }
+        miedit_core::micmd::MiInstruction::Sleep { ms } => {
+            std::thread::sleep(std::time::Duration::from_millis(*ms));
             Ok(())
         }
         // DetailPrint 已在上层输出（纯日志不执行）

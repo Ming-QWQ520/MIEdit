@@ -593,3 +593,51 @@
    LANGIDS 表做反查（1033→en-US→主标签匹配语言包），再叠 `0x`
    十六进制与语言 id 两种写法；无效值宽容回退（NSIS 不因 /LANG
    无效而拒绝安装），参数解析与语言匹配分两层、各配单测。
+
+## 二十三、落地清单 · 第二十批（NSIS 对齐 #19，0.1.0）
+
+**UAC 执行级别清单（步骤 36）+ MI 指令扩充（步骤 37）+ 安装期磁盘
+空间预检（步骤 38）**——NSIS `RequestExecutionLevel` /
+`Rename`/`CopyFiles`/`WriteINIStr`/`Sleep` / 磁盘满中止语义。
+
+1. **自研安装器不能指望系统"认得"你**：NSIS 安装器不写
+   `RequestExecutionLevel`（默认 none）也能正常弹 UAC，是因为
+   Windows 对历史 NSIS 安装器有启发式识别（installer detector）；
+   自研安装器没有这个待遇，空清单会被按普通程序对待。MIEdit 的
+   取舍是缺省显式声明（per_machine → requireAdministrator，按用户
+   → asInvoker）——把"系统猜"换成"我们自己说"，行为可预期。
+   `highest`（highestAvailable）三档照收，脚本写法同时接受 NSIS
+   关键字与 manifest 原生取值两种别名。
+2. **manifest 资源三件套同事务写**：图标/VERSIONINFO/RT_MANIFEST
+   在同一 `UpdateResourceW` 事务里完成（复用步骤 6 的链路），
+   `RT_MANIFEST` 是资源类型 ID 24——windows-rs 未绑定该常量，
+   `MAKEINTRESOURCEW(24)` 的本质就是整数值当指针（项目里
+   `make_int_res` 助手）。supportedOS 五档 GUID 以微软文档为准
+   （Win8 是 `4a2f28e3-…`，凭记忆写成 `4a2f28e8-` 会静默失效）；
+   DPI/长路径感知顺路写进同一清单（NSIS `ManifestDPIAware` 惯例）。
+3. **WriteINIStr 的语义细节在"不区分大小写"**：Windows INI API
+   节名/键名匹配都不区分大小写，但替换写入时保留**调用方的键名
+   写法**（不是沿用文件里的旧写法）；键已存在原位替换、不存在
+   插入节内末尾（下个节头前）、节不存在追加文件末尾、文件缺失
+   当作空文件新建。逻辑写成 `micmd::write_ini_str` 纯函数（内容进
+   内容出），磁盘读写留给执行器——五场景单测把边界全钉住。
+4. **CopyFiles 的自嵌套要双层防护**：`copy_files from=$INSTDIR
+   to=$INSTDIR\sub` 会把目标复制进自己再复制自己，无限膨胀。
+   静态校验（micmd::validate，归一化路径前缀检查）在构建器问题
+   面板提前报错；运行期 `copy_tree` 再用 canonicalize 防护一次
+   （静态校验看不见变量展开后的真实路径）。NSIS 对此也是报错
+   语义，双重检查不冲突。
+5. **磁盘满用预检而不是等写失败**：NSIS 是写失败才报错（abort/
+   retry 对话框），但写一半失败会留下半截文件；写盘前用
+   `GetDiskFreeSpaceExW` 预检（`free + 旧文件占用 < 新文件 + 8MB
+   余量` → 中止），覆盖写抵扣旧文件占位避免升级场景误报，剩余
+   空间不可知（None）时跳过不误报。判定进 `files::is_space_insufficient`
+   纯函数（saturating 算术防 u64 溢出），边界（恰好相等=足够）、
+   抵扣、溢出全部单测钉住。
+6. **指令创建的文件不自动回收是 NSIS 语义，不是缺陷**：端到端
+   卸载验证发现 `write_ini`/`copy_files` 的产物留在盘上——查
+   NSIS 行为一致：只有 `File` 安装的文件和 `WriteReg`/注册表类
+   有卸载链路，指令产物要脚本作者用 un Section 手工清理。MI 脚本
+   v2 没有 un Section，与 #18 教训 4（运行时记账）对齐的后续方向
+   是把 write_ini/copy/rename 的产物也登记进清单——本轮先保持
+   NSIS 同语义，记账升级留给下一批。

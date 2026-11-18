@@ -1,18 +1,24 @@
 //! PE 资源替换（Windows）：通过 `UpdateResourceW` 在**同一事务**中写入
-//! 图标资源（RT_ICON / RT_GROUP_ICON）与版本信息资源（RT_VERSION，
-//! VS_VERSIONINFO 字节序列由 `miedit_core::versioninfo` 构造）。
-//! 对齐 NSIS 的 SetIcon + `VIProductVersion` / `VIAddVersionKey` 能力。
+//! 图标资源（RT_ICON / RT_GROUP_ICON）、版本信息资源（RT_VERSION，
+//! VS_VERSIONINFO 字节序列由 `miedit_core::versioninfo` 构造）与应用
+//! 清单（RT_MANIFEST，类型 ID 24，UAC 执行级别等 XML 由
+//! `miedit_core::uac` 构造）。
+//! 对齐 NSIS 的 SetIcon + `VIProductVersion` / `VIAddVersionKey` +
+//! `RequestExecutionLevel` 能力。
 
 use anyhow::{bail, Result};
 use std::path::Path;
 
-/// 一次事务写入 PE 资源：`ico_bytes` 替换图标，`versioninfo` 写入 RT_VERSION #1。
-/// 两者都为 None 时不做任何事；任一写入失败则整个事务回滚（EndUpdateResource 不提交）。
+/// 一次事务写入 PE 资源：`ico_bytes` 替换图标，`versioninfo` 写入
+/// RT_VERSION #1，`manifest` 写入 RT_MANIFEST #1（UAC 执行级别等）。
+/// 三者都为 None 时不做任何事；任一写入失败则整个事务回滚
+/// （EndUpdateResource 不提交）。
 #[cfg(windows)]
 pub fn patch_pe_resources(
     pe: &Path,
     ico_bytes: Option<&[u8]>,
     versioninfo: Option<&[u8]>,
+    manifest: Option<&[u8]>,
 ) -> Result<()> {
     use windows::core::{HSTRING, PCWSTR};
     use windows::Win32::Foundation::BOOL;
@@ -26,7 +32,7 @@ pub fn patch_pe_resources(
         PCWSTR(id as usize as *const u16)
     }
 
-    if ico_bytes.is_none() && versioninfo.is_none() {
+    if ico_bytes.is_none() && versioninfo.is_none() && manifest.is_none() {
         return Ok(());
     }
 
@@ -91,6 +97,22 @@ pub fn patch_pe_resources(
                 }
             }
         }
+        // 应用清单（RT_MANIFEST 类型 ID 24，微软文档；NSIS RequestExecutionLevel
+        // 同路数）：UAC 执行级别 + supportedOS + DPI/长路径感知
+        if failed.is_none() {
+            if let Some(mf) = manifest {
+                if let Err(e) = UpdateResourceW(
+                    handle,
+                    make_int_res(24),
+                    make_int_res(1),
+                    0,
+                    Some(mf.as_ptr().cast::<core::ffi::c_void>()),
+                    mf.len() as u32,
+                ) {
+                    failed = Some(format!("写入 RT_MANIFEST 失败: {e}"));
+                }
+            }
+        }
         if failed.is_none() {
             if let Err(e) = EndUpdateResourceW(handle, BOOL::from(false)) {
                 failed = Some(format!("EndUpdateResourceW 失败: {e}"));
@@ -108,8 +130,9 @@ pub fn patch_pe_resources(
     _pe: &Path,
     _ico_bytes: Option<&[u8]>,
     _versioninfo: Option<&[u8]>,
+    _manifest: Option<&[u8]>,
 ) -> Result<()> {
-    bail!("PE 资源替换（图标/版本信息）仅支持 Windows")
+    bail!("PE 资源替换（图标/版本信息/清单）仅支持 Windows")
 }
 
 /// 解析 .ico：返回（RT_GROUP_ICON 数据, 各 RT_ICON 图像数据）。

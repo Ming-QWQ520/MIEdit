@@ -136,6 +136,12 @@ pub struct InstallConfig {
     /// 步骤 27）：安装时写 HKCU/HKLM 环境区并广播 WM_SETTINGCHANGE，卸载时按
     /// 清单精确清理（新建值删除、PATH 段移除回写）
     pub env: Vec<EnvSpec>,
+    /// UAC 执行级别（NSIS `RequestExecutionLevel` 对齐，路线图步骤 36）：
+    /// `user`（asInvoker）/ `highest`（highestAvailable）/ `admin`
+    /// （requireAdministrator）；`None`/空 = 未声明，按 `per_machine`
+    /// 推导（全机 → admin，按用户 → user）。编译器把级别写入安装器与
+    /// 卸载器 EXE 的 application manifest（RT_MANIFEST）
+    pub request_execution_level: Option<String>,
 }
 
 impl Default for InstallConfig {
@@ -156,6 +162,7 @@ impl Default for InstallConfig {
             exec_after: Vec::new(),
             exec_before_uninstall: Vec::new(),
             env: Vec::new(),
+            request_execution_level: None,
         }
     }
 }

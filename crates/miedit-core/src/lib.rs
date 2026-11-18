@@ -23,6 +23,7 @@ pub mod runcmd;
 pub mod sysreq;
 pub mod templates;
 pub mod trailer;
+pub mod uac;
 pub mod util;
 pub mod versioninfo;
 pub mod winutil;

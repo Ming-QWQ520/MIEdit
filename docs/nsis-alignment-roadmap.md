@@ -44,6 +44,9 @@
 | 33 | MI 脚本 v2 指令层：组件级自定义指令 + NSIS 常量变量展开 | NSIS Section 指令语义（Exec/WriteReg/CreateDirectory/Delete/DetailPrint）+ `$INSTDIR` 等 shell 常量 | **已完成**（0.1.0，#18） |
 | 34 | 安装器/卸载器单实例互斥 | NSIS CreateMutex 惯例 / Inno `AppMutex` | **已完成**（0.1.0，#18） |
 | 35 | `/LANG=` 命令行语言覆盖 | NSIS `/LANG=<十进制 LCID>` | **已完成**（0.1.0，#18） |
+| 36 | UAC 执行级别清单（RequestExecutionLevel + supportedOS/DPI/长路径） | NSIS `RequestExecutionLevel` / `ManifestDPIAware` | **已完成**（0.1.0，#19） |
+| 37 | MI 指令扩充：Rename/CopyFiles/WriteINIStr/Sleep | NSIS `Rename`/`CopyFiles`/`WriteINIStr`/`Sleep` | **已完成**（0.1.0，#19） |
+| 38 | 安装期磁盘空间预检（覆盖抵扣 + 余量） | NSIS 磁盘满中止语义（Error writing to file） | **已完成**（0.1.0，#19） |
 
 ## 迭代步骤定义
 
@@ -423,6 +426,57 @@
   新增 `lang_override` 参数（`.or(initial_language)`）。
 - **验收**：解析/匹配单测 2 项；双平台 check 0 error。
 
+### 步骤 36：UAC 执行级别清单（NSIS `RequestExecutionLevel` 对齐）
+- **做什么**：编译器在安装器/卸载器 EXE 嵌入 application manifest
+  （RT_MANIFEST 资源，类型 ID 24）：`requestedExecutionLevel` 按
+  `install.request_execution_level`（`user`/`highest`/`admin`，NSIS
+  关键字同款；缺省按 `per_machine` 推导——全机 → admin、按用户 →
+  user，取 MIEdit 安装器需要写 Program Files/HKLM 的现实，不采用
+  NSIS 的 `none` 空清单）。同一清单声明 supportedOS 五档 GUID
+  （Vista…Win11，微软文档标准值，保障 `RtlGetVersion` 真实报告——
+  服务步骤 12 版本门槛）与 DPI 感知（`dpiAware=true/pm`）+
+  长路径感知（`longPathAware`，NSIS `ManifestDPIAware` 惯例延伸）。
+  非法级别构建期报错（NSIS 同语义）。
+- **实现**：`miedit_core::uac`（`ExecLevel`/`parse_level`/`manifest_xml`
+  纯函数 + 6 单测）；`config.install.request_execution_level`
+  （serde default None，旧脚本兼容）；`patch_pe_resources` 增参
+  `manifest`（同事务写入 RT_MANIFEST，`make_int_res(24)`）；
+  编译器 lib.rs 6.6 段构造清单字节、卸载器/安装器两处调用传入。
+- **验收**：级别归一/推导/非法报错/XML 内容（level 属性、五 GUID、
+  dpiAware/longPathAware）6 项单测；双平台 check 0 error 0 warning；
+  Windows 实机 UAC 弹窗/属性清单验证待实机。
+
+### 步骤 37：MI 指令扩充（NSIS Rename/CopyFiles/WriteINIStr/Sleep）
+- **做什么**：组件 `code` 指令集扩至 9 条：`rename`（同盘重命名/
+  移动，目标已存在则失败——NSIS 同语义）/ `copy_files`（文件或整
+  目录树递归复制，同名覆盖，源不存在报错，目标在源内部拒绝自嵌套）/
+  `write_ini`（INI 节键写入，节/键匹配不区分大小写——Windows
+  `WritePrivateProfileString` 语义，文件缺失则新建，既有内容原样保留）/
+  `sleep`（毫秒暂停）。路径均支持 NSIS 常量变量与平台分隔符归一化。
+- **实现**：`micmd.rs` 四新变体 + `validate`（必填/同名/自嵌套检查）
+  + `describe`（日志文案）+ `write_ini_str` 纯函数（5 单测）;
+  `files.rs::copy_tree`（递归复制内核 + 自嵌套防护，2 单测）；
+  installer `execute_instruction` 四运行臂（变量展开/分隔符归一化/
+  日志语义与既有指令一致）。
+- **验收**：micmd 5 项 + files 2 项新单测；Linux 实机端到端：
+  write_ini 新建节/追加节、copy_files 树复制、rename 重命名、
+  sleep/detail_print 落日志，静默安装 exit 0 + 卸载 exit 0；
+  双平台 check 0 error 0 warning。
+
+### 步骤 38：安装期磁盘空间预检（NSIS 磁盘满中止语义）
+- **做什么**：安装写盘前逐文件预检目标盘剩余空间：
+  `free + 旧文件占用 < 新文件大小 + 8MB 余量` 时中止安装
+  （覆盖写可抵扣旧文件占位，余量防簇分配/日志零头）；错误文案含
+  期望/实际/路径（NSIS "Error writing to file / disk full" 信息量
+  对齐），进失败页/静默日志，退出码 1。剩余空间不可知时跳过检查
+  不误报（NSIS 也是写失败才报，预检更保守）。
+- **实现**：`files::SPACE_RESERVE`/`is_space_insufficient`
+  （saturating 防溢出）/`space_error_text`（1 单测覆盖充足/不足/
+  边界/抵扣/溢出）；installer 解包循环写入前挂点
+  （`winutil::disk_free_space` 取目标盘）。
+- **验收**：判定边界单测；双平台 check 0 error 0 warning；
+  磁盘满实机验证待做（沙箱无法真实写满目标盘）。
+
 1. **纯 Rust**：不引入 C 构建链；新增依赖须在 Windows/Linux 双平台可编译。
 2. **向后兼容**：旧格式安装包/卸载清单必须仍可处理（serde default / magic 回退）。
 3. **测试**：核心逻辑写成 `miedit-core` 纯函数并加单元测试；`cargo test -p miedit-core`
@@ -434,6 +488,37 @@
    不再随功能对齐批次递增；历史批次 v0.2.0–v0.13.0 保留原版本号记录）。
 
 ## 变更日志
+
+- 0.1.0（步骤 36–38，#19）：**UAC 执行级别清单 + MI 指令扩充 +
+  安装期磁盘空间预检**（对齐 NSIS `RequestExecutionLevel` /
+  `Rename`/`CopyFiles`/`WriteINIStr`/`Sleep` / 磁盘满中止语义）：
+  ① **UAC 执行级别清单**（步骤 36）：`install.request_execution_level`
+  （`user`/`highest`/`admin`，缺省按 `per_machine` 推导 admin/user），
+  编译器在安装器/卸载器 EXE 同事务嵌入 RT_MANIFEST（类型 ID 24）——
+  `requestedExecutionLevel`（asInvoker/highestAvailable/
+  requireAdministrator）+ supportedOS 五档标准 GUID（Vista…Win11，
+  微软文档核实，保障 `RtlGetVersion` 真实版本报告）+ `dpiAware=true/pm`
+  + `longPathAware`（NSIS `ManifestDPIAware` 惯例延伸）；非法级别
+  构建期报错（NSIS 同语义）；`miedit-core/src/uac.rs` 纯函数
+  （parse_level 归一/推导 + manifest_xml，6 单测），`patch_pe_resources`
+  增 manifest 参数（cfg(windows)/非 Windows 签名同步）。② **MI 指令
+  扩充**（步骤 37，指令集 5→9 条）：`rename`（Rename，目标已存在失败）/
+  `copy_files`（CopyFiles，`files::copy_tree` 递归复制 + 自嵌套拒绝）/
+  `write_ini`（WriteINIStr，`micmd::write_ini_str` 纯函数——节/键
+  不区分大小写、键原位替换、节内末尾插入、缺失节末尾追加、缺失文件
+  新建，既有内容原样保留）/ `sleep`（Sleep 毫秒暂停）；validate 新增
+  必填/同名/自嵌套检查，describe 对应文案，安装器四运行臂（变量展开 +
+  平台分隔符归一化，与既有指令同日志语义），micmd 5 单测 + files 2 单测。
+  ③ **安装期磁盘空间预检**（步骤 38）：解包循环写盘前逐文件检查
+  `free + 旧文件占用 < 新文件大小 + 8MB 余量` → 中止（覆盖写抵扣
+  旧文件占位；saturating 防溢出；剩余空间不可知跳过不误报），
+  错误文案含期望/实际/路径进失败页/静默日志（`files::is_space_insufficient`
+  + `space_error_text`，1 单测覆盖充足/不足/边界/抵扣/溢出）。
+  `examples/demo-app.mi` 同步 `request_execution_level` 与新指令注释。
+  Linux 实机端到端：新指令包构建（UAC 级别 user）→ 静默安装 exit 0 →
+  write_ini 新建节/追加节/树复制/重命名/日志逐项核对 → 卸载 exit 0
+  （指令创建文件不自动回收，NSIS 同语义）。全仓 146→166 项单测全过；
+  双平台 check 0 error 0 warning。
 
 - 0.1.0（步骤 33–35，#18）：**MI 脚本 v2 指令层 + 单实例互斥 + /LANG=
   语言覆盖**（对齐 NSIS Section 指令语义 / CreateMutex 惯例 / `/LANG`）：

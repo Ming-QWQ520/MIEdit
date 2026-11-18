@@ -204,6 +204,97 @@ pub fn is_safe_arc_path(p: &str) -> bool {
     !p.split(['/', '\\']).any(|c| c == "..")
 }
 
+// ---------------------------------------------------------------------------
+// NSIS CopyFiles 指令的复制内核（路线图步骤 37）
+// ---------------------------------------------------------------------------
+
+/// 递归复制文件或整个目录树（NSIS `CopyFiles` 语义）。
+///
+/// - `src` 是文件：复制到 `dst`（`dst` 的父目录自动创建）
+/// - `src` 是目录：递归复制整棵树到 `dst`（`dst` 作为目标根目录创建；
+///   空目录照搬，同名文件覆盖——NSIS CopyFiles 覆盖语义）
+/// - 返回复制的总字节数；`src` 不存在时报错（NSIS error flag 语义）
+///
+/// 防呆：`dst` 位于 `src` 内部时拒绝（会无限自嵌套复制）。
+pub fn copy_tree(src: &Path, dst: &Path) -> Result<u64> {
+    let meta = std::fs::metadata(src)
+        .with_context(|| format!("复制源不存在或不可读: {}", src.display()))?;
+    // 自嵌套防护：dst 的规范路径落在 src 内部则拒绝
+    if meta.is_dir() {
+        if let (Ok(src_c), Ok(dst_parent_c)) =
+            (std::fs::canonicalize(src), std::fs::canonicalize(dst.parent().unwrap_or(dst)))
+        {
+            if dst_parent_c.starts_with(&src_c) {
+                bail!(
+                    "复制目标位于源目录内部（会无限自复制）: {} → {}",
+                    src.display(),
+                    dst.display()
+                );
+            }
+        }
+    }
+    if meta.is_file() {
+        if let Some(parent) = dst.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("创建目录失败: {}", parent.display()))?;
+            }
+        }
+        let n = std::fs::copy(src, dst)
+            .with_context(|| format!("复制文件失败: {} → {}", src.display(), dst.display()))?;
+        return Ok(n);
+    }
+    copy_dir(src, dst)
+}
+
+/// 递归复制目录树（[`copy_tree`] 的目录分支），返回总字节数。
+fn copy_dir(src: &Path, dst: &Path) -> Result<u64> {
+    std::fs::create_dir_all(dst)
+        .with_context(|| format!("创建目录失败: {}", dst.display()))?;
+    let mut total = 0u64;
+    for entry in std::fs::read_dir(src)
+        .with_context(|| format!("读取目录失败: {}", src.display()))?
+    {
+        let entry = entry.with_context(|| format!("遍历目录失败: {}", src.display()))?;
+        let sp = entry.path();
+        let dp = dst.join(entry.file_name());
+        if sp.is_dir() {
+            total += copy_dir(&sp, &dp)?;
+        } else if sp.is_file() {
+            let n = std::fs::copy(&sp, &dp).with_context(|| {
+                format!("复制文件失败: {} → {}", sp.display(), dp.display())
+            })?;
+            total += n;
+        }
+    }
+    Ok(total)
+}
+
+// ---------------------------------------------------------------------------
+// 安装期磁盘空间预检（路线图步骤 38）
+// ---------------------------------------------------------------------------
+
+/// 写文件所需的额外余量（防零头不足：目录项/簇分配/日志增长）。
+pub const SPACE_RESERVE: u64 = 8 * 1024 * 1024;
+
+/// 磁盘空间是否不足以写入该文件（NSIS 磁盘满中止语义的预检形态）。
+///
+/// 覆盖已有文件时可抵扣旧文件占用的空间（写入前旧文件已在盘上，
+/// 新内容会替换它），因此判定为 `free + existing < new + RESERVE`。
+/// `free` 不可知（`disk_free_space` 返回 None）时调用方跳过检查。
+pub fn is_space_insufficient(free: u64, new_size: u64, existing_size: u64) -> bool {
+    free.saturating_add(existing_size) < new_size.saturating_add(SPACE_RESERVE)
+}
+
+/// 空间不足的错误文案（进入失败页/静默日志；含期望与实际，NSIS
+/// "Error writing to file / disk full" 的信息量对齐）。
+pub fn space_error_text(free: u64, new_size: u64, path: &str) -> String {
+    format!(
+        "磁盘空间不足: 目标盘剩余 {free} 字节，写入 {path} 需要 {new_size} 字节（含 {}MB 余量），已中止安装",
+        SPACE_RESERVE / (1024 * 1024)
+    )
+}
+
 fn match_components(pat: &[&str], path: &[&str]) -> bool {
     if pat.is_empty() {
         return path.is_empty();
@@ -265,5 +356,91 @@ mod tests {
         assert_eq!(normalize_dest("a\\b\\"), "a/b");
         assert_eq!(join_arc("docs", "x.md"), "docs/x.md");
         assert_eq!(join_arc("", "x.md"), "x.md");
+    }
+
+    /// 建立唯一的临时目录（std 无临时目录助手；测试自清理）。
+    fn temp_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "miedit-core-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn test_copy_tree_file_and_tree() {
+        let root = temp_dir("copytree");
+        let src = root.join("src");
+        std::fs::create_dir_all(src.join("sub/deep")).unwrap();
+        std::fs::write(src.join("a.txt"), "hello a").unwrap();
+        std::fs::write(src.join("sub/b.bin"), &[0u8, 1, 2, 3]).unwrap();
+        std::fs::create_dir_all(src.join("sub/empty")).unwrap();
+        std::fs::write(src.join("sub/deep/c.txt"), "c").unwrap();
+
+        // 文件复制：目标父目录自动创建
+        let dst_file = root.join("out/dir/a.txt");
+        let n = copy_tree(&src.join("a.txt"), &dst_file).unwrap();
+        assert_eq!(n, 7);
+        assert_eq!(std::fs::read_to_string(&dst_file).unwrap(), "hello a");
+
+        // 目录树复制：空目录照搬、嵌套照搬、字节数累计
+        let dst = root.join("out/tree");
+        let total = copy_tree(&src, &dst).unwrap();
+        assert_eq!(total, 7 + 4 + 1);
+        assert_eq!(
+            std::fs::read_to_string(dst.join("sub/deep/c.txt")).unwrap(),
+            "c"
+        );
+        assert!(dst.join("sub/empty").is_dir());
+
+        // 覆盖语义：同名文件被替换
+        std::fs::write(src.join("a.txt"), "hello v2").unwrap();
+        copy_tree(&src, &dst).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dst.join("a.txt")).unwrap(),
+            "hello v2"
+        );
+
+        // 源不存在报错
+        assert!(copy_tree(&root.join("nope"), &dst).is_err());
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn test_copy_tree_rejects_self_nesting() {
+        let root = temp_dir("selfnest");
+        let src = root.join("data");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("x.txt"), "x").unwrap();
+        // dst 在 src 内部：拒绝
+        let err = copy_tree(&src, &src.join("inner")).unwrap_err();
+        assert!(err.to_string().contains("无限自复制"), "{err}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn test_space_insufficient_and_text() {
+        let m = 1024 * 1024u64;
+        // 充足：free 远大于需求
+        assert!(!is_space_insufficient(100 * m, 10 * m, 0));
+        // 不足：free 小于 new+8MB
+        assert!(is_space_insufficient(5 * m, 10 * m, 0));
+        // 边界：恰好等于需求（free+existing == new+reserve）→ 视为足够
+        assert!(!is_space_insufficient(10 * m + 8 * m, 10 * m, 0));
+        // 覆盖抵扣：旧文件 6MB，free 13MB，new 10MB → 13+6=19 ≥ 10+8 ✓
+        assert!(!is_space_insufficient(13 * m, 10 * m, 6 * m));
+        // 抵扣不足：free 10MB + 旧 2MB < 10+8 → 不足
+        assert!(is_space_insufficient(10 * m, 10 * m, 2 * m));
+        // 溢出安全：u64 大值不 panic
+        assert!(!is_space_insufficient(u64::MAX, u64::MAX / 2, u64::MAX / 2));
+        let t = space_error_text(5, 100, "bin/app.exe");
+        assert!(t.contains("磁盘空间不足") && t.contains("bin/app.exe"), "{t}");
     }
 }

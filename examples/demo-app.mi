@@ -16,6 +16,12 @@ dir_template = '{localappdata}\Programs\MIEdit Demo'
 run_after = "MIEditDemo.exe"
 user_data_dirs = ['{appdata}\MIEdit Demo']
 compression = "deflate"                      # deflate|solid|lzma|lzma-solid|brotli|brotli-solid（NSIS SetCompressor 对齐 + 扩展）
+# UAC 执行级别（NSIS RequestExecutionLevel，路线图步骤 36）：
+# user（asInvoker）| highest（highestAvailable）| admin（requireAdministrator）；
+# 未声明时按 per_machine 推导：全机 → admin，按用户 → user。
+# 编译器把级别写入安装器/卸载器 EXE 的 application manifest（RT_MANIFEST），
+# 同时声明 supportedOS（Vista…Win11）与 DPI/长路径感知。
+# request_execution_level = "admin"
 # 允许安装到盘根/网络共享根（NSIS AllowRootDirInstall，默认 false 禁止）
 # allow_root_dir_install = true
 
@@ -210,6 +216,10 @@ files = [1]
 # op = "write_reg"    → NSIS WriteRegStr / WriteRegDWORD（type = "str"|"dword"）
 # op = "create_dir"   → NSIS CreateDirectory
 # op = "delete_file"  → NSIS Delete（缺失静默跳过）
+# op = "rename"       → NSIS Rename（同盘重命名/移动，目标已存在则失败）
+# op = "copy_files"   → NSIS CopyFiles（文件或整目录树，同名覆盖）
+# op = "write_ini"    → NSIS WriteINIStr（节/键不区分大小写，文件缺失则新建）
+# op = "sleep"        → NSIS Sleep（暂停 ms 毫秒）
 # op = "detail_print" → NSIS DetailPrint
 # 路径支持 NSIS 常量变量：$INSTDIR $DESKTOP $SMPROGRAMS $STARTMENU
 # $QUICKLAUNCH $APPDATA $LOCALAPPDATA $TEMP $WINDIR $SYSDIR $PROGRAMFILES $EXEDIR
@@ -223,6 +233,10 @@ files = [1]
 #   { op = "detail_print", text = "正在注册文档关联…" },
 #   { op = "write_reg", key = "HKCU\\Software\\MIEdit Demo", name = "DocsPath", value = "$INSTDIR\\docs" },
 #   { op = "create_dir", path = "$APPDATA\\MIEdit Demo\\docs" },
+#   { op = "write_ini", file = "$INSTDIR\\config.ini", section = "Main", key = "Mode", value = "fast" },
+#   { op = "copy_files", from = "$INSTDIR\\docs", to = "$APPDATA\\MIEdit Demo\\docs" },
+#   { op = "rename", from = "$INSTDIR\\old.log", to = "$INSTDIR\\old.log.bak" },
+#   { op = "sleep", ms = 250 },
 #   { op = "run", cmd = "$INSTDIR\\docs\\register.bat", args = "/quiet", abort_on_error = false },
 # ]
 
