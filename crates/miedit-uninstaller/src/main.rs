@@ -182,10 +182,36 @@ fn real_main(silent: bool, args: &[String]) -> Result<i32> {
             }
         };
 
+    // 步骤 34：单实例互斥（NSIS CreateMutex 惯例对齐；与安装器互斥名区分，
+    // `-uninstall` 后缀）。已有另一卸载实例运行时提示并退出。
+    // 守卫 `_instance` 持有到 real_main 结束（进程退出自动释放，双保险）
+    let _instance = match miedit_core::winutil::acquire_single_instance(
+        &manifest.app_id,
+        true,
+    ) {
+        Some(g) => g,
+        None => {
+            let msg = "另一个卸载程序实例正在运行，请等待其完成后再试。\nAnother uninstaller instance is already running.";
+            if silent {
+                write_silent_log(&[format!("× {msg}")]);
+            } else {
+                miedit_core::winutil::message_box_error(
+                    &manifest.app_name,
+                    msg,
+                );
+            }
+            return Ok(miedit_core::cliargs::EXIT_FAILED);
+        }
+    };
+
     // 文案快照（步骤 26 → 28）：静默与 GUI 共用同一预选——清单记录了安装
     // 语言则直接跟随（用户装时选 English → 卸载即英文，NSIS un.onInit 读回
-    // 安装语言惯例）；旧清单回退系统语言自动预选
-    let preselect = resolve_preselect(&manifest);
+    // 安装语言惯例）；旧清单回退系统语言自动预选。
+    // 步骤 35：/LANG= 命令行覆盖优先于清单记录语言（无效值回退清单预选）
+    let lang_override = miedit_core::cliargs::parse_lang_arg(args)
+        .as_deref()
+        .and_then(|v| miedit_core::langs::resolve_lang_override(&manifest.languages, v));
+    let preselect = lang_override.or_else(|| resolve_preselect(&manifest));
     let texts = Texts::build(&manifest.languages, preselect);
 
     if manifest.per_machine && !winutil::is_admin() {
@@ -281,7 +307,7 @@ fn do_uninstall(
         m.registry_values.len()
     };
     let total = m.files.len() + m.dirs.len() + m.shortcuts.len() + m.shortcut_dirs.len()
-        + reg_ops + m.env_values.len() + user_data.len() + 1;
+        + reg_ops + m.env_values.len() + user_data.len() + m.extra_dirs.len() + 1;
     {
         let mut r = run.lock().unwrap();
         r.total = total;
@@ -383,6 +409,40 @@ fn do_uninstall(
             r.dirs_removed += 1;
         }
         tick(run, t.fmt("un_log_remove_dir", &[("dir", d)]), ctx);
+    }
+
+    // 2b. 安装目录之外创建的目录（MI 脚本 v2 `create_dir` 指令，步骤 33）：
+    //     绝对路径直接使用，NSIS `RMDir` 同语义：仅删空、非空保留记日志、
+    //     缺失静默跳过；最深先删（`\\`/`/` 归一后按段数排序）
+    if !m.extra_dirs.is_empty() {
+        let mut xdirs: Vec<&String> = m.extra_dirs.iter().collect();
+        xdirs.sort_by_key(|d| {
+            std::cmp::Reverse(d.split(['\\', '/']).filter(|s| !s.is_empty()).count())
+        });
+        for d in xdirs {
+            let p = Path::new(d);
+            if dir_exists_and_nonempty(p) {
+                run
+                    .lock()
+                    .unwrap()
+                    .log
+                    .push(t.fmt("un_log_dir_kept", &[("dir", d)]));
+                tick(run, t.fmt("un_log_remove_dir", &[("dir", d)]), ctx);
+                continue;
+            }
+            let removed = match winutil::remove_dir_quiet(p) {
+                Ok(()) => true,
+                Err(e) => {
+                    errors.push(format!("{e:#}"));
+                    false
+                }
+            };
+            if removed {
+                let mut r = run.lock().unwrap();
+                r.dirs_removed += 1;
+            }
+            tick(run, t.fmt("un_log_remove_dir", &[("dir", d)]), ctx);
+        }
     }
 
     // 3. 快捷方式与快捷方式目录（按安装相反顺序删除；目录沿用 NSIS RMDir

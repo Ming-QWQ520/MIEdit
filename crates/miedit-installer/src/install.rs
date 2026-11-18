@@ -134,6 +134,8 @@ impl CrcGate {
 
 /// 启动后台安装线程，返回共享进度状态。
 /// `selected_rules`：组件过滤后允许安装的 `[[files]]` 规则索引；None = 全部安装。
+/// `comp_sel`：组件勾选布尔表（MI 脚本 v2 指令层，步骤 33：NSIS Section
+/// 语义——required 或勾选的组件才执行其 `code` 指令）；None = 未启用组件过滤。
 /// `language`：选中语言索引（步骤 15 多语言；None = 无语言包，文案用英文默认）。
 /// `shortcuts_enabled`：是否创建快捷方式（步骤 21：CLI `--no-shortcuts`；GUI 默认 true）。
 /// `crc_gate`：后台 CRC 校验门（步骤 30；None = 已验证）。
@@ -142,6 +144,7 @@ pub fn spawn(
     dest: PathBuf,
     ctx: Option<egui::Context>,
     selected_rules: Option<std::collections::HashSet<usize>>,
+    comp_sel: Option<Vec<bool>>,
     language: Option<usize>,
     shortcuts_enabled: bool,
     crc_gate: Option<Arc<CrcGate>>,
@@ -179,6 +182,7 @@ pub fn spawn(
                 &st2,
                 ctx.as_ref(),
                 selected_rules.as_ref(),
+                comp_sel.as_deref(),
                 language,
                 shortcuts_enabled,
             );
@@ -227,6 +231,7 @@ fn run_install(
     st: &Mutex<ProgressState>,
     ctx: Option<&egui::Context>,
     selected_rules: Option<&std::collections::HashSet<usize>>,
+    comp_sel: Option<&[bool]>,
     language: Option<usize>,
     shortcuts_enabled: bool,
 ) -> Result<()> {
@@ -510,6 +515,11 @@ fn run_install(
         }
     }
 
+    // 2b. MI 脚本 v2 组件指令（步骤 33）：勾选组件的 code 指令按脚本顺序执行
+    //     （NSIS Section 指令语义：未勾选组件不执行；副作用登记进卸载清单）
+    let mut code_effects = finalize::CodeEffects::default();
+    run_component_code(pkg, dest, comp_sel, st, ctx, &mut dirs, &mut seen_dirs, &mut code_effects)?;
+
     // 3. 收尾：卸载器、快捷方式、注册表、清单
     {
         let mut s = st.lock().unwrap();
@@ -520,7 +530,7 @@ fn run_install(
     if let Some(c) = ctx {
         c.request_repaint();
     }
-    finalize::finalize_install(pkg, dest, &files, &dirs, st, language, shortcuts_enabled)?;
+    finalize::finalize_install(pkg, dest, &files, &dirs, st, language, shortcuts_enabled, &code_effects)?;
 
     // NSIS LogSet 风格：安装日志落盘到 $INSTDIR\install.log（可用 install.write_log 关闭）
     if pkg.config.install.write_log {
@@ -550,6 +560,186 @@ fn run_install(
         }
     }
     Ok(())
+}
+
+/// MI 脚本 v2（路线图步骤 33）：执行勾选组件的 `code` 指令。
+///
+/// NSIS Section 指令语义：组件被勾选（或 required）才执行，按脚本顺序；
+/// 未启用组件过滤（`comp_sel` 为 None）时全部组件执行。指令失败按 NSIS
+/// error-flag 语义**记警告继续**（不中断安装）；`run` 指令的
+/// `abort_on_error` 是显式选择的中止开关（对齐 `[[install.exec_before]]`）。
+///
+/// 副作用登记（经 [`finalize::CodeEffects`] 进卸载清单，卸载可精确清理）：
+/// - `write_reg` → `registry_keys` + `registry_values`（新建键/既有键判定）；
+/// - `create_dir` → 安装目录内记 `dirs`（相对路径），目录外记 `extra_dirs`。
+fn run_component_code(
+    pkg: &Package,
+    dest: &Path,
+    comp_sel: Option<&[bool]>,
+    st: &Mutex<ProgressState>,
+    ctx: Option<&egui::Context>,
+    dirs: &mut Vec<String>,
+    seen_dirs: &mut HashSet<String>,
+    effects: &mut finalize::CodeEffects,
+) -> Result<()> {
+    let cfg = &pkg.config;
+    if cfg.components.iter().all(|c| c.code.is_empty()) {
+        return Ok(()); // 无指令组件：零开销（旧脚本行为不变）
+    }
+    let vars = miedit_core::micmd::MiVars {
+        install_dir: dest,
+        exe_dir: &std::env::current_exe().unwrap_or_else(|_| dest.to_path_buf()),
+        per_machine: cfg.app.per_machine,
+    }
+    .standard_map();
+    for (ci, comp) in cfg.components.iter().enumerate() {
+        if comp.code.is_empty() {
+            continue;
+        }
+        // NSIS：未勾选 Section 的指令不执行（required 锁定勾选）
+        let checked = comp_sel.map_or(true, |v| {
+            comp.required || v.get(ci).copied().unwrap_or(true)
+        });
+        if !checked {
+            push_log(st, format!("组件「{}」未勾选，跳过 {} 条指令", comp.name, comp.code.len()));
+            continue;
+        }
+        push_log(st, format!("执行组件「{}」指令（{} 条）…", comp.name, comp.code.len()));
+        for (ii, inst) in comp.code.iter().enumerate() {
+            // NSIS DetailPrint：纯日志行
+            if let miedit_core::micmd::MiInstruction::DetailPrint { text } = inst {
+                push_log(st, format!("[{}] {}", comp.name, miedit_core::micmd::expand_vars(text, &vars)));
+                continue;
+            }
+            let desc = miedit_core::micmd::describe(inst, Some(&vars));
+            push_log(st, format!("指令 #{}: {}", ii + 1, desc));
+            let res = execute_instruction(inst, dest, &vars, effects, dirs, seen_dirs, st, &comp.name);
+            // NSIS error-flag 语义：指令失败默认记警告继续；仅 `run.abort_on_error`
+            // 是显式中止开关（对齐 `[[install.exec_before]]` 契约）
+            let fatal = matches!(inst, miedit_core::micmd::MiInstruction::Run { abort_on_error: true, .. });
+            match res {
+                Err(e) if fatal => {
+                    anyhow::bail!("组件「{}」指令 #{} 失败（abort_on_error）: {e}", comp.name, ii + 1);
+                }
+                Err(e) => {
+                    push_log(st, format!("警告: 组件「{}」指令 #{} 失败（继续安装）: {e}", comp.name, ii + 1));
+                }
+                Ok(()) => {}
+            }
+            if let Some(c) = ctx {
+                c.request_repaint();
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 执行单条指令（`DetailPrint` 已在上层处理）；失败返回错误描述——
+/// 是否中止由上层按指令类型判定（见 `run_component_code`）。
+#[allow(clippy::too_many_arguments)]
+fn execute_instruction(
+    inst: &miedit_core::micmd::MiInstruction,
+    dest: &Path,
+    vars: &std::collections::BTreeMap<String, String>,
+    effects: &mut finalize::CodeEffects,
+    dirs: &mut Vec<String>,
+    seen_dirs: &mut HashSet<String>,
+    st: &Mutex<ProgressState>,
+    comp_name: &str,
+) -> std::result::Result<(), String> {
+    let ex = |s: &str| miedit_core::micmd::expand_vars(s, vars);
+    match inst {
+        miedit_core::micmd::MiInstruction::Run { cmd, args, working_dir, abort_on_error } => {
+            let spec = miedit_core::config::RunCommandSpec {
+                cmd: ex(cmd),
+                args: ex(args),
+                working_dir: ex(working_dir),
+                abort_on_error: *abort_on_error,
+                optional: false,
+            };
+            let outcome = miedit_core::runcmd::execute(&spec, dest);
+            for line in miedit_core::runcmd::log_lines(&format!("指令（{comp_name}）"), &spec, &outcome) {
+                push_log(st, line);
+            }
+            if miedit_core::runcmd::should_abort(&spec, &outcome) {
+                return Err(miedit_core::runcmd::abort_reason(&spec, &outcome));
+            }
+            Ok(())
+        }
+        miedit_core::micmd::MiInstruction::WriteReg { key, name, value, r#type } => {
+            let key = ex(key);
+            let name = ex(name);
+            let value = ex(value);
+            let ty = r#type.trim().to_ascii_lowercase();
+            let (pm, rest) = miedit_core::winutil::split_hive(&key)
+                .map_err(|e| format!("注册表键无效 {key}: {e:#}"))?;
+            let view = miedit_core::winutil::RegView::Default;
+            let resolved = match ty.as_str() {
+                "" | "str" => vec![(name.clone(), miedit_core::winutil::RegValue::Str(value.clone()))],
+                "dword" => {
+                    let d = miedit_core::regspec::parse_dword(&value)
+                        .map_err(|e| format!("DWORD 值无效 {name}={value}: {e}"))?;
+                    vec![(name.clone(), miedit_core::winutil::RegValue::Dword(d))]
+                }
+                other => return Err(format!("write_reg.type \"{other}\" 无效（str / dword）")),
+            };
+            // 精确清理：安装前键不存在 → 卸载可整树删除；否则只删写入的值
+            let created_key = !miedit_core::winutil::registry_key_exists(pm, &rest, view);
+            miedit_core::winutil::registry_create_set_view(pm, &rest, &resolved, view)
+                .map_err(|e| format!("写注册表失败 {key}\\{name}: {e:#}"))?;
+            if !effects.registry_keys.contains(&key) {
+                effects.registry_keys.push(key.clone());
+            }
+            let r = miedit_core::manifest::RegistryValueRef {
+                key: key.clone(),
+                name: name.clone(),
+                created_key,
+            };
+            if !effects.registry_values.contains(&r) {
+                effects.registry_values.push(r);
+            }
+            Ok(())
+        }
+        miedit_core::micmd::MiInstruction::CreateDir { path } => {
+            // 文件系统路径归一化：NSIS 风格 `\` → 平台分隔符（与解包链路
+            // `entry.path.replace('\\', "/")` 同口径；Linux 实机适配，
+            // Windows 上 MAIN_SEPARATOR 本就是 `\`，行为不变）。
+            // 注意：注册表键路径的 `\` 是 hive 分隔符，不在此归一化范围。
+            let pb = PathBuf::from(ex(path).replace('\\', std::path::MAIN_SEPARATOR_STR).trim());
+            fs::create_dir_all(&pb)
+                .map_err(|e| format!("创建目录失败 {}: {e}", pb.display()))?;
+            // 安装目录内 → 记相对路径（复用提取期 record_dir 逐级登记）；
+            // 目录外 → 记绝对路径 extra_dirs（卸载时 NSIS RMDir 语义清理）
+            match pb.strip_prefix(dest) {
+                Ok(rel) => {
+                    let rel = rel.to_string_lossy().replace('\\', "/");
+                    if !rel.is_empty() {
+                        record_dir(dirs, seen_dirs, &rel);
+                    }
+                }
+                Err(_) => {
+                    let abs = pb.display().to_string();
+                    if !effects.extra_dirs.contains(&abs) {
+                        effects.extra_dirs.push(abs);
+                    }
+                }
+            }
+            Ok(())
+        }
+        miedit_core::micmd::MiInstruction::DeleteFile { path } => {
+            let pb = PathBuf::from(ex(path).replace('\\', std::path::MAIN_SEPARATOR_STR).trim());
+            match fs::remove_file(&pb) {
+                Ok(()) => push_log(st, format!("已删除: {}", pb.display())),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // NSIS Delete：缺失静默跳过
+                }
+                Err(e) => return Err(format!("删除失败 {}: {e}", pb.display())),
+            }
+            Ok(())
+        }
+        // DetailPrint 已在上层输出（纯日志不执行）
+        miedit_core::micmd::MiInstruction::DetailPrint { .. } => Ok(()),
+    }
 }
 
 #[cfg(test)]

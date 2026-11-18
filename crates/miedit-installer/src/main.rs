@@ -96,6 +96,23 @@ fn real_main(
         return Err(anyhow!("安装包配置缺少应用名称"));
     }
 
+    // 步骤 34：单实例互斥（NSIS CreateMutex 惯例 / Inno AppMutex 对齐）：
+    // 已有另一安装实例运行时提示并退出（GUI 弹消息框，静默写日志）。
+    // 守卫 `_instance` 持有到 real_main 结束（进程退出自动释放，双保险）
+    let _instance = match miedit_core::winutil::acquire_single_instance(&cfg.app_id_or_slug(), false)
+    {
+        Some(g) => g,
+        None => {
+            let msg = "另一个安装程序实例正在运行，请等待其完成后再试。\nAnother installer instance is already running.";
+            if silent {
+                write_silent_log(&format!("× {msg}"));
+            } else {
+                miedit_core::winutil::message_box_error("MIEdit Installer", msg);
+            }
+            return Ok(miedit_core::cliargs::EXIT_FAILED);
+        }
+    };
+
     // --components= 解析（Inno /COMPONENTS 语义）：按组件名/序号过滤；
     // 引用不存在的组件 → 退出码 2（参数无效）
     let cli_components = match &components_arg {
@@ -165,6 +182,20 @@ fn real_main(
         return Err(err);
     }
 
+    // 步骤 35：/LANG= 命令行语言覆盖（NSIS /LANG 语义）：优先于系统自动
+    // 预选；无效值（未匹配语言包）宽容回退自动预选，仅静默日志记录
+    let lang_arg = miedit_core::cliargs::parse_lang_arg(args);
+    let lang_override = lang_arg
+        .as_deref()
+        .and_then(|v| miedit_core::langs::resolve_lang_override(&cfg.ui.languages, v));
+    if let (Some(v), None) = (&lang_arg, lang_override) {
+        if silent {
+            write_silent_log(&format!(
+                "提示: /LANG={v} 未匹配到语言包，回退自动预选"
+            ));
+        }
+    }
+
     let dest = match dir_arg {
         Some(d) if !d.trim().is_empty() => std::path::PathBuf::from(d.trim()),
         _ => {
@@ -177,10 +208,11 @@ fn real_main(
     };
 
     if silent {
-        // 静默模式无语言选择页：按系统语言自动预选（NSIS /S 语义）。
-        // 静默修复（--silent --repair）与静默安装行为一致：全量重装即静默修复。
-        // 步骤 21：--components= 过滤组件；--no-shortcuts 跳过快捷方式。
-        let language = miedit_core::langs::initial_language(cfg);
+        // 静默模式无语言选择页：/LANG= 覆盖优先（步骤 35），否则按系统语言
+        // 自动预选（NSIS /S 语义）。静默修复（--silent --repair）与静默安装
+        // 行为一致：全量重装即静默修复。步骤 21：--components= 过滤组件；
+        // --no-shortcuts 跳过快捷方式。
+        let language = lang_override.or_else(|| miedit_core::langs::initial_language(cfg));
         let rules = cli_components.as_ref().map(|sel| {
             miedit_core::installtypes::selection_to_rules(
                 &pkg.config.components,
@@ -188,7 +220,16 @@ fn real_main(
                 sel,
             )
         });
-        let st = install::spawn(pkg.clone(), dest, None, rules, language, no_shortcuts, None);
+        let st = install::spawn(
+            pkg.clone(),
+            dest,
+            None,
+            rules,
+            cli_components.clone(),
+            language,
+            no_shortcuts,
+            None,
+        );
         // 等待安装线程结束（join handle 未暴露，轮询即可）
         loop {
             {
@@ -209,7 +250,7 @@ fn real_main(
         write_silent_log(&log);
         Ok(miedit_core::cliargs::EXIT_OK)
     } else {
-        app::run_gui(pkg, dest, repair, cli_components, no_shortcuts, ncrc)?;
+        app::run_gui(pkg, dest, repair, cli_components, no_shortcuts, ncrc, lang_override)?;
         Ok(miedit_core::cliargs::EXIT_OK)
     }
 }

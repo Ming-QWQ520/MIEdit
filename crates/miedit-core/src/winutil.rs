@@ -113,6 +113,77 @@ pub fn relaunch_elevated(args: &[String]) -> Result<bool> {
 }
 
 // ---------------------------------------------------------------------------
+// 单实例互斥（路线图步骤 34：NSIS CreateMutex 惯例 / Inno AppMutex 对齐）
+// ---------------------------------------------------------------------------
+
+/// 单实例互斥名（纯函数，双平台可测）：`Global\MIEDIT-<slug>[-uninstall]`。
+///
+/// `app_id` 中互斥名非法字符（`\` 等非 [A-Za-z0-9._-]）统一替换为 `_`，
+/// 空 app_id 回退 `app`；卸载器加 `-uninstall` 后缀避免与安装器互斥名冲突。
+pub fn single_instance_mutex_name(app_id: &str, uninstaller: bool) -> String {
+    let mut slug = String::with_capacity(app_id.len());
+    for c in app_id.trim().chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+            slug.push(c);
+        } else {
+            slug.push('_');
+        }
+    }
+    if slug.is_empty() {
+        slug.push_str("app");
+    }
+    let suffix = if uninstaller { "-uninstall" } else { "" };
+    format!("Global\\MIEDIT-{slug}{suffix}")
+}
+
+/// 单实例互斥守卫：持有句柄，Drop 时释放（进程退出自动释放，双保险）。
+pub struct SingleInstanceGuard {
+    #[cfg(windows)]
+    handle: windows::Win32::Foundation::HANDLE,
+    #[cfg(not(windows))]
+    _priv: (),
+}
+
+impl Drop for SingleInstanceGuard {
+    #[cfg(windows)]
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(self.handle);
+        }
+    }
+    #[cfg(not(windows))]
+    fn drop(&mut self) {}
+}
+
+/// 尝试获取单实例互斥。返回 `None` = 已有另一实例在运行（调用方提示后退出）。
+///
+/// Windows：`CreateMutexW(Global\...)` + `ERROR_ALREADY_EXISTS` 判定——
+/// NSIS 安装脚本惯例（Inno `AppMutex` 同语义）；`Global\` 前缀覆盖
+/// 多会话场景（per-machine 安装器可能被不同用户并行触发）。
+/// 非 Windows 平台返回 `Some`（Linux 适配：无对应惯例，行为不变）。
+pub fn acquire_single_instance(app_id: &str, uninstaller: bool) -> Option<SingleInstanceGuard> {
+    let name = single_instance_mutex_name(app_id, uninstaller);
+    #[cfg(windows)]
+    unsafe {
+        use windows::core::{HSTRING, PCWSTR};
+        use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+        use windows::Win32::System::Threading::CreateMutexW;
+        let hname: HSTRING = name.into();
+        let handle = CreateMutexW(None, false, PCWSTR(hname.as_ptr())).ok()?;
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            let _ = windows::Win32::Foundation::CloseHandle(handle);
+            return None;
+        }
+        Some(SingleInstanceGuard { handle })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = &name;
+        Some(SingleInstanceGuard { _priv: () })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 消息框 / 打开
 // ---------------------------------------------------------------------------
 
@@ -1186,6 +1257,41 @@ pub fn user_default_ui_language() -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 步骤 34：单实例互斥名构造（纯函数；Windows 真实互斥行为需实机验证）
+    #[test]
+    fn test_single_instance_mutex_name() {
+        assert_eq!(
+            winutil_test_name("demo.app", false),
+            r"Global\MIEDIT-demo.app"
+        );
+        assert_eq!(
+            winutil_test_name("demo.app", true),
+            r"Global\MIEDIT-demo.app-uninstall"
+        );
+        // 非法字符替换 + 空值回退
+        assert_eq!(
+            winutil_test_name(r"My\App v1", false),
+            r"Global\MIEDIT-My_App_v1"
+        );
+        assert_eq!(winutil_test_name("   ", false), r"Global\MIEDIT-app");
+    }
+
+    // 间接调用保证双平台编译（非 Windows 恒返回 Some）
+    #[test]
+    fn test_acquire_single_instance_stub() {
+        #[cfg(not(windows))]
+        assert!(winutil_test_acquire("x", false).is_some());
+        #[cfg(windows)]
+        let _ = winutil_test_acquire("x", false);
+    }
+
+    fn winutil_test_name(app_id: &str, uninstaller: bool) -> String {
+        single_instance_mutex_name(app_id, uninstaller)
+    }
+    fn winutil_test_acquire(app_id: &str, uninstaller: bool) -> Option<SingleInstanceGuard> {
+        acquire_single_instance(app_id, uninstaller)
+    }
 
     // 步骤 9：重启替换的"腾位立即替换"路径（目标未被占用时应直接成功）
     #[test]

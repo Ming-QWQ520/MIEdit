@@ -203,6 +203,29 @@ description = "使用指南与说明文档"
 required = false
 files = [1]
 
+# MI 脚本 v2 组件指令（NSIS Section 指令语义，路线图步骤 33）：
+# 组件被勾选后按脚本顺序执行其 code 指令，未勾选组件不执行；
+# 失败记警告继续（NSIS error-flag 语义），run 的 abort_on_error = true 显式中止。
+# op = "run"          → NSIS Exec/ExecWait
+# op = "write_reg"    → NSIS WriteRegStr / WriteRegDWORD（type = "str"|"dword"）
+# op = "create_dir"   → NSIS CreateDirectory
+# op = "delete_file"  → NSIS Delete（缺失静默跳过）
+# op = "detail_print" → NSIS DetailPrint
+# 路径支持 NSIS 常量变量：$INSTDIR $DESKTOP $SMPROGRAMS $STARTMENU
+# $QUICKLAUNCH $APPDATA $LOCALAPPDATA $TEMP $WINDIR $SYSDIR $PROGRAMFILES $EXEDIR
+# 注意：[[components]] 是数组表，code 必须以内联表数组形式写在组件表内
+# （[[components."名称".code]] 会变成独立的未知子表，不会挂到组件上）。
+#
+# [[components]]
+# name = "文档"
+# files = [1]
+# code = [
+#   { op = "detail_print", text = "正在注册文档关联…" },
+#   { op = "write_reg", key = "HKCU\\Software\\MIEdit Demo", name = "DocsPath", value = "$INSTDIR\\docs" },
+#   { op = "create_dir", path = "$APPDATA\\MIEdit Demo\\docs" },
+#   { op = "run", cmd = "$INSTDIR\\docs\\register.bat", args = "/quiet", abort_on_error = false },
+# ]
+
 # 组件分组（NSIS SectionGroup/SectionGroupEnd，路线图步骤 24）：
 # group = "父组/子组"（/ 分隔多级），空 = 根级；中间组自动创建、
 # 组件页树形渲染（组行可折叠/展开，组复选框三态联动子组件）

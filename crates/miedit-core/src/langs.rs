@@ -440,6 +440,38 @@ pub fn match_language_index(languages: &[LanguageSpec], id: &str) -> Option<usiz
     languages.iter().position(|l| lang_matches(&l.id, want))
 }
 
+/// LANGID（u16）→ 完整语言 id（[`LANGIDS`] 反查，未命中 None）。
+fn langid_to_id_u16(v: u16) -> Option<&'static str> {
+    LANGIDS.iter().find(|(k, _)| *k == v).map(|(_, id)| *id)
+}
+
+/// `/LANG=` 语言覆盖解析（NSIS `/LANG=<十进制 LCID>` 语义，路线图步骤 35）：
+/// 值可以是 ① NSIS 十进制 LCID（`1033` → LANGID 0x0409 → `en-US`），
+/// ② `0x` 前缀十六进制 LANGID（`0x0804` → `zh-CN`），③ 直接语言 id
+/// （`zh-CN` / `en`）。解析结果经 [`match_language_index`] 定位；LCID
+/// 未识别或定位失败回退原文 id 匹配，仍失败返回 None（调用方回退
+/// 自动预选——NSIS 对无效 /LANG 的容错同语义）。
+pub fn resolve_lang_override(languages: &[LanguageSpec], arg: &str) -> Option<usize> {
+    let a = arg.trim();
+    if a.is_empty() {
+        return None;
+    }
+    // NSIS 十进制 LCID / 十六进制 LANGID → 语言 id
+    let via_lcid: Option<&str> = if let Some(hex) = a.strip_prefix("0x").or_else(|| a.strip_prefix("0X")) {
+        u16::from_str_radix(hex, 16).ok().and_then(langid_to_id_u16)
+    } else {
+        a.parse::<u32>()
+            .ok()
+            .filter(|v| *v <= 0xFFFF)
+            .map(|v| v as u16)
+            .and_then(langid_to_id_u16)
+    };
+    match via_lcid {
+        Some(id) => match_language_index(languages, id).or_else(|| match_language_index(languages, a)),
+        None => match_language_index(languages, a),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 测试
 // ---------------------------------------------------------------------------
@@ -601,5 +633,35 @@ mod tests {
         assert_eq!(match_language_index(&two, "fr-FR"), None);
         assert_eq!(match_language_index(&two, ""), None);
         assert_eq!(match_language_index(&langs(&[]), "zh-CN"), None);
+    }
+
+    // 步骤 35：/LANG= 覆盖解析（NSIS 十进制 LCID / 十六进制 LANGID / 语言 id）
+    #[test]
+    fn test_resolve_lang_override() {
+        use crate::config::LanguageSpec;
+        let langs = |ids: &[&str]| -> Vec<LanguageSpec> {
+            ids.iter()
+                .map(|id| LanguageSpec {
+                    id: (*id).into(),
+                    name: String::new(),
+                    text: Default::default(),
+                })
+                .collect()
+        };
+        let two = langs(&["en", "zh-CN"]);
+        // NSIS 十进制 LCID：1033 = 0x0409 en-US → 主标签匹配 en；2052 = 0x0804 zh-CN 精确
+        assert_eq!(resolve_lang_override(&two, "1033"), Some(0));
+        assert_eq!(resolve_lang_override(&two, "2052"), Some(1));
+        // 十六进制 LANGID
+        assert_eq!(resolve_lang_override(&two, "0x0804"), Some(1));
+        // 直接语言 id（大小写不敏感）
+        assert_eq!(resolve_lang_override(&two, "zh-cn"), Some(1));
+        assert_eq!(resolve_lang_override(&two, " en "), Some(0));
+        // LCID 未识别 → 回退原文 id 匹配
+        assert_eq!(resolve_lang_override(&two, "9999"), None);
+        assert_eq!(resolve_lang_override(&two, "zh-CN"), Some(1));
+        // 空 / 未命中
+        assert_eq!(resolve_lang_override(&two, ""), None);
+        assert_eq!(resolve_lang_override(&two, "xx"), None);
     }
 }

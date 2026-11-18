@@ -1190,6 +1190,26 @@ impl BuilderApp {
         let error_pos =
             parse_result.as_ref().err().and_then(|e| scriptide::parse_toml_error_pos(&e.to_string()));
         let has_error = parse_result.is_err();
+        // MI 脚本 v2（步骤 33）：解析成功后对组件指令做静态校验
+        // （必填字段/dword 合法性/hive 前缀），问题面板与状态栏共用
+        let inst_errs: Vec<String> = match &parse_result {
+            Ok(cfg) => cfg
+                .components
+                .iter()
+                .enumerate()
+                .flat_map(|(ci, c)| {
+                    miedit_core::micmd::validate(&c.code).into_iter().map(move |e| {
+                        let cname = if c.name.trim().is_empty() {
+                            format!("#{}", ci + 1)
+                        } else {
+                            c.name.clone()
+                        };
+                        format!("组件「{}」{e}", cname)
+                    })
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        };
         let accent = self.accent();
 
         // 上一帧光标（行号高亮 / 面包屑用；编辑后的新光标由状态栏重读）
@@ -1531,14 +1551,15 @@ impl BuilderApp {
                 col,
                 sel,
                 indent_label,
-                errors: usize::from(has_error),
+                errors: usize::from(has_error || !inst_errs.is_empty()),
                 wrap: self.ide.wrap,
                 dirty: self.script_dirty,
             },
             accent,
         );
 
-        // ---- 问题面板（VSCode Problems）：解析失败时显示首个错误与位置 ----
+        // ---- 问题面板（VSCode Problems）：解析失败时显示首个错误与位置；
+        // 解析成功时显示组件指令静态校验问题（MI 脚本 v2，步骤 33）----
         if let Err(e) = &parse_result {
             ui.add_space(4.0);
             egui::Frame::none()
@@ -1554,6 +1575,22 @@ impl BuilderApp {
                             .color(AMBER)
                             .size(12.0),
                     );
+                });
+        } else if !inst_errs.is_empty() {
+            ui.add_space(4.0);
+            egui::Frame::none()
+                .fill(Color32::from_rgba_unmultiplied(90, 50, 20, 70))
+                .rounding(8.0)
+                .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(format!("! 指令校验：{} 个问题", inst_errs.len()))
+                            .color(AMBER)
+                            .size(12.0),
+                    );
+                    for e in &inst_errs {
+                        ui.label(egui::RichText::new(format!("  {e}")).color(AMBER).size(12.0));
+                    }
                 });
         }
 
@@ -1757,7 +1794,7 @@ impl BuilderApp {
             }
             IdeAction::HelpSyntax => {
                 self.set_flash(
-                    "MI 脚本（.mi）＝ TOML 语法：[节头] 分节；键 = \"值\"；# 注释；数组 [a, b]；布尔 true/false。与向导各页完全互通。",
+                    "MI 脚本（.mi）＝ TOML 语法：[节头] 分节；键 = \"值\"；# 注释；数组 [a, b]；布尔 true/false。与向导各页完全互通。\n组件指令（v2，NSIS Section 指令语义）：组件表内 code = [{ op = \"run\" | \"write_reg\" | \"create_dir\" | \"delete_file\" | \"detail_print\", ... }] 内联数组；路径可用 $INSTDIR/$DESKTOP/$SMPROGRAMS 等 NSIS 常量变量。",
                 );
             }
         }

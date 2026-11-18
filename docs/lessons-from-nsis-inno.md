@@ -549,3 +549,47 @@
    关闭而非直接关窗口——页面级先判面板开合再判查找开合，向导级 Enter/Esc
    拦截在脚本页让位（多行编辑器需要这两个键）。快捷键全集
    （Ctrl+F/H/G/S、Alt+Z、Ctrl+Shift+P）只在脚本页生效，避免污染向导页。
+
+## 二十二、落地清单 · 第十九批（NSIS 对齐 #18，0.1.0）
+
+**MI 脚本 v2 指令层（步骤 33）+ 单实例互斥（步骤 34）+ `/LANG=`
+语言覆盖（步骤 35）**——NSIS Section 指令语义 / CreateMutex 惯例 /
+十进制 LCID 语义。
+
+1. **TOML 数组表不能按名点路径引用元素**：`[[components]]` 是数组表
+   （AoT），`[[components."核心".code]]` 不会把 code 挂到"核心"组件上，
+   而是给最后一个元素挂一个名为"核心"的未知子表——serde 无
+   `deny_unknown_fields` 时**静默忽略**，指令一个都不执行（端到端
+   测试当场抓住：`logs` 目录没创建）。教训：AoT 元素的子数据必须写
+   内联数组（`code = [{ op = "create_dir", path = "..." }]`），并且
+   任何"配置字段是否真的解析到了"都要有端到端验证兜底，单看
+   toml 解析成功不算数。
+2. **NSIS 脚本的 `\` 路径在 Linux 是字面字符**：`$INSTDIR\logs` 展开后
+   在 Linux 会创建名为 `inst\logs` 的目录——解包链路早有
+   `entry.path.replace('\\', "/")` 先例，指令层漏了同一归一化。
+   统一口径：文件系统路径一律 `replace('\\', MAIN_SEPARATOR)`，但
+   注册表键的 `\` 是 hive 分隔符**绝不能归一化**——归一化必须按
+   数据类型分域，不能一刀切。
+3. **指令失败语义 = NSIS error-flag，不是 fail-fast**：NSIS 的
+   `CreateDirectory`/`Delete`/`WriteReg` 失败只置 error flag 继续
+   跑完 Section，脚本作者用 `IfErrors` 自行决定；我们的指令层照搬
+   ——失败记警告继续，唯一例外是 `run` 的 `abort_on_error`（显式
+   选择的中止开关，与 `[[install.exec_before]]` 契约一致）。声明式
+   配置（`[[registry]]`）失败跳过同样是这个传统，两套语义已统一。
+4. **指令副作用要回流卸载清单，NSIS 靠脚本自律，我们靠记录**：NSIS
+   卸载 Section 手写反向操作；MI 脚本没有 un Section（v2 范围），
+   所以指令写注册表/建目录必须登记进清单（`CodeEffects` →
+   `registry_values` 精确清理 + `extra_dirs` 仅空删除）——把
+   "脚本自律"换成"运行时记账"，卸载完整性不依赖作者小心。同类
+   手法之前是 `RegistryValueRef`/`EnvCleanupRef`，现在是第三处。
+5. **单实例互斥用 `Global\` 而非 `Local\`**：per-machine 安装器可能
+   被不同用户会话先后触发，`Local\` 只在同会话生效；互斥名是
+   `Global\MIEDIT-<app_id>[-uninstall]`，app_id 里的非法字符
+   （`\`、空格等）替换为 `_`——互斥名允许任意字符但反斜杠是命名
+   空间分隔符，必须清洗。非 Windows 平台恒成功（stub），行为差异
+   写进函数文档而非 cfg 抖逻辑。
+6. **NSIS `/LANG` 的值是十进制 LCID，不是语言 id**：对 Windows 用户
+   `installer.exe /LANG=2052` 是肌肉记忆——复用系统语言检测已有的
+   LANGIDS 表做反查（1033→en-US→主标签匹配语言包），再叠 `0x`
+   十六进制与语言 id 两种写法；无效值宽容回退（NSIS 不因 /LANG
+   无效而拒绝安装），参数解析与语言匹配分两层、各配单测。

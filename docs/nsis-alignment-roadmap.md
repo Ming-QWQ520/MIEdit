@@ -41,6 +41,9 @@
 | 30 | 安装包打开速度优化（CRC/壁纸后台化） | NSIS CRCCheck 语义保留、窗口先开（体验优先） | **已完成**（0.1.0，#16） |
 | 31 | 全仓 warning 清零（float fallback/未用符号/依赖归位） | rustc `float_literal_f32_fallback`（未来硬错误） | **已完成**（0.1.0，#16） |
 | 32 | 脚本编辑器深度对齐 VSCode（查找替换/命令面板/转到行/minimap/自动缩进/括号补全/状态栏/面包屑） | VSCode `editor.find`、`Ctrl+Shift+P`、`Alt+Z`、minimap、Dark+ 配色 | **已完成**（0.1.0，#17） |
+| 33 | MI 脚本 v2 指令层：组件级自定义指令 + NSIS 常量变量展开 | NSIS Section 指令语义（Exec/WriteReg/CreateDirectory/Delete/DetailPrint）+ `$INSTDIR` 等 shell 常量 | **已完成**（0.1.0，#18） |
+| 34 | 安装器/卸载器单实例互斥 | NSIS CreateMutex 惯例 / Inno `AppMutex` | **已完成**（0.1.0，#18） |
+| 35 | `/LANG=` 命令行语言覆盖 | NSIS `/LANG=<十进制 LCID>` | **已完成**（0.1.0，#18） |
 
 ## 迭代步骤定义
 
@@ -362,6 +365,64 @@
   行号亮色）。builder 测试 5→23 项。
 - **验收**：`cargo test --workspace` 全过；双平台 check 0 error 0 warning。
 
+### 步骤 33：MI 脚本 v2 指令层（组件级自定义指令 + NSIS 常量变量展开）
+- **做什么**：在 MI 脚本 v1（声明式 TOML）上叠加 **NSIS Section 指令语义**——
+  每个组件新增 `code` 指令数组（内联表数组，`op` 判别），组件被勾选后
+  按脚本顺序执行，未勾选组件不执行（NSIS Section 语义）：① `run`
+  （NSIS `Exec`/`ExecWait`，复用 runcmd 执行器，`abort_on_error` 显式中止）；
+  ② `write_reg`（`WriteRegStr`/`WriteRegDWORD`：`type = "str"|"dword"`，
+  新建键/既有键判定随清单精确清理）；③ `create_dir`（`CreateDirectory`：
+  安装目录内记相对路径，目录外记清单 `extra_dirs` 新字段，卸载按
+  `RMDir` 仅空删除语义清理）；④ `delete_file`（`Delete`：缺失静默跳过）；
+  ⑤ `detail_print`（`DetailPrint`：详情日志行）。路径支持 NSIS 常量变量
+  （`$INSTDIR`/`$EXEDIR`/`$DESKTOP`/`$SMPROGRAMS`/`$STARTMENU`/`$QUICKLAUNCH`/
+  `$APPDATA`/`$LOCALAPPDATA`/`$TEMP`/`$WINDIR`/`$SYSDIR`/`$PROGRAMFILES`），
+  文件系统路径安装期按平台分隔符归一化（与解包链路同口径；注册表键
+  的 `\` 是 hive 分隔符不归一化）。指令失败按 NSIS error-flag 语义记
+  警告继续。builder 问题面板新增指令静态校验（必填字段/dword 合法性/
+  hive 前缀）。语法要点：`[[components]]` 是 TOML 数组表，`code` 必须
+  以内联数组写在组件表内（`[[components."名".code]]` 会变成独立未知子表）。
+- **实现**：`miedit-core/src/micmd.rs`（MiInstruction 枚举 + `expand_vars`
+  纯函数长名优先 + `MiVars::standard_map` 跨平台 Shell 目录 + `validate` +
+  `describe`，8 单测）；config `ComponentSpec.code`（serde default，旧脚本
+  兼容）；install.rs `run_component_code`/`execute_instruction`（副作用
+  经 `CodeEffects` 合并进清单）；卸载器新增 `extra_dirs` 清理（最深先删、
+  仅删空、缺失静默跳过）。builder 新增 toml 解析 + 重新生成往返单测。
+- **验收**：Linux 实机端到端——含指令包构建 + 静默安装 exit 0（日志含
+  指令行、`$INSTDIR\logs` 归一化落盘、`$TEMP\e2e-extra-dir` 建目录并
+  入清单）+ 卸载 exit 0（extra_dirs 精确清理）；全仓 160 项单测全过；
+  双平台 check 0 error 0 warning。
+
+### 步骤 34：安装器/卸载器单实例互斥（NSIS CreateMutex 惯例 / Inno AppMutex 对齐）
+- **做什么**：安装器启动后（配置校验后、组件解析前）尝试获取
+  `Global\MIEDIT-<app_id>` 命名互斥（`CreateMutexW` +
+  `ERROR_ALREADY_EXISTS` 判定，`Global\` 前缀覆盖多会话场景）；已有
+  实例运行时 GUI 弹消息框、静默写日志，均以退出码 1 退出。卸载器同
+  机制（互斥名加 `-uninstall` 后缀与安装器区分）。守卫句柄 Drop 释放
+  （进程退出自动释放双保险）。非 Windows 平台恒成功（Linux 适配：
+  无对应惯例，行为不变）。
+- **实现**：`winutil::single_instance_mutex_name`（纯函数：非法字符
+  替换 `_`、空 id 回退 `app`）+ `acquire_single_instance` +
+  `SingleInstanceGuard`（windows-rs `CreateMutexW`，需
+  `Win32_Security` feature）；installer/uninstaller main 挂点。
+- **验收**：互斥名构造 2 项单测（后缀/非法字符/空值回退）；双平台
+  check 0 error；Windows 实机双开验证（本沙箱无法实机验证，行为按
+  NSIS 惯例实现）。
+
+### 步骤 35：`/LANG=` 命令行语言覆盖（NSIS `/LANG` 语义）
+- **做什么**：安装器接受 `--lang=<id>` / `/LANG=<值>`：① NSIS 十进制
+  LCID（`1033` → LANGID 0x0409 → `en-US`，复用内置 LANGIDS 表反查）；
+  ② `0x` 前缀十六进制 LANGID（`0x0804` → `zh-CN`）；③ 直接语言 id
+  （`zh-CN` / `en`）。GUI 与静默模式同生效，优先级高于系统自动预选/
+  语言页预选；无效值宽容回退自动预选（NSIS 同语义，仅静默日志记录）。
+  卸载器同样接受 `/LANG=`，优先于清单记录语言（无效值回退清单预选）。
+  `--help` 补充参数说明。
+- **实现**：`cliargs::parse_lang_arg`（大小写不敏感前缀提取，1 单测）+
+  `langs::resolve_lang_override`（LCID→LANGIDS 反查→match_language_index，
+  1 单测）；installer main + uninstaller main 挂点；app.rs `run_gui`
+  新增 `lang_override` 参数（`.or(initial_language)`）。
+- **验收**：解析/匹配单测 2 项；双平台 check 0 error。
+
 1. **纯 Rust**：不引入 C 构建链；新增依赖须在 Windows/Linux 双平台可编译。
 2. **向后兼容**：旧格式安装包/卸载清单必须仍可处理（serde default / magic 回退）。
 3. **测试**：核心逻辑写成 `miedit-core` 纯函数并加单元测试；`cargo test -p miedit-core`
@@ -373,6 +434,36 @@
    不再随功能对齐批次递增；历史批次 v0.2.0–v0.13.0 保留原版本号记录）。
 
 ## 变更日志
+
+- 0.1.0（步骤 33–35，#18）：**MI 脚本 v2 指令层 + 单实例互斥 + /LANG=
+  语言覆盖**（对齐 NSIS Section 指令语义 / CreateMutex 惯例 / `/LANG`）：
+  ① **MI 脚本 v2 指令层**（步骤 33）：组件新增 `code` 内联指令数组——
+  组件勾选后按脚本顺序执行，未勾选不执行（NSIS Section 语义）；指令集
+  `run`（Exec/ExecWait，abort_on_error 显式中止）/ `write_reg`
+  （WriteRegStr/WriteRegDWORD，新建键/既有键随清单精确清理）/
+  `create_dir`（CreateDirectory，目录外记清单 `extra_dirs` 新字段）/
+  `delete_file`（Delete，缺失静默跳过）/ `detail_print`（DetailPrint）；
+  路径支持 12 个 NSIS 常量变量（`$INSTDIR`/`$DESKTOP`/`$SMPROGRAMS`/
+  `$APPDATA`/`$TEMP`/`$WINDIR`/`$SYSDIR`/`$PROGRAMFILES` 等），
+  文件系统路径按平台分隔符归一化（Linux 实机适配；注册表键 hive
+  分隔符不归一化）；指令失败按 NSIS error-flag 记警告继续；
+  `miedit-core/src/micmd.rs`（MiInstruction + expand_vars 长名优先 +
+  MiVars::standard_map + validate + describe，8 单测）；builder 问题
+  面板新增指令静态校验 + toml 往返单测。语法要点：`[[components]]`
+  是数组表，`code` 必须以内联表数组写在组件表内。② **单实例互斥**
+  （步骤 34，NSIS CreateMutex 惯例 / Inno AppMutex 对齐）：安装器/
+  卸载器 `Global\MIEDIT-<app_id>[-uninstall]` 命名互斥
+  （CreateMutexW + ERROR_ALREADY_EXISTS，`Win32_Security` feature，
+  Drop 释放双保险），已有实例 GUI 弹框/静默日志 + exit 1；
+  非 Windows 恒成功（Linux 行为不变）。③ **`/LANG=` 语言覆盖**
+  （步骤 35，NSIS `/LANG=<十进制 LCID>` 语义）：安装器/卸载器
+  `--lang=` / `/LANG=` 支持 NSIS 十进制 LCID（1033→en-US）/
+  `0x` 十六进制 LANGID / 语言 id 三种写法，GUI+静默同生效，
+  优先于自动预选与清单记录语言；无效值宽容回退（NSIS 同语义）；
+  `--help` 同步。新增 micmd/winutil/cliargs/langs/builder 共 12 项
+  单测，全仓 148→160 项全过；Linux 实机端到端（含指令包构建 +
+  静默安装 exit 0 + 指令执行/路径归一化/清单 extra_dirs 落盘 +
+  卸载 exit 0 + extra_dirs 精确清理）；双平台 check 0 error 0 warning。
 
 - 0.1.0（步骤 32，#17）：**脚本编辑器深度对齐 VSCode**（用户指令
   2026-11-18「优化编辑页面对齐vscode」）：新建 `miedit-builder/src/scriptide.rs`

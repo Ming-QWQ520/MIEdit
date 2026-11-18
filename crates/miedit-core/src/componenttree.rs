@@ -160,6 +160,7 @@ mod tests {
             required,
             files: vec![0],
             group: group.into(),
+            code: Vec::new(),
         }
     }
 

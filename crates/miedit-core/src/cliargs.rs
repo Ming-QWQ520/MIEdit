@@ -66,6 +66,8 @@ pub fn help_text(binary: &str, app_name: &str, version: &str) -> String {
   --dir=<路径>, /D=<路径>  指定安装目录（覆盖默认目录）\n\
   --components=<列表>      仅安装列出的组件（逗号分隔的组件名或 1 起始序号）\n\
   --no-shortcuts           不创建快捷方式\n\
+  --lang=<id>, /LANG=<id>  指定界面语言（语言 id 如 zh-CN / en，或 NSIS 十进制\n\
+                           LCID 如 1033=English、2052=简体中文；无效值回退自动预选）\n\
   --repair, /repair        修复模式（全量重装文件并重建快捷方式/注册表）\n\
   --ncrc, /ncrc            跳过安装包 CRC32 完整性校验\n\
   --help, /?               显示本帮助并退出\n\
@@ -73,6 +75,24 @@ pub fn help_text(binary: &str, app_name: &str, version: &str) -> String {
 \n\
 退出码: 0 成功 · 1 安装失败 · 2 参数无效"
     )
+}
+
+/// `/LANG=` / `--lang=` 参数提取（NSIS `/LANG=1033` 十进制 LCID 语义，
+/// 路线图步骤 35）：返回原始值串（十进制数字或语言 id 如 `zh-CN`），
+/// 大小写不敏感前缀匹配；未提供返回 None；值是否有效由
+/// [`miedit_core::langs::resolve_lang_override`] 解析（无效值回退自动预选，
+/// 不报参数错误——NSIS 同语义）。
+pub fn parse_lang_arg(args: &[String]) -> Option<String> {
+    for a in args {
+        let low = a.to_ascii_lowercase();
+        if let Some(rest) = low.strip_prefix("/lang=") {
+            return Some(a[a.len() - rest.len()..].trim().to_string());
+        }
+        if let Some(rest) = low.strip_prefix("--lang=") {
+            return Some(a[a.len() - rest.len()..].trim().to_string());
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -124,7 +144,21 @@ mod tests {
         assert!(t.contains("--silent"));
         assert!(t.contains("--components="));
         assert!(t.contains("--no-shortcuts"));
+        assert!(t.contains("--lang="));
         assert!(t.contains("Demo 1.0"));
         assert!(t.contains("退出码"));
+    }
+
+    // 步骤 35：/LANG= 参数提取（NSIS 十进制 LCID 或语言 id）
+    #[test]
+    fn test_parse_lang_arg() {
+        let a = |v: &[&str]| -> Vec<String> { v.iter().map(|s| s.to_string()).collect() };
+        assert_eq!(parse_lang_arg(&a(&["/LANG=1033"])), Some("1033".into()));
+        assert_eq!(parse_lang_arg(&a(&["/lang=zh-CN"])), Some("zh-CN".into()));
+        assert_eq!(parse_lang_arg(&a(&["--lang= en "])), Some("en".into()));
+        assert_eq!(parse_lang_arg(&a(&["/S", "/LANG=2052"])), Some("2052".into()));
+        assert_eq!(parse_lang_arg(&a(&["/S", "/D=C:\\x"])), None);
+        // 非语言参数（如 /LANGUAGES=xxx）不误匹配
+        assert_eq!(parse_lang_arg(&a(&["/language=xx"])), None);
     }
 }

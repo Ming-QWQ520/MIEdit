@@ -15,6 +15,7 @@ pub mod installdir;
 pub mod installtypes;
 pub mod langs;
 pub mod manifest;
+pub mod micmd;
 pub mod overwrite;
 pub mod regspec;
 pub mod repair;

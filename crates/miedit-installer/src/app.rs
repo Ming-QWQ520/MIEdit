@@ -79,10 +79,12 @@ pub fn run_gui(
     cli_components: Option<Vec<bool>>,
     no_shortcuts: bool,
     ncrc: bool,
+    lang_override: Option<usize>,
 ) -> anyhow::Result<()> {
     let cfg = &pkg.config;
-    // 启动语言预选（NSIS MUI：多语言时预选系统语言，单语言直接使用，无语言包保持旧行为）
-    let language = miedit_core::langs::initial_language(cfg);
+    // 启动语言预选（NSIS MUI：多语言时预选系统语言，单语言直接使用，无语言包保持旧行为）。
+    // 步骤 35：`/LANG=` 命令行覆盖优先（NSIS /LANG 语义），无效值回退自动预选
+    let language = lang_override.or_else(|| miedit_core::langs::initial_language(cfg));
     let title = miedit_core::config::fill_template(
         &miedit_core::config::resolved_text(cfg, language, "window_title"),
         &cfg.app.name,
@@ -404,6 +406,26 @@ impl InstallerApp {
         Some(set)
     }
 
+    /// 组件勾选布尔表（MI 脚本 v2 指令层，步骤 33：NSIS Section 语义——
+    /// required 或勾选的组件才执行其 `code` 指令）；未启用组件页 → None。
+    /// 口径与 `selected_rules`（`required || checked`）一致。
+    fn comp_selection(&self) -> Option<Vec<bool>> {
+        if !self.has_components() {
+            return None;
+        }
+        Some(
+            self.pkg
+                .config
+                .components
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    c.required || self.component_checked.get(i).copied().unwrap_or(true)
+                })
+                .collect(),
+        )
+    }
+
     fn selected_bytes(&self) -> u64 {
         match self.selected_rules() {
             None => self.pkg.total_bytes,
@@ -484,6 +506,7 @@ impl InstallerApp {
         }
 
         let rules = self.selected_rules();
+        let comp_sel = self.comp_selection();
         // 步骤 30：传递后台 CRC 校验门（安装线程在提取前等待校验结果）
         let gate = Some(self.crc_gate.clone());
         self.state = install::spawn(
@@ -491,6 +514,7 @@ impl InstallerApp {
             dest,
             Some(ctx.clone()),
             rules,
+            comp_sel,
             self.language,
             self.no_shortcuts,
             gate,
@@ -1606,11 +1630,13 @@ impl InstallerApp {
                         let dest = PathBuf::from(self.dir_text.trim().trim_matches('"'));
                         self.dest = dest.clone();
                         let rules = self.selected_rules();
+                        let comp_sel = self.comp_selection();
                         self.state = install::spawn(
                             self.pkg.clone(),
                             dest,
                             Some(ctx.clone()),
                             rules,
+                            comp_sel,
                             self.language,
                             self.no_shortcuts,
                             Some(self.crc_gate.clone()),

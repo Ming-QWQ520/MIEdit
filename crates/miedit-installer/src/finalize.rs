@@ -33,6 +33,19 @@ fn shortcut_record_path(lnk: &Path) -> PathBuf {
     }
 }
 
+/// MI 脚本 v2 组件指令的副作用收集（步骤 33）：安装期执行
+/// `run_component_code` 时登记，`finalize_install` 合并进卸载清单，
+/// 保证指令写入的注册表/目录在卸载时被精确清理（NSIS UninstallLog 对齐）。
+#[derive(Debug, Default)]
+pub struct CodeEffects {
+    /// 指令写入的注册表键（含 hive 前缀；去重后合并）
+    pub registry_keys: Vec<String>,
+    /// 指令写入的注册表值引用（精确清理）
+    pub registry_values: Vec<miedit_core::manifest::RegistryValueRef>,
+    /// 指令在安装目录之外创建的目录（绝对路径；NSIS RMDir 语义清理）
+    pub extra_dirs: Vec<String>,
+}
+
 pub fn finalize_install(
     pkg: &Package,
     dest: &Path,
@@ -41,6 +54,7 @@ pub fn finalize_install(
     st: &Mutex<ProgressState>,
     language: Option<usize>,
     shortcuts_enabled: bool,
+    code_effects: &CodeEffects,
 ) -> Result<UninstallManifest> {
     let cfg = &pkg.config;
     let per_machine = cfg.app.per_machine;
@@ -128,7 +142,27 @@ pub fn finalize_install(
             .unwrap_or_default(),
         // 环境变量清理引用（步骤 27，下方逐条填充）
         env_values: Vec::new(),
+        // 组件指令在安装目录外创建的目录（步骤 33，下方合并）
+        extra_dirs: Vec::new(),
     };
+
+    // 1b. 合并组件指令副作用（步骤 33）：write_reg → 精确清理引用；
+    //     create_dir（安装目录外）→ extra_dirs。去重合并避免重复清理。
+    for k in &code_effects.registry_keys {
+        if !manifest.registry_keys.contains(k) {
+            manifest.registry_keys.push(k.clone());
+        }
+    }
+    for v in &code_effects.registry_values {
+        if !manifest.registry_values.contains(v) {
+            manifest.registry_values.push(v.clone());
+        }
+    }
+    for d in &code_effects.extra_dirs {
+        if !manifest.extra_dirs.contains(d) {
+            manifest.extra_dirs.push(d.clone());
+        }
+    }
 
     // 2. 快捷方式（简单开关 + Inno [Icons] 风格条目，路线图步骤 13；
     //    步骤 21：CLI --no-shortcuts 可整体跳过）

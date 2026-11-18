@@ -52,10 +52,14 @@ pub struct UninstallManifest {
     /// 环境变量清理引用（步骤 27）：`created_value` = 安装时新建的值
     /// （卸载时直接删除）；否则若 `path_segment` 非空则从列表中移除该段后回写
     pub env_values: Vec<EnvCleanupRef>,
+    /// 安装目录**之外**创建的目录（MI 脚本 v2 组件指令 `create_dir`，
+    /// 路线图步骤 33；绝对路径）。卸载时按 NSIS `RMDir` 语义处理：
+    /// 仅删除空目录，非空保留并记日志。旧清单无此字段 → 空 → 行为不变。
+    pub extra_dirs: Vec<String>,
 }
 
 /// 单条自定义注册表值的清理引用（步骤 22）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RegistryValueRef {
     /// 含 hive 前缀的键（与 registry_keys 一致）

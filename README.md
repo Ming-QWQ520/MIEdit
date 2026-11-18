@@ -24,7 +24,7 @@
 | --- | --- |
 | **GUI 构建向导** | HM NIS Edit / Inno Setup 式 **10 步向导 + 左栏步骤树**（全部步骤可点直达、当前高亮、完成 √）：欢迎 → 应用信息 → 安装程序选项（**实时预览**）→ 目录与授权 → 文件与组件 → 快捷方式 → 完成后运行 → 卸载与注册表 → **MI 脚本 IDE**（深度对齐 VSCode，见下）→ 构建（wpReady 式摘要 + 一键构建） |
 | **MI 脚本 IDE** | VSCode 式编辑器：文件标签（未保存圆点）+ 行号（**当前行行号亮色**）+ Dark+ 语法高亮 + **查找/替换**（Ctrl+F/H，命中计数 n/N、逐个跳转、大小写开关）+ **命令面板**（Ctrl+Shift+P）+ **转到行**（Ctrl+G）+ **minimap**（点击跳行）+ **面包屑**（`文件 › [当前节]`）+ **状态栏**（Ln/Col、选中、缩进风格、UTF-8、错误计数）+ **自动缩进/Tab 转空格/括号引号补全** + Alt+Z 自动换行 + 错误行红标 + 实时校验问题面板 |
-| 脚本驱动 | 一份 `.mi`（MI 脚本，自研轻量脚本语言，TOML 语法）描述应用、文件、组件、UI 与快捷方式，与向导完全互通 |
+| 脚本驱动 | 一份 `.mi`（MI 脚本，自研轻量脚本语言，TOML 语法）描述应用、文件、组件、UI 与快捷方式，与向导完全互通；**v2 组件指令**（NSIS Section 指令语义）：组件表内 `code = [{ op = "run" / "write_reg" / "create_dir" / "delete_file" / "detail_print", ... }]`，勾选组件按序执行（未选不执行），路径支持 `$INSTDIR`/`$DESKTOP`/`$SMPROGRAMS`/`$APPDATA`/`$TEMP`/`$WINDIR` 等 12 个 NSIS 常量变量，副作用自动登记卸载清单精确清理 |
 | 自解压安装器 | 单文件 EXE：`[stub][payload][config][卸载器][背景图][图标][Trailer]` |
 | 现代化 UI | egui 无边框窗口、玻璃卡片、主题色可配、自绘进度条、中文字体自适应 |
 | **全窗口图片背景** | `background = "bg.png"`，`cover / contain / stretch` 三种模式 |
@@ -45,7 +45,9 @@
 | **界面模板** | 五套内置模板一键切换：`ui.template = aurora / midnight / sunrise / forest / mono` |
 | **液态玻璃** | `ui.material = "glass"` 半透明卡片 + 高光描边（默认）；`ui.acrylic` 启用 Win11 亚克力背景板（失败自动回退） |
 | **Linux 适配** | 安装器/卸载器 Linux 可用：XDG 路径模板、`.desktop` 快捷方式、`uninstall.json` 清单卸载、CJK 字体回退；CI 产出 Linux zip |
-| **命令行安装** | `--silent` `--dir=` `--components=` `--no-shortcuts` `--repair` `--help` `--version`，退出码 0/1/2（NSIS `/S` + Inno `/COMPONENTS` 语义） |
+| **命令行安装** | `--silent` `--dir=` `--components=` `--no-shortcuts` `--lang=` `--repair` `--help` `--version`，退出码 0/1/2（NSIS `/S` + Inno `/COMPONENTS` 语义） |
+| **单实例互斥** | NSIS CreateMutex 惯例 / Inno `AppMutex` 对齐：安装器/卸载器 `Global\MIEDIT-<app_id>[-uninstall]` 命名互斥，已有实例运行时 GUI 弹框/静默日志 + 退出（多会话覆盖） |
+| **语言命令行覆盖** | NSIS `/LANG=<十进制 LCID>` 语义：`--lang=2052` / `/LANG=1033` / `0x` 十六进制 / 语言 id 均可，GUI+静默同生效，优先于自动预选与清单记录语言，无效值宽容回退 |
 | 运行中检测 | 安装前独占探测主程序占用，重试/继续 |
 | 升级检测 | 发现旧版本记录版本号并静默卸载后升级（`InstallDirRegKey` 式目录记忆） |
 | 权限 | `per_machine = true` 启动时自动 UAC 提权重启 |
@@ -188,6 +190,19 @@ name = "核心程序"
 description = "主程序（必需）"
 required = true               # 必装：勾选锁定
 files = [0, 2]                # 引用 [[files]] 规则索引；未被引用的规则始终安装
+code = [                      # MI 脚本 v2 组件指令（NSIS Section 指令语义，可选）：
+                              # 组件勾选后按序执行，未选不执行；失败记警告继续
+                              # （run.abort_on_error = true 显式中止）
+  { op = "detail_print", text = "正在注册核心组件…" },
+  { op = "create_dir", path = "$INSTDIR\\logs" },       # NSIS CreateDirectory
+  { op = "delete_file", path = "$INSTDIR\\old.cfg" },   # NSIS Delete（缺失静默跳过）
+  { op = "write_reg", key = "HKCU\\Software\\Demo",     # NSIS WriteRegStr/WriteRegDWORD
+    name = "Path", value = "$INSTDIR", type = "str" },  # type = "str"（默认）| "dword"
+  { op = "run", cmd = "$INSTDIR\\setup.bat", args = "/q", abort_on_error = false },
+]
+# 路径可用 NSIS 常量变量：$INSTDIR $EXEDIR $DESKTOP $SMPROGRAMS $STARTMENU
+# $QUICKLAUNCH $APPDATA $LOCALAPPDATA $TEMP $WINDIR $SYSDIR $PROGRAMFILES
+# 注意：[[components]] 是数组表，code 必须写内联数组（不能写 [[components."名".code]]）
 
 [[install_types]]             # NSIS InstallTypes / Inno [Types]（可选）
 name = "典型"
@@ -225,7 +240,7 @@ crates/
 ## 测试
 
 ```bash
-cargo test --workspace    # 148 个单元测试：归档（含 LZMA/Brotli 压缩算法往返）/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/文件错误决策与提示信箱/重启替换/安装类型状态机/系统版本门槛/目录统计/组件过滤映射/slug/语言匹配与 LANGID 映射/多语言文案解析链/卸载器文案键集与解析链/卸载语言匹配索引/环境变量解析与 PATH 合并去重/卸载清单新旧兼容/修复入口与修复统计/包尾 v4 与卸载数据新旧格式/安装目录解析与根路径校验/盘符切换空间刷新回归/内置模板色板/CLI 组件参数解析/压缩方式别名归一化/CRC 后台校验门/MI 脚本语法高亮与脚本 IDE 纯逻辑（查找/替换/字符字节换算/自动缩进/括号补全/命令面板过滤/面包屑/缩进检测）
+cargo test --workspace    # 160 个单元测试：归档（含 LZMA/Brotli 压缩算法往返）/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/文件错误决策与提示信箱/重启替换/安装类型状态机/系统版本门槛/目录统计/组件过滤映射/slug/语言匹配与 LANGID 映射/多语言文案解析链/卸载器文案键集与解析链/卸载语言匹配索引/环境变量解析与 PATH 合并去重/卸载清单新旧兼容/修复入口与修复统计/包尾 v4 与卸载数据新旧格式/安装目录解析与根路径校验/盘符切换空间刷新回归/内置模板色板/CLI 组件参数解析/LANG 参数提取与 NSIS LCID 覆盖/压缩方式别名归一化/CRC 后台校验门/MI 脚本语法高亮与脚本 IDE 纯逻辑（查找/替换/字符字节换算/自动缩进/括号补全/命令面板过滤/面包屑/缩进检测）/MI 脚本 v2 组件指令（变量展开/校验/serde 往返/互斥名构造）
 ```
 
 已在 Windows 10 x64 实机验证：CLI 与 GUI 构建链路、静默安装/卸载全清理、组件过滤生效、

@@ -259,6 +259,10 @@ pub struct ComponentSpec {
     /// 父分组路径（NSIS `SectionGroup`/`SectionGroupEnd` 嵌套等价，路线图步骤 24）：
     /// 如 `"Tools/Compression"`（`/` 分隔多级），空 = 根级。中间组自动创建。
     pub group: String,
+    /// 组件指令代码段（MI 脚本 v2，NSIS Section 指令语义，路线图步骤 33）：
+    /// 组件被勾选后按脚本顺序执行；未勾选组件的指令不执行。
+    /// 旧脚本无此字段 → 空 → 行为不变（向后兼容）。
+    pub code: Vec<crate::micmd::MiInstruction>,
 }
 
 impl Default for ComponentSpec {
@@ -269,6 +273,7 @@ impl Default for ComponentSpec {
             required: false,
             files: Vec::new(),
             group: String::new(),
+            code: Vec::new(),
         }
     }
 }

@@ -1356,6 +1356,39 @@ mod tests {
         assert!(!it2.enter && it2.open.is_none() && it2.quote.is_none());
     }
 
+    // 步骤 33：MI 脚本 v2 组件指令——内联 code 数组解析 + 重新生成脚本往返
+    // （[[components]] 是 AoT，code 必须写内联表数组；builder 脏检测依赖
+    // to_string_pretty 输出可再次解析）
+    #[test]
+    fn component_code_toml_parse_and_regenerate_roundtrip() {
+        let src = r#"
+[[components]]
+name = "C1"
+files = [0]
+code = [
+  { op = "detail_print", text = "hi" },
+  { op = "write_reg", key = "HKCU\\S\\D", name = "p", value = "$INSTDIR" },
+  { op = "write_reg", key = "HKLM\\S\\D", name = "n", value = "1", type = "dword" },
+  { op = "create_dir", path = "$INSTDIR\\logs" },
+  { op = "delete_file", path = "$INSTDIR\\old.log" },
+  { op = "run", cmd = "a.bat", args = "/q", abort_on_error = true },
+]
+"#;
+        let cfg: miedit_core::config::Config = toml::from_str(src).unwrap();
+        assert_eq!(cfg.components[0].code.len(), 6);
+        // 校验干净（HKCU/HKLM 前缀 + dword 合法）
+        assert!(miedit_core::micmd::validate(&cfg.components[0].code).is_empty());
+        // 重新生成（builder 脏检测路径）→ 再解析 → 指令不变
+        let out = toml::to_string_pretty(&cfg).unwrap();
+        let cfg2: miedit_core::config::Config = toml::from_str(&out).unwrap();
+        assert_eq!(cfg2.components[0].code, cfg.components[0].code);
+        // 未知 op 报解析错误（问题面板可见）
+        assert!(toml::from_str::<miedit_core::config::Config>(
+            "[[components]]\nname = \"x\"\ncode = [{ op = \"nope\" }]"
+        )
+        .is_err());
+    }
+
     #[test]
     fn mi_script_job_line_numbers_and_comment() {
         let job = mi_script_job_hl("# hello\n", None);
