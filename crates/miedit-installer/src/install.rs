@@ -317,23 +317,24 @@ fn run_install(
         s0.total_files = a.len() as u64;
     }
 
-    // 4. 解包（NSIS SetCompressor 对齐：solid 整包 Deflate / lzma-solid / brotli-solid，或条目级压缩）
+    // 4. 解包（NSIS SetCompressor 对齐：solid 整包压缩（deflate/brotli/bzip2/lzma/zstd
+    //    及其 ultra 激进档），或条目级压缩由条目标志位在解码时区分）
     let raw = miedit_core::trailer::read_range(&mut fs::File::open(&pkg.path)?, pkg.trailer.payload)?;
-    use miedit_core::archive::{decompress_bytes, Algo};
-    let archive: Vec<u8> = match pkg.config.install.compression.as_str() {
-        "solid" => {
-            push_log(st, "解压 Deflate solid 归档（整包）...");
-            decompress_bytes(Algo::Deflate, &raw).context("solid 解压失败")?
+    use miedit_core::archive::{compression_params, decompress_bytes};
+    let archive: Vec<u8> = match compression_params(&pkg.config.install.compression) {
+        Some((true, algo, ultra)) => {
+            push_log(
+                st,
+                &format!(
+                    "解压 {}{} solid 归档（整包）...",
+                    algo.label(),
+                    if ultra { " Ultra（激进）" } else { "" }
+                ),
+            );
+            decompress_bytes(algo, &raw).context("solid 整包解压失败")?
         }
-        "lzma-solid" => {
-            push_log(st, "解压 LZMA solid 归档（整包）...");
-            decompress_bytes(Algo::Lzma, &raw).context("lzma solid 解压失败")?
-        }
-        "brotli-solid" => {
-            push_log(st, "解压 Brotli solid 归档（整包）...");
-            decompress_bytes(Algo::Brotli, &raw).context("brotli solid 解压失败")?
-        }
-        _ => raw, // 条目级压缩（deflate/lzma/brotli）由条目标志位在解码时区分
+        // 条目级压缩（deflate/lzma/brotli/bzip2/zstd 或旧清单空值）由条目标志位区分
+        _ => raw,
     };
     let mut reader = ArchiveReader::new(&archive[..]).context("安装包 payload 无效")?;
     {

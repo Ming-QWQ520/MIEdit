@@ -75,9 +75,9 @@
 | **卸载器壁纸** | `install.uninstall_background` 配置卸载向导背景图（编译期内嵌进卸载器 EXE），全窗铺满 + 半透明遮罩；缺省内置渐变 |
 | **install.log** | NSIS `LogSet` 风格安装日志落盘到 `$INSTDIR\install.log`（`install.write_log` 可关） |
 | **包完整性校验** | NSIS `CRCCheck` 对齐：安装包尾写入 payload/config/uninstaller 三分区 CRC32（MIEDPKG3），启动时流式校验，损坏包报"安装包已损坏"；`--ncrc` / `/ncrc` 跳过；旧格式包仍可安装 |
-| 压缩 | 六档（NSIS `SetCompressor` 对齐 + 扩展，全部纯 Rust）：`deflate`（条目级）· `solid`（整包 Deflate）· `lzma` / `lzma-solid`（NSIS 旗舰 LZMA，tukaani xz-for-java 纯 Rust 移植）· `brotli` / `brotli-solid`（现代算法）；实测 lzma-solid 体积最小 |
+| 压缩 | 十四档（NSIS `SetCompressor` 对齐 + 扩展，全部纯 Rust）：`deflate`（条目级）· `solid`（整包 Deflate）· `bzip2` / `bzip2-solid`（NSIS 经典算法，libbz2-rs 纯 Rust）· `lzma` / `lzma-solid`（NSIS 旗舰 LZMA，tukaani xz-for-java 纯 Rust 移植）· `brotli` / `brotli-solid`（现代算法）· `zstd` / `zstd-solid`（Inno 扩展对齐，mzstd 纯 Rust）· **激进档** `lzma-ultra` / `lzma-ultra-solid`（preset 9 + 64MB 字典 + nice_len 273）与 `zstd-ultra` / `zstd-ultra-solid`（level 22），兼容别名 bz2/zst/zstandard/lzma-9/zstd-22；混合语料 2.86MB 实测：lzma 9.8%（体积最小）· zstd 15.5%（解压 61ms 最快）· bzip2 15.3% · deflate 21.8%；ultra 仅改编码参数、输出格式自描述，解码端零改动，小语料增益有限请按包体量选档 |
 | Unicode | 中文路径 / 文件名 / UI 全支持 |
-| 纯 Rust | 无 C 构建链依赖（egui / flate2 / brotli / lzma-rust / walkdir / winreg / windows-rs） |
+| 纯 Rust | 无 C 构建链依赖（egui / flate2 / brotli / lzma-rust / bzip2→libbz2-rs / mzstd / walkdir / winreg / windows-rs） |
 
 ## 快速开始
 
@@ -271,7 +271,7 @@ crates/
 ## 测试
 
 ```bash
-cargo test --workspace    # 212 个单元测试（本轮新增 midiag 诊断/纠错、theme 模式解析与设置持久化、KNOWN_OPS 清单守卫、[build] 段兼容等）：归档（含 LZMA/Brotli 压缩算法往返）/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/文件错误决策与提示信箱/重启替换/安装类型状态机/系统版本门槛/目录统计/组件过滤映射/slug/语言匹配与 LANGID 映射/多语言文案解析链/卸载器文案键集与解析链/卸载语言匹配索引/环境变量解析与 PATH 合并去重/卸载清单新旧兼容/修复入口与修复统计/包尾 v4 与卸载数据新旧格式/安装目录解析与根路径校验/盘符切换空间刷新回归/内置模板色板/CLI 组件参数解析/LANG 参数提取与 NSIS LCID 覆盖/压缩方式别名归一化/CRC 后台校验门/MI 脚本语法高亮与脚本 IDE 纯逻辑（查找/替换/字符字节换算/自动缩进/括号补全/命令面板过滤/面包屑/缩进检测）/MI 脚本 v2 组件指令（变量展开/校验/serde 往返/互斥名构造/UAC 执行级别与 manifest XML/CopyFiles 复制内核与自嵌套防护/INI 写入语义/磁盘空间预检判定）
+cargo test --workspace    # 214 个单元测试（本轮新增 compression_params 分派映射、ultra 激进档 roundtrip，压缩算法往返扩容到五算法）：归档（含 Deflate/BZip2/LZMA/Brotli/Zstd 压缩算法往返与激进档）/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/文件错误决策与提示信箱/重启替换/安装类型状态机/系统版本门槛/目录统计/组件过滤映射/slug/语言匹配与 LANGID 映射/多语言文案解析链/卸载器文案键集与解析链/卸载语言匹配索引/环境变量解析与 PATH 合并去重/卸载清单新旧兼容/修复入口与修复统计/包尾 v4 与卸载数据新旧格式/安装目录解析与根路径校验/盘符切换空间刷新回归/内置模板色板/CLI 组件参数解析/LANG 参数提取与 NSIS LCID 覆盖/压缩方式别名归一化与分派映射/CRC 后台校验门/MI 脚本语法高亮与脚本 IDE 纯逻辑（查找/替换/字符字节换算/自动缩进/括号补全/命令面板过滤/面包屑/缩进检测）/MI 脚本 v2 组件指令（变量展开/校验/serde 往返/互斥名构造/UAC 执行级别与 manifest XML/CopyFiles 复制内核与自嵌套防护/INI 写入语义/磁盘空间预检判定）
 ```
 
 已在 Windows 10 x64 实机验证：CLI 与 GUI 构建链路、静默安装/卸载全清理、组件过滤生效、

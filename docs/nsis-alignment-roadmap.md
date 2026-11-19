@@ -24,7 +24,7 @@
 | 13 | 快捷方式增强：快速启动栏、独立 lnk 任务 | Inno `[Icons]` | **已完成**（v0.7.0） |
 | 14 | 卸载完成页统计（文件数/回收空间） | NSIS 卸载统计 | **已完成**（v0.7.0） |
 | 15 | 多语言框架（MUI 式语言选择 + 文案包） | NSIS MUI2 | **已完成**（v0.8.0） |
-| 16 | zstd 压缩档 | Inno `Compression.Zstd.pas`（等纯 Rust 编码器成熟） | **阻塞**（依赖待成熟，见步骤 16 定义） |
+| 16 | BZip2/Zstd 压缩档 | NSIS `SetCompressor bzip2` / Inno `Compression.Zstd` | **已完成**（0.1.0，#22） |
 | 17 | ARP ModifyPath/修复入口 | Inno `ModifyPath`/修复向导 | **已完成**（v0.9.0） |
 | 18 | 安装/卸载完成详情停留页 | NSIS `MUI_PAGE_INSTFILES`（完成后停留，点「下一步」进 Finish） | **已完成**（v0.10.0） |
 | 19 | 卸载器壁纸 | Inno 卸载向导背景图 / NSIS `BGImage` | **已完成**（v0.10.0） |
@@ -53,6 +53,9 @@
 | 42 | `mis` 命令行（`mis build`）+ 默认输出目录 + PATH 环境变量写入 | NSIS makensis CLI / 用户指令（命令头 mis） | **已完成**（0.1.0，#21） |
 | 43 | 语法检测和纠错（诊断 + 一键快速修复） | VSCode Problems / Quick Fix | **已完成**（0.1.0，#21） |
 | 44 | 深色/浅色主题（默认跟随系统）+ 顶部菜单（文件/选项/设置/关于） | VSCode 主题与菜单栏 | **已完成**（0.1.0，#21） |
+| 45 | 压缩档大扩充：BZip2/Zstd(+solid) 落地 + 激进压缩档 lzma-ultra/zstd-ultra/brotli-ultra（14 档矩阵） | NSIS `SetCompressor bzip2` / Inno Zstd + 用户指令（增加压缩方法、激进压缩方案、优化 zstd/bzip2 编码器） | **已完成**（0.1.0，#22） |
+| 46 | 压缩差分基准与模糊往返（14 档压缩率/耗时表入库 + 可复现种子 fuzz roundtrip） | 健壮性对齐（压缩链路回归防护） | **待办** |
+| 47 | 14 档端到端矩阵验证（构建→静默安装→逐字节比对，扩展 #13 Linux 无头脚本） | 健壮性对齐（自解压链路回归） | **待办** |
 
 ## 迭代步骤定义
 
@@ -127,6 +130,19 @@
   `lzma`/`lzma-solid` 已落地（步骤 25）；② **bzip2 同样阻塞**——
   `bzip2-rs` 仅有解码器，`bzip2` crate 是 C 绑定；③ zstd 维持阻塞。
   NSIS 三档中 zlib/lzma 已纯 Rust 对齐，仅 bzip2 待生态成熟。
+- **解阻记录**（2026-11-20，#22，用户指令「再增加压缩方法，增加激进压缩
+  方案 / 优化 zstd/bzip2 编码器」）：纯 Rust 生态复查命中两个新实现——
+  ① **zstd**：`mzstd 0.2`（zstd 1.5.7 编码器逐字节等价纯 Rust 移植，
+  自带解码器，依赖仅 borrowed-buf/branches/fearless_simd/thiserror，无 C 链）；
+  ② **bzip2**：`bzip2 0.6` 默认后端 **libbz2-rs-sys**（libbzip2 纯 Rust 化，
+  零依赖）。`zstd`/`zstd-solid`、`bzip2`/`bzip2-solid` 四档落地，标志位
+  bit4=bzip2（16）、bit5=zstd（32），归一化别名（bz2/zst/zstandard 等）
+  与旧包兼容；同步新增激进档 `lzma-ultra`（preset 9 64MB 字典 +
+  nice_len 273）/`zstd-ultra`（level 22）/`brotli-ultra`（quality 11），
+  ultra 仅改编码参数、输出格式自描述，解码端零改动。混合语料 2.86MB
+  实测：lzma 9.8%（最小）· zstd 15.5%（解压 61ms 最快）· bzip2 15.3%
+  （NSIS 经典）· deflate 21.8%；ultra 档收益与语料规模正相关，小语料
+  与标准档相当（诚实记录，见 lessons）。
 
 ### 步骤 17：ARP ModifyPath/修复入口（已实现，v0.9.0）
 - **设计**：卸载注册表键写 `ModifyPath = "<安装器路径>" --repair`；安装器解析
@@ -514,6 +530,29 @@
   then 分支命中执行 + rmdir 三态（空删/非空保留/缺失跳过）+
   exec_shell 失败不中止安装；双平台 check 0 error 0 warning。
 
+### 步骤 45：压缩档大扩充——BZip2/Zstd 落地 + 激进压缩档（用户指令 2026-11-20）
+- **做什么**：① 新增 `bzip2`/`bzip2-solid`（bzip2 0.6 crate，默认后端
+  libbz2-rs-sys 纯 Rust，level 9 = 900k 块，NSIS `SetCompressor bzip2`
+  对齐）；② 新增 `zstd`/`zstd-solid`（mzstd 0.2 纯 Rust，zstd 1.5.7
+  编码器逐字节等价移植，标准档 level 19，解码端默认窗口上限 2^27）；
+  ③ 激进压缩档（ultra）：`lzma-ultra`/`lzma-ultra-solid`（preset 9
+  64MB 字典 + nice_len 273，xz -9e 同档）、`zstd-ultra`/
+  `zstd-ultra-solid`（level 22）、brotli ultra（quality 11，仅编码参数
+  不单列选项）；④ 归一化别名扩充（bz2/zst/zstandard/lzma-9/zstd-22
+  等全部兼容）；⑤ UI 压缩下拉接入 `COMPRESSION_OPTIONS` 14 档 +
+  `compression_label`/`compression_params` core 共用分派（编译器/
+  安装器/预览摘要三处去重）。
+- **兼容性**：归档标志位只加位（bit4=bzip2、bit5=zstd）不动位，
+  旧包解码行为不变；ultra 仅改编码参数、输出格式自描述（LZMA 头部/
+  zstd 帧），解码端零改动，旧安装器可解新格式同类算法；
+  `normalize_compression` 历史/别名值全部保留。
+- **验收**：`cargo test -p miedit-core` 186 全过（新增
+  `compression_params_mapping`/`ultra_profile_roundtrip`，五算法
+  roundtrip + solid roundtrip + 压缩比对照扩容）；Windows 交叉
+  check 0 error 0 warning；混合语料 2.86MB 实测压缩率/耗时表
+  （lzma 9.8% 最小、zstd 15.5% 解压 61ms 最快、bzip2 15.3%、
+  deflate 21.8%）。
+
 1. **纯 Rust**：不引入 C 构建链；新增依赖须在 Windows/Linux 双平台可编译。
 2. **向后兼容**：旧格式安装包/卸载清单必须仍可处理（serde default / magic 回退）。
 3. **测试**：核心逻辑写成 `miedit-core` 纯函数并加单元测试；`cargo test -p miedit-core`
@@ -525,6 +564,26 @@
    不再随功能对齐批次递增；历史批次 v0.2.0–v0.13.0 保留原版本号记录）。
 
 ## 变更日志
+
+- 0.1.0（步骤 16 解阻 + 45，#22）：**压缩方法大扩充 + 激进压缩档**
+  （用户指令：再增加压缩方法、增加激进压缩方案、优化 zstd/bzip2 编码器）：
+  ① **BZip2 落地**：`bzip2`/`bzip2-solid`（bzip2 0.6 默认后端
+  libbz2-rs-sys 纯 Rust，零 C 链；level 9 = 900k 块，NSIS 经典算法）——
+  NSIS 三档压缩方法 zlib/bzip2/lzma 至此全部纯 Rust 对齐；
+  ② **Zstd 落地**：`zstd`/`zstd-solid`（mzstd 0.2 纯 Rust，zstd 1.5.7
+  编码器逐字节等价移植，标准档 level 19，Inno 扩展对齐）；
+  ③ **激进压缩档**：`lzma-ultra`/`lzma-ultra-solid`（preset 9 +
+  64MB 字典 + nice_len 273）、`zstd-ultra`/`zstd-ultra-solid`
+  （level 22）、brotli ultra（quality 11）——ultra 仅改编码参数，
+  输出格式自描述，解码端零改动，旧安装器照常解；
+  ④ 归档标志位 bit4=bzip2（16）/bit5=zstd（32）只加位不动位，
+  旧包兼容；归一化别名 bz2/zst/zstandard/lzma-9/zstd-22 等；
+  ⑤ 压缩下拉 14 档 + `compression_label`/`compression_params`
+  core 共用分派（编译器/安装器/预览摘要三处去重）；
+  ⑥ 混合语料 2.86MB 实测：lzma 9.8%（最小）、zstd 15.5%（解压
+  61ms 最快）、bzip2 15.3%、deflate 21.8%；测试 186 全过、
+  Windows 交叉 check 0 error 0 warning。新增待办步骤 46/47
+  （压缩差分基准与 14 档端到端矩阵）。
 
 - 0.1.0（步骤 41–44，#21）：**全流程实时预览 + `mis` 命令行 + 语法检测纠错 +
   深浅色主题**（用户指令：实时预览页面从开始至解锁安装、扩展名 `.mi`→`.mis`、

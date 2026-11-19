@@ -128,8 +128,11 @@ pub struct InstallConfig {
     /// 安装时解析并写入卸载清单，安装时不删除；卸载确认页可勾选删除
     pub user_data_dirs: Vec<String>,
     /// 压缩方式（NSIS SetCompressor 对齐 + 扩展，全部纯 Rust）：
-    /// `deflate`（条目级）| `solid`（整包 Deflate，NSIS solid 风格）| `lzma`（条目级）| 
-    /// `lzma-solid`（整包 LZMA，NSIS 默认风格）| `brotli`（条目级）| `brotli-solid`（整包）
+    /// `deflate`（条目级）| `solid`（整包 Deflate，NSIS solid 风格）| `brotli`/`brotli-solid` |
+    /// `bzip2`/`bzip2-solid`（NSIS 经典算法）| `lzma`/`lzma-solid`（NSIS 默认风格）|
+    /// `lzma-ultra`/`lzma-ultra-solid`（激进档：64MB 字典 + nice_len 273）|
+    /// `zstd`/`zstd-solid`/`zstd-ultra`/`zstd-ultra-solid`（激进档 level 22，Inno 风格扩展）；
+    /// 历史值与别名（下划线/大小写/缩写）全部兼容，旧配置无需修改。
     pub compression: String,
     /// 文件覆盖策略（NSIS SetOverwrite）：`on`（默认）| `off` | `try` | `ifnewer`
     pub overwrite: String,

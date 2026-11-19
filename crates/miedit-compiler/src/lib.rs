@@ -13,7 +13,7 @@ pub const DEFAULT_INSTALL_ICON: &[u8] = include_bytes!("../assets/default-instal
 pub const DEFAULT_UNINSTALL_ICON: &[u8] = include_bytes!("../assets/default-uninstall.ico");
 
 use anyhow::{bail, Context, Result};
-use miedit_core::archive::{Algo, ArchiveWriter};
+use miedit_core::archive::ArchiveWriter;
 use miedit_core::config::Config;
 use miedit_core::files;
 use miedit_core::trailer::{self, Range, Trailer};
@@ -514,22 +514,19 @@ pub fn build_package(
         }
     };
 
-    // 9. 压缩方式（NSIS SetCompressor 对齐：zlib/lzma(+solid)；扩展 brotli(+solid)，全部纯 Rust）
-    //    注：LZMA 用 lzma-rust（tukaani xz-for-java 纯 Rust 移植，sevenz-rust 同源），
-    //    此前评估的 lzma-rs 0.3 编码器为存根不可用（见 docs/lessons-from-nsis-inno.md）。
+    // 9. 压缩方式（NSIS SetCompressor 对齐：zlib/bzip2/lzma(+solid)；扩展 brotli/zstd(+solid)
+    //    与 lzma-ultra/zstd-ultra 激进档，全部纯 Rust：flate2/brotli/bzip2(libbz2-rs)/
+    //    lzma-rust/mzstd）
+    //    注：LZMA 用 lzma-rust（tukaani xz-for-java 纯 Rust 移植，sevenz-rust 同源）；
+    //    zstd 用 mzstd（zstd 1.5.7 编码器逐字节等价移植）；bzip2 用 libbz2-rs
+    //    （bzip2 0.6 默认后端，纯 Rust）。此前阻塞记录见 docs/lessons-from-nsis-inno.md。
     let compression =
         miedit_core::archive::normalize_compression(&cfg.install.compression)?.to_string();
     cfg.install.compression = compression.clone();
-    // solid = 整包压缩（条目原样存储后整包压缩，NSIS solid 做法）；否则条目级压缩
-    let (solid, entry_algo): (bool, Algo) = match compression.as_str() {
-        "deflate" => (false, Algo::Deflate),
-        "solid" => (true, Algo::Deflate),
-        "lzma" => (false, Algo::Lzma),
-        "lzma-solid" => (true, Algo::Lzma),
-        "brotli" => (false, Algo::Brotli),
-        "brotli-solid" => (true, Algo::Brotli),
-        _ => unreachable!("normalize_compression 已保证规范值"),
-    };
+    // solid = 整包压缩（条目原样存储后整包压缩，NSIS solid 做法）；否则条目级压缩；
+    // ultra = 激进档（LZMA preset 9/64MB 字典、Zstd level 22），输出格式与标准档一致。
+    let (solid, entry_algo, ultra) = miedit_core::archive::compression_params(&compression)
+        .with_context(|| format!("内部错误：压缩值 {compression} 未映射"))?;
 
     // 覆盖模式校验（NSIS SetOverwrite：on/off/try/ifnewer，默认 on）
     let overwrite = match cfg.install.overwrite.trim().to_ascii_lowercase().as_str() {
@@ -564,7 +561,7 @@ pub fn build_package(
                 if solid {
                     w.add_file_stored(&c.arc_path, &data)?;
                 } else {
-                    w.add_file_with_algo(&c.arc_path, &data, entry_algo)?;
+                    w.add_file_with_algo_profile(&c.arc_path, &data, entry_algo, ultra)?;
                 }
             }
         }
@@ -572,8 +569,12 @@ pub fn build_package(
     }
 
     let payload_bytes: Vec<u8> = if solid {
-        progress(&format!("压缩: {} solid（整包，NSIS 风格）...", entry_algo.label()));
-        let out = miedit_core::archive::compress_bytes(entry_algo, &archive)?;
+        progress(&format!(
+            "压缩: {}{} solid（整包，NSIS 风格）...",
+            entry_algo.label(),
+            if ultra { " Ultra（激进）" } else { "" }
+        ));
+        let out = miedit_core::archive::compress_bytes_profile(entry_algo, &archive, ultra)?;
         progress(&format!(
             "压缩完成: {} → {}（{}%）",
             miedit_core::util::human_size(archive.len() as u64),

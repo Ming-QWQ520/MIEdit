@@ -2,13 +2,14 @@
 //!
 //! 布局：
 //! ```text
-//! magic "MIEditARC1" (8B)
+//! magic "MIEDARC2" (8B)
 //! total_orig: u64          // 所有文件未压缩总字节数（用于进度）
 //! file_count: u64          // 文件总数（不含目录，用于进度）
 //! 重复条目直到 path_len == 0：
 //!   path_len: u16
 //!   path: UTF-8，使用 '/' 分隔
-//!   flags: u8              // bit0=目录, bit1=deflate, bit2=brotli, bit3=lzma（至多一个压缩位）
+//!   flags: u8              // bit0=目录, bit1=deflate, bit2=brotli, bit3=lzma,
+//!                          // bit4=bzip2, bit5=zstd（压缩位互斥，至多一个）
 //!   comp_len: u64
 //!   orig_len: u64
 //!   data: comp_len 字节
@@ -18,10 +19,14 @@
 //! 压缩算法（NSIS SetCompressor 对齐 + 扩展，全部纯 Rust）：
 //! - Deflate（zlib 等价，flate2/miniz_oxide，条目级与整包 solid 均支持）
 //! - Brotli（brotli crate 纯 Rust 实现，比 Deflate 体积更小）
-//! - LZMA（lzma-rust 纯 Rust 实现，tukaani xz-for-java 移植，NSIS 旗舰格式；
-//!   条目级与整包 lzma-solid 均支持）
+//! - BZip2（bzip2 0.6 crate，libbz2-rs 纯 Rust 实现，NSIS 经典算法）
+//! - LZMA（lzma-rust 纯 Rust 实现，tukaani xz-for-java 移植，NSIS 旗舰格式）
+//! - Zstd（mzstd 纯 Rust 实现，zstd 1.5.7 编码器逐字节等价移植，自带解码器）
+//! - 激进压缩档（ultra）：LZMA Ultra = preset 9（64MB 字典）+ nice_len 273；
+//!   Zstd Ultra = level 22。ultra 仅改变编码参数，输出格式与基础档一致
+//!   （LZMA 头部/ zstd 帧自描述），解码端无需区分，旧安装器照常解码。
 //!
-//! 兼容性：旧包仅含 bit0/bit1，新安装器解码行为不变；新包含 bit2/bit3 时
+//! 兼容性：旧包仅含 bit0/bit1，新安装器解码行为不变；新包含 bit2/bit3/bit4/bit5 时
 //! 旧安装器无法解码（与 NSIS 一致：lzma 包需要带 lzma 支持的解压 stub）。
 
 use anyhow::{bail, Context, Result};
@@ -35,6 +40,8 @@ pub const FLAG_DIR: u8 = 1;
 pub const FLAG_DEFLATE: u8 = 2;
 pub const FLAG_BROTLI: u8 = 4;
 pub const FLAG_LZMA: u8 = 8;
+pub const FLAG_BZIP2: u8 = 16;
+pub const FLAG_ZSTD: u8 = 32;
 
 /// 压缩算法（条目级与整包 solid 共用，全部纯 Rust 实现）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -45,6 +52,10 @@ pub enum Algo {
     Brotli,
     /// LZMA1（lzma-rust，NSIS 旗舰压缩格式）
     Lzma,
+    /// BZip2（bzip2 0.6 crate / libbz2-rs 纯 Rust，NSIS 经典算法）
+    Bzip2,
+    /// Zstd（mzstd 纯 Rust，zstd 1.5.7 逐字节等价编码器）
+    Zstd,
 }
 
 impl Algo {
@@ -54,6 +65,8 @@ impl Algo {
             Algo::Deflate => FLAG_DEFLATE,
             Algo::Brotli => FLAG_BROTLI,
             Algo::Lzma => FLAG_LZMA,
+            Algo::Bzip2 => FLAG_BZIP2,
+            Algo::Zstd => FLAG_ZSTD,
         }
     }
 
@@ -63,6 +76,8 @@ impl Algo {
             FLAG_DEFLATE => Some(Algo::Deflate),
             FLAG_BROTLI => Some(Algo::Brotli),
             FLAG_LZMA => Some(Algo::Lzma),
+            FLAG_BZIP2 => Some(Algo::Bzip2),
+            FLAG_ZSTD => Some(Algo::Zstd),
             _ => None,
         }
     }
@@ -73,34 +88,123 @@ impl Algo {
             Algo::Deflate => "Deflate",
             Algo::Brotli => "Brotli",
             Algo::Lzma => "LZMA",
+            Algo::Bzip2 => "BZip2",
+            Algo::Zstd => "Zstd",
         }
     }
 }
 
-/// 归一化 `install.compression` 配置值（NSIS `SetCompressor zlib/lzma(+solid)` 对齐 + 扩展）。
+/// 归一化 `install.compression` 配置值（NSIS `SetCompressor zlib/bzip2/lzma(+solid)` 对齐 + 扩展）。
 ///
 /// 返回规范值：`deflate`（条目级 Deflate）、`solid`（整包 Deflate，NSIS solid 风格）、
-/// `lzma`（条目级 LZMA）、`lzma-solid`（整包 LZMA）、`brotli`（条目级 Brotli）、
-/// `brotli-solid`（整包 Brotli）。历史值与常见别名（下划线/斜杠变体）全部兼容。
+/// `brotli`（条目级 Brotli）、`brotli-solid`（整包 Brotli）、`bzip2`（条目级 BZip2）、
+/// `bzip2-solid`（整包 BZip2）、`lzma`（条目级 LZMA）、`lzma-solid`（整包 LZMA）、
+/// `lzma-ultra`（条目级 LZMA 激进档）、`lzma-ultra-solid`（整包 LZMA 激进档）、
+/// `zstd`（条目级 Zstd）、`zstd-solid`（整包 Zstd）、`zstd-ultra`（条目级 Zstd 激进档）、
+/// `zstd-ultra-solid`（整包 Zstd 激进档）。历史值与常见别名（下划线/斜杠变体）全部兼容。
 pub fn normalize_compression(input: &str) -> Result<&'static str> {
     let v = input.trim().to_ascii_lowercase().replace('_', "-");
     match v.as_str() {
         "" | "deflate" | "zlib" | "zlib/deflate" => Ok("deflate"),
         "solid" | "deflate-solid" | "zlib-solid" | "zlib/solid" => Ok("solid"),
-        "lzma" | "lzma1" => Ok("lzma"),
-        "lzma-solid" | "lzmasolid" | "lzma1-solid" => Ok("lzma-solid"),
         "brotli" => Ok("brotli"),
         "brotli-solid" | "brotlisolid" => Ok("brotli-solid"),
+        "bzip2" | "bz2" | "bzip" => Ok("bzip2"),
+        "bzip2-solid" | "bz2-solid" | "bzip-solid" | "bzip2solid" => Ok("bzip2-solid"),
+        "lzma" | "lzma1" => Ok("lzma"),
+        "lzma-solid" | "lzmasolid" | "lzma1-solid" => Ok("lzma-solid"),
+        "lzma-ultra" | "lzma2-ultra" | "lzma1-ultra" | "lzma-9" | "lzma-ultra2" => Ok("lzma-ultra"),
+        "lzma-ultra-solid" | "lzma2-ultra-solid" | "lzma1-ultra-solid" | "lzma-9-solid" => {
+            Ok("lzma-ultra-solid")
+        }
+        "zstd" | "zstandard" | "zst" => Ok("zstd"),
+        "zstd-solid" | "zstandard-solid" | "zst-solid" | "zstdsolid" => Ok("zstd-solid"),
+        "zstd-ultra" | "zstd-22" | "zst-ultra" => Ok("zstd-ultra"),
+        "zstd-ultra-solid" | "zstd-22-solid" | "zst-ultra-solid" => Ok("zstd-ultra-solid"),
         other => bail!(
-            "未知压缩方式 \"{}\"（支持: deflate, solid, lzma, lzma-solid, brotli, \
-             brotli-solid；zstd/bzip2 因纯 Rust 生态无成熟编码器暂不支持，见路线图步骤 16）",
+            "未知压缩方式 \"{}\"（支持: deflate, solid, lzma, lzma-solid, lzma-ultra, \
+             lzma-ultra-solid, brotli, brotli-solid, bzip2, bzip2-solid, zstd, \
+             zstd-solid, zstd-ultra, zstd-ultra-solid）",
             other
         ),
     }
 }
 
-/// 一次性压缩（内存到内存，条目级与整包 solid 共用）。
+/// 规范压缩值 → `(solid 整包, 算法, ultra 激进档)`。
+///
+/// 未知值返回 `None`：调用方（安装器）按条目级兼容处理，编译器在归一化之后调用
+/// 不会命中 `None`（防御式兜底）。
+pub fn compression_params(canonical: &str) -> Option<(bool, Algo, bool)> {
+    match canonical {
+        "deflate" => Some((false, Algo::Deflate, false)),
+        "solid" => Some((true, Algo::Deflate, false)),
+        "brotli" => Some((false, Algo::Brotli, false)),
+        "brotli-solid" => Some((true, Algo::Brotli, false)),
+        "bzip2" => Some((false, Algo::Bzip2, false)),
+        "bzip2-solid" => Some((true, Algo::Bzip2, false)),
+        "lzma" => Some((false, Algo::Lzma, false)),
+        "lzma-solid" => Some((true, Algo::Lzma, false)),
+        "lzma-ultra" => Some((false, Algo::Lzma, true)),
+        "lzma-ultra-solid" => Some((true, Algo::Lzma, true)),
+        "zstd" => Some((false, Algo::Zstd, false)),
+        "zstd-solid" => Some((true, Algo::Zstd, false)),
+        "zstd-ultra" => Some((false, Algo::Zstd, true)),
+        "zstd-ultra-solid" => Some((true, Algo::Zstd, true)),
+        _ => None,
+    }
+}
+
+/// 规范压缩值 → 用户界面文案（builder 下拉/预览摘要共用，避免多处重复映射）。
+/// 未知值/空值回退 Deflate 默认文案（与历史默认档一致）。
+pub fn compression_label(canonical: &str) -> &'static str {
+    match canonical {
+        "solid" => "Deflate Solid（整包，体积更小）",
+        "brotli" => "Brotli（条目级，现代算法）",
+        "brotli-solid" => "Brotli Solid（整包，现代算法）",
+        "bzip2" => "BZip2（条目级，NSIS 经典算法）",
+        "bzip2-solid" => "BZip2 Solid（整包，NSIS 经典算法）",
+        "lzma" => "LZMA（条目级，NSIS 旗舰算法）",
+        "lzma-solid" => "LZMA Solid（整包，NSIS 默认风格，体积最小）",
+        "lzma-ultra" => "LZMA Ultra（条目级，激进压缩 64MB 字典）",
+        "lzma-ultra-solid" => "LZMA Ultra Solid（整包，激进压缩）",
+        "zstd" => "Zstd（条目级，现代高性能）",
+        "zstd-solid" => "Zstd Solid（整包，现代高性能）",
+        "zstd-ultra" => "Zstd Ultra（条目级，激进压缩 level 22）",
+        "zstd-ultra-solid" => "Zstd Ultra Solid（整包，激进压缩）",
+        _ => "Deflate（条目级，速度快）",
+    }
+}
+
+/// 下拉框展示顺序（builder 压缩选择框共用）。
+pub const COMPRESSION_OPTIONS: &[&str] = &[
+    "deflate",
+    "solid",
+    "brotli",
+    "brotli-solid",
+    "bzip2",
+    "bzip2-solid",
+    "lzma",
+    "lzma-solid",
+    "lzma-ultra",
+    "lzma-ultra-solid",
+    "zstd",
+    "zstd-solid",
+    "zstd-ultra",
+    "zstd-ultra-solid",
+];
+
+/// 一次性压缩（内存到内存，条目级与整包 solid 共用，标准档）。
 pub fn compress_bytes(algo: Algo, data: &[u8]) -> Result<Vec<u8>> {
+    compress_bytes_profile(algo, data, false)
+}
+
+/// 一次性压缩（可选拉激进 ultra 档）：
+/// - LZMA：preset 9（64MB 字典）+ nice_len 273（xz -9e 同档）；标准档 preset 6（8MB 字典）。
+/// - Zstd：ultra = level 22；标准档 level 19。
+/// - Brotli：ultra = 质量 11；标准档质量 9。
+/// - Deflate/BZip2：已是最高档（flate2 best / BZip2 level 9），ultra 无差异。
+/// 输出格式与标准档完全一致（自描述头），解码端无需知道是否 ultra。
+pub fn compress_bytes_profile(algo: Algo, data: &[u8], ultra: bool) -> Result<Vec<u8>> {
     match algo {
         Algo::Deflate => {
             let mut out = Vec::with_capacity(data.len() / 2 + 64);
@@ -109,16 +213,21 @@ pub fn compress_bytes(algo: Algo, data: &[u8]) -> Result<Vec<u8>> {
         }
         Algo::Brotli => {
             let mut params = brotli::enc::BrotliEncoderParams::default();
-            // 质量 9：与 flate2 best() 同级的“高质量、可接受耗时”档（11 增益有限但耗时陡增）。
-            params.quality = 9;
+            // 质量 9：与 flate2 best() 同级的“高质量、可接受耗时”档；
+            // ultra 拉满 11（耗时陡增，仅激进档使用）。
+            params.quality = if ultra { 11 } else { 9 };
             let mut out = Vec::with_capacity(data.len() / 2 + 64);
             brotli::CompressorReader::with_params(data, 4096, &params).read_to_end(&mut out)?;
             Ok(out)
         }
         Algo::Lzma => {
-            // NSIS lzma 档位：preset 6（8MB 字典）。头部自述格式（props + dict_size +
+            // NSIS lzma 档位：标准档 preset 6（8MB 字典）；激进档 preset 9（64MB 字典）
+            // + nice_len 273（NICE_LEN_MAX，xz -9e 语义）。头部自述格式（props + dict_size +
             // uncomp_size），解码端 LZMAReader::new_mem_limit 读取同一头部，无需额外携带参数。
-            let options = LZMA2Options::with_preset(6);
+            let mut options = LZMA2Options::with_preset(if ultra { 9 } else { 6 });
+            if ultra {
+                options.nice_len = LZMA2Options::NICE_LEN_MAX;
+            }
             let mut out = Vec::with_capacity(data.len() / 2 + 64);
             let mut w = LZMAWriter::new_use_header(
                 CountingWriter::new(&mut out),
@@ -128,6 +237,25 @@ pub fn compress_bytes(algo: Algo, data: &[u8]) -> Result<Vec<u8>> {
             w.write_all(data)?;
             w.finish()?;
             Ok(out)
+        }
+        Algo::Bzip2 => {
+            // bzip2 level 9 = 900k 块大小（NSIS bzip2 最高档；libbz2-rs 纯 Rust 实现）。
+            let mut out = Vec::with_capacity(data.len() / 2 + 64);
+            bzip2::read::BzEncoder::new(data, bzip2::Compression::best()).read_to_end(&mut out)?;
+            Ok(out)
+        }
+        Algo::Zstd => {
+            // 标准档 level 19（xz -19 同档激进）；ultra 拉满 level 22（zstd --ultra -22，
+            // 窗口 128MB，mzstd 解码端默认窗口上限 2^27 恰好覆盖）。
+            let level = if ultra { 22 } else { 19 };
+            let lz = mzstd::Level::try_from(level).context("zstd 压缩级别无效")?;
+            let mut compressor = mzstd::Compressor::new(
+                mzstd::EncoderConfig::default().with_level(lz),
+            )
+            .context("zstd 压缩器初始化失败")?;
+            compressor
+                .compress(data)
+                .map_err(|e| anyhow::anyhow!("zstd 压缩失败: {e}"))
         }
     }
 }
@@ -149,6 +277,17 @@ pub fn decompress_bytes(algo: Algo, data: &[u8]) -> Result<Vec<u8>> {
             let mut out = Vec::new();
             LZMAReader::new_mem_limit(data, u32::MAX, None)?.read_to_end(&mut out)?;
             Ok(out)
+        }
+        Algo::Bzip2 => {
+            let mut out = Vec::new();
+            bzip2::read::BzDecoder::new(data).read_to_end(&mut out)?;
+            Ok(out)
+        }
+        Algo::Zstd => {
+            let mut decompressor = mzstd::Decompressor::new(mzstd::DecoderConfig::default());
+            decompressor
+                .decompress(data)
+                .map_err(|e| anyhow::anyhow!("zstd 解压失败: {e}"))
         }
     }
 }
@@ -179,14 +318,26 @@ impl<W: Write> ArchiveWriter<W> {
         self.add_file_with_algo(path, data, Algo::Deflate)
     }
 
-    /// 写入一个文件：按指定算法压缩，压缩后未变小则原样存储。
+    /// 写入一个文件：按指定算法压缩（标准档），压缩后未变小则原样存储。
     pub fn add_file_with_algo(
         &mut self,
         path: &str,
         data: &[u8],
         algo: Algo,
     ) -> std::io::Result<()> {
-        let comp = compress_bytes(algo, data).map_err(|e| {
+        self.add_file_with_algo_profile(path, data, algo, false)
+    }
+
+    /// 写入一个文件：按指定算法 + 激进档参数压缩，压缩后未变小则原样存储。
+    /// ultra 仅影响编码参数（字典/质量级别），条目标志位与标准档一致。
+    pub fn add_file_with_algo_profile(
+        &mut self,
+        path: &str,
+        data: &[u8],
+        algo: Algo,
+        ultra: bool,
+    ) -> std::io::Result<()> {
+        let comp = compress_bytes_profile(algo, data, ultra).map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::Other, format!("压缩失败: {e:#}"))
         })?;
         let (flag, payload): (u8, Vec<u8>) = if !data.is_empty() && comp.len() < data.len() {
@@ -387,20 +538,32 @@ mod tests {
         assert_eq!(FLAG_DEFLATE, 2);
         assert_eq!(FLAG_BROTLI, 4);
         assert_eq!(FLAG_LZMA, 8);
+        assert_eq!(FLAG_BZIP2, 16);
+        assert_eq!(FLAG_ZSTD, 32);
         assert_eq!(Algo::Deflate.flag(), FLAG_DEFLATE);
         assert_eq!(Algo::Brotli.flag(), FLAG_BROTLI);
         assert_eq!(Algo::Lzma.flag(), FLAG_LZMA);
+        assert_eq!(Algo::Bzip2.flag(), FLAG_BZIP2);
+        assert_eq!(Algo::Zstd.flag(), FLAG_ZSTD);
         assert_eq!(Algo::from_flag(FLAG_BROTLI), Some(Algo::Brotli));
-        assert_eq!(Algo::from_flag(0x10), None);
+        assert_eq!(Algo::from_flag(FLAG_BZIP2), Some(Algo::Bzip2));
+        assert_eq!(Algo::from_flag(FLAG_ZSTD), Some(Algo::Zstd));
+        assert_eq!(Algo::from_flag(0x40), None);
         assert_eq!(Algo::from_flag(FLAG_DEFLATE | FLAG_DIR), None);
     }
 
-    /// 条目级三种算法 roundtrip：压缩 → 归档 → 读回 → 解压 == 原数据。
+    /// 条目级五算法 roundtrip：压缩 → 归档 → 读回 → 解压 == 原数据。
     #[test]
     fn entry_roundtrip_all_algos() {
         let pattern = |i: usize| (i % 251) as u8; // 可压缩的非平凡模式
         let big: Vec<u8> = (0..100_000).map(pattern).collect();
-        for algo in [Algo::Deflate, Algo::Brotli, Algo::Lzma] {
+        for algo in [
+            Algo::Deflate,
+            Algo::Brotli,
+            Algo::Lzma,
+            Algo::Bzip2,
+            Algo::Zstd,
+        ] {
             let mut buf = Cursor::new(Vec::new());
             {
                 let mut w = ArchiveWriter::new_with_total(&mut buf, big.len() as u64, 2).unwrap();
@@ -417,19 +580,31 @@ mod tests {
         }
     }
 
-    /// 整包 solid 三种算法 roundtrip（编译器/安装器整包链路共用函数）。
+    /// 整包 solid 五算法 roundtrip（编译器/安装器整包链路共用函数）。
     #[test]
     fn solid_roundtrip_all_algos() {
         let big: Vec<u8> = (0..200_000)
             .map(|i| if i % 3 == 0 { 0x55 } else { (i % 97) as u8 })
             .collect();
-        for algo in [Algo::Deflate, Algo::Brotli, Algo::Lzma] {
+        for algo in [
+            Algo::Deflate,
+            Algo::Brotli,
+            Algo::Lzma,
+            Algo::Bzip2,
+            Algo::Zstd,
+        ] {
             let comp = compress_bytes(algo, &big).unwrap();
             assert!(comp.len() < big.len(), "{} 应有效压缩", algo.label());
             assert_eq!(decompress_bytes(algo, &comp).unwrap(), big);
         }
         // 空数据与不可压数据（压缩产物更大 → 归档层回退存储，但本函数自身不失败）
-        for algo in [Algo::Deflate, Algo::Brotli, Algo::Lzma] {
+        for algo in [
+            Algo::Deflate,
+            Algo::Brotli,
+            Algo::Lzma,
+            Algo::Bzip2,
+            Algo::Zstd,
+        ] {
             assert_eq!(decompress_bytes(algo, &compress_bytes(algo, b"").unwrap()).unwrap(), b"");
             assert_eq!(
                 decompress_bytes(algo, &compress_bytes(algo, &[9u8; 32]).unwrap()).unwrap(),
@@ -438,15 +613,79 @@ mod tests {
         }
     }
 
-    /// 压缩比对照（Brotli/LZMA 应显著优于 Deflate，锁住“新增格式有真实价值”）。
+    /// 压缩比对照（Brotli/LZMA/BZip2/Zstd 应显著优于 Deflate，锁住“新增格式有真实价值”）。
     #[test]
     fn new_algos_compress_better_than_deflate_on_pattern() {
         let data: Vec<u8> = "MIEdit install package payload. ".repeat(4096).into_bytes(); // 128KB 重复文本
         let d = compress_bytes(Algo::Deflate, &data).unwrap();
         let b = compress_bytes(Algo::Brotli, &data).unwrap();
         let l = compress_bytes(Algo::Lzma, &data).unwrap();
+        let bz = compress_bytes(Algo::Bzip2, &data).unwrap();
+        let z = compress_bytes(Algo::Zstd, &data).unwrap();
         assert!(b.len() <= d.len(), "Brotli 不劣于 Deflate");
         assert!(l.len() <= d.len(), "LZMA 不劣于 Deflate");
+        assert!(bz.len() < d.len(), "BZip2 应优于 Deflate（重复文本）");
+        assert!(z.len() <= d.len(), "Zstd 不劣于 Deflate");
+    }
+
+    /// 规范压缩值 → (solid, 算法, ultra) 映射（编译器/安装器共用分派逻辑）。
+    #[test]
+    fn compression_params_mapping() {
+        let cases: &[(&str, bool, Algo, bool)] = &[
+            ("deflate", false, Algo::Deflate, false),
+            ("solid", true, Algo::Deflate, false),
+            ("brotli", false, Algo::Brotli, false),
+            ("brotli-solid", true, Algo::Brotli, false),
+            ("bzip2", false, Algo::Bzip2, false),
+            ("bzip2-solid", true, Algo::Bzip2, false),
+            ("lzma", false, Algo::Lzma, false),
+            ("lzma-solid", true, Algo::Lzma, false),
+            ("lzma-ultra", false, Algo::Lzma, true),
+            ("lzma-ultra-solid", true, Algo::Lzma, true),
+            ("zstd", false, Algo::Zstd, false),
+            ("zstd-solid", true, Algo::Zstd, false),
+            ("zstd-ultra", false, Algo::Zstd, true),
+            ("zstd-ultra-solid", true, Algo::Zstd, true),
+        ];
+        for (v, solid, algo, ultra) in cases {
+            assert_eq!(compression_params(v), Some((*solid, *algo, *ultra)), "{v}");
+        }
+        // 旧清单/未知值兼容：返回 None，安装器按条目级处理
+        assert_eq!(compression_params(""), None);
+        assert_eq!(compression_params("unknown"), None);
+        // 全部下拉选项均可归一化且可映射
+        for v in COMPRESSION_OPTIONS {
+            let canon = normalize_compression(v).unwrap();
+            assert!(compression_params(canon).is_some(), "{v}");
+            let _ = compression_label(canon);
+        }
+    }
+
+    /// 激进 ultra 档 roundtrip：LZMA preset 9 + nice_len 273 / Zstd level 22。
+    /// 输出格式与标准档一致（自描述头），同一解码路径应可解。
+    #[test]
+    fn ultra_profile_roundtrip() {
+        let big: Vec<u8> = (0..200_000)
+            .map(|i| (i % 253) as u8 ^ ((i / 7) % 31) as u8)
+            .collect();
+        for (algo, ultra) in [(Algo::Lzma, true), (Algo::Zstd, true), (Algo::Brotli, true)] {
+            let comp = compress_bytes_profile(algo, &big, ultra).unwrap();
+            assert_eq!(decompress_bytes(algo, &comp).unwrap(), big, "{:?}", algo);
+        }
+        // 归档链路：ultra 条目写入后标志位与基础档一致，读回解码正常
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut w = ArchiveWriter::new_with_total(&mut buf, big.len() as u64, 2).unwrap();
+            w.add_file_with_algo_profile("a/ultra.bin", &big, Algo::Lzma, true).unwrap();
+            w.add_file_with_algo_profile("b/ultra.zst", &big, Algo::Zstd, true).unwrap();
+            w.finish().unwrap();
+        }
+        buf.set_position(0);
+        let mut r = ArchiveReader::new(buf).unwrap();
+        for i in 0..2 {
+            let e = r.next_entry().unwrap().unwrap();
+            assert_eq!(e.decode().unwrap(), big, "entry {i}");
+        }
     }
 
     #[test]
@@ -462,8 +701,20 @@ mod tests {
         assert_eq!(normalize_compression("lzma1").unwrap(), "lzma");
         assert_eq!(normalize_compression("brotli").unwrap(), "brotli");
         assert_eq!(normalize_compression("brotli_solid").unwrap(), "brotli-solid");
-        assert!(normalize_compression("bzip2").is_err());
-        assert!(normalize_compression("zstd").is_err());
+        // 新增：BZip2 / Zstd / ultra（NSIS bzip2 对齐 + Inno zstd 对齐 + 激进档）
+        assert_eq!(normalize_compression("bzip2").unwrap(), "bzip2");
+        assert_eq!(normalize_compression("BZ2").unwrap(), "bzip2");
+        assert_eq!(normalize_compression("bzip2_solid").unwrap(), "bzip2-solid");
+        assert_eq!(normalize_compression("zstd").unwrap(), "zstd");
+        assert_eq!(normalize_compression("ZStandard").unwrap(), "zstd");
+        assert_eq!(normalize_compression("zst_solid").unwrap(), "zstd-solid");
+        assert_eq!(normalize_compression("lzma-ultra").unwrap(), "lzma-ultra");
+        assert_eq!(normalize_compression("lzma2_ultra").unwrap(), "lzma-ultra");
+        assert_eq!(normalize_compression("lzma-9-solid").unwrap(), "lzma-ultra-solid");
+        assert_eq!(normalize_compression("zstd_ultra").unwrap(), "zstd-ultra");
+        assert_eq!(normalize_compression("zstd-22").unwrap(), "zstd-ultra");
+        assert_eq!(normalize_compression("zstd_ultra_solid").unwrap(), "zstd-ultra-solid");
+        assert!(normalize_compression("rar").is_err());
     }
 
     /// 归档兼容性：手写旧格式条目（仅 bit1 deflate）仍可解码。

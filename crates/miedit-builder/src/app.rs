@@ -752,24 +752,13 @@ impl BuilderApp {
             col.horizontal(|ui| {
                 ui.add_sized([80.0, 0.0], egui::Label::new(egui::RichText::new("压缩方式：").color(pal().text).size(13.5)));
                 let mut comp = self.cfg.install.compression.clone();
-                let comp_label = match comp.as_str() {
-                    "solid" => "Deflate Solid（整包，体积更小）",
-                    "lzma" => "LZMA（条目级）",
-                    "lzma-solid" => "LZMA Solid（整包，NSIS 默认风格，体积最小）",
-                    "brotli" => "Brotli（条目级）",
-                    "brotli-solid" => "Brotli Solid（整包）",
-                    _ => "Deflate（条目级，速度快）",
-                };
                 egui::ComboBox::from_id_salt("compression")
                     .width(300.0)
-                    .selected_text(comp_label)
+                    .selected_text(miedit_core::archive::compression_label(&comp))
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut comp, "deflate".to_string(), "Deflate（条目级，速度快）");
-                        ui.selectable_value(&mut comp, "solid".to_string(), "Deflate Solid（整包，体积更小）");
-                        ui.selectable_value(&mut comp, "lzma".to_string(), "LZMA（条目级，NSIS 旗舰算法）");
-                        ui.selectable_value(&mut comp, "lzma-solid".to_string(), "LZMA Solid（整包，NSIS 默认风格，体积最小）");
-                        ui.selectable_value(&mut comp, "brotli".to_string(), "Brotli（条目级，现代算法）");
-                        ui.selectable_value(&mut comp, "brotli-solid".to_string(), "Brotli Solid（整包，现代算法）");
+                        for v in miedit_core::archive::COMPRESSION_OPTIONS {
+                            ui.selectable_value(&mut comp, (*v).to_string(), miedit_core::archive::compression_label(v));
+                        }
                     });
                 self.cfg.install.compression = comp;
             });
@@ -1831,14 +1820,7 @@ impl BuilderApp {
                     ("完成后运行", tasks_line),
                     (
                         "压缩方式",
-                        match cfg.install.compression.as_str() {
-                            "solid" => "Deflate Solid（整包，NSIS 风格）".into(),
-                            "lzma" => "LZMA（条目级）".into(),
-                            "lzma-solid" => "LZMA Solid（整包，NSIS 默认风格）".into(),
-                            "brotli" => "Brotli（条目级）".into(),
-                            "brotli-solid" => "Brotli Solid（整包）".into(),
-                            _ => "Deflate（条目级）".into(),
-                        },
+                        miedit_core::archive::compression_label(&cfg.install.compression).to_string(),
                     ),
                 ];
                 for (k, v) in rows {
