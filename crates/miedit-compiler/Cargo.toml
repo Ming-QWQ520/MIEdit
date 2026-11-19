@@ -2,10 +2,11 @@
 name = "miedit-compiler"
 version.workspace = true
 edition.workspace = true
-description = "MIEdit 安装包编译器：读取 .mi 脚本产出自解压安装包 EXE"
+description = "MIEdit 安装包编译器：`mis build` 读取 .mis 脚本产出自解压安装包 EXE"
 
+# 命令头为 mis（用户指令 2026-11-19：`mis build <script.mis>`）
 [[bin]]
-name = "miedit-compiler"
+name = "mis"
 path = "src/main.rs"
 
 [dependencies]

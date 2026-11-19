@@ -24,7 +24,7 @@
 | --- | --- |
 | **GUI 构建向导** | HM NIS Edit / Inno Setup 式 **10 步向导 + 左栏步骤树**（全部步骤可点直达、当前高亮、完成 √）：欢迎 → 应用信息 → 安装程序选项（**实时预览**）→ 目录与授权 → 文件与组件 → 快捷方式 → 完成后运行 → 卸载与注册表 → **MI 脚本 IDE**（深度对齐 VSCode，见下）→ 构建（wpReady 式摘要 + 一键构建） |
 | **MI 脚本 IDE** | VSCode 式编辑器：文件标签（未保存圆点）+ 行号（**当前行行号亮色**）+ Dark+ 语法高亮 + **查找/替换**（Ctrl+F/H，命中计数 n/N、逐个跳转、大小写开关）+ **命令面板**（Ctrl+Shift+P）+ **转到行**（Ctrl+G）+ **minimap**（点击跳行）+ **面包屑**（`文件 › [当前节]`）+ **状态栏**（Ln/Col、选中、缩进风格、UTF-8、错误计数）+ **自动缩进/Tab 转空格/括号引号补全** + Alt+Z 自动换行 + 错误行红标 + 实时校验问题面板 |
-| 脚本驱动 | 一份 `.mi`（MI 脚本，自研轻量脚本语言，TOML 语法）描述应用、文件、组件、UI 与快捷方式，与向导完全互通；**v2 组件指令**（NSIS Section 指令语义）：组件表内 `code = [{ op = "run" / "write_reg" / "create_dir" / "delete_file" / "if_file_exists" / "abort" / … }]`（**13 条指令**，含注册表全类型/ExecShell/RMDir/条件分支），勾选组件按序执行（未选不执行），路径支持 `$INSTDIR`/`$DESKTOP`/`$SMPROGRAMS`/`$APPDATA`/`$TEMP`/`$WINDIR` 等 12 个 NSIS 常量变量，副作用自动登记卸载清单精确清理 |
+| 脚本驱动 | 一份 `.mis`（MI 脚本，自研轻量脚本语言，TOML 语法）描述应用、文件、组件、UI 与快捷方式，与向导完全互通；**v2 组件指令**（NSIS Section 指令语义）：组件表内 `code = [{ op = "run" / "write_reg" / "create_dir" / "delete_file" / "if_file_exists" / "abort" / … }]`（**13 条指令**，含注册表全类型/ExecShell/RMDir/条件分支），勾选组件按序执行（未选不执行），路径支持 `$INSTDIR`/`$DESKTOP`/`$SMPROGRAMS`/`$APPDATA`/`$TEMP`/`$WINDIR` 等 12 个 NSIS 常量变量，副作用自动登记卸载清单精确清理 |
 | 自解压安装器 | 单文件 EXE：`[stub][payload][config][卸载器][背景图][图标][Trailer]` |
 | 现代化 UI | egui 无边框窗口、玻璃卡片、主题色可配、自绘进度条、中文字体自适应 |
 | **全窗口图片背景** | `background = "bg.png"`，`cover / contain / stretch` 三种模式 |
@@ -53,6 +53,9 @@
 | 升级检测 | 发现旧版本记录版本号并静默卸载后升级（`InstallDirRegKey` 式目录记忆） |
 | 权限 | `per_machine = true` 启动时自动 UAC 提权重启 |
 | 静默模式 | 安装器/卸载器均支持 `--silent`（NSIS `/S` 风格）与 `--dir=`，可自动化测试 |
+| **全流程实时预览** | IDE「▶ 预览安装 / ▶ 预览卸载」按键：从欢迎至解锁安装（许可勾选才放行）到完成页的**交互式**全流程预览（目录可改/组件可勾/进度动画/日志滚动），等比缩放渲染随脚本实时变化（NSIS/HM NIS Edit 向导预览语义） |
+| **语法检测和纠错** | VSCode Problems 式问题面板：未知指令（就近建议）/ 缺必填字段 / dword 非法 / hive 缺前缀 / Tab 缩进 / 引号不闭合 / TOML 错误定位，可行诊断带**一键修复**按钮（`miedit_core::midiag` 三层诊断，纯函数可单测） |
+| **深色/浅色主题** | 默认**跟随系统**（Windows 注册表 / Linux gsettings 探测），设置菜单可切 深色/浅色/跟随系统（持久化）；编辑器同步 Dark+/Light+ 配色，预览页恒定模拟安装器深色视觉 |
 | **打开速度** | 安装器 GUI 关键路径只解析包尾+配置+图标：CRC32 校验移后台（提取前 `CrcGate` 把关，损坏包仍拒绝安装、`--ncrc` 不变），壁纸解码后台化（先渐变后壁纸）；release 实测 256MB 包关键路径 637ms→0ms |
 | **覆盖策略** | NSIS `SetOverwrite` 对齐：`on / off / try / ifnewer`；安装后保留源文件时间戳，`ifnewer` 仅在源更新时覆盖 |
 | **快捷方式增强** | Inno `[Icons]` 对齐：`[[shortcuts.entries]]` 自定义名称/子目录/参数/图标/工作目录/描述，位置多选（开始菜单/桌面/快速启动栏），与简单开关叠加兼容 |
@@ -80,7 +83,7 @@
 
 ```bash
 cargo build --release
-# target/release/: miedit-builder.exe miedit-compiler.exe miedit-installer.exe miedit-uninstaller.exe
+# target/release/: miedit-builder.exe mis.exe miedit-installer.exe miedit-uninstaller.exe
 ```
 
 ### 用 GUI 构建向导制作（推荐）
@@ -88,13 +91,13 @@ cargo build --release
 ```bash
 target/release/miedit-builder.exe
 # 或直接打开示例项目（跳到第 2 步）
-target/release/miedit-builder.exe examples/demo-app.mi
+target/release/miedit-builder.exe examples/demo-app.mis
 ```
 
 ### 用 CLI 编译
 
 ```bash
-target/release/miedit-compiler.exe build examples/demo-app.mi -o out/MIEdit-Demo-Setup.exe
+target/release/mis.exe build examples/demo-app.mis   # 输出目录默认 <当前目录>/output/（可 -o 指定或脚本 [build] output_dir）
 ```
 
 ### 安装 / 卸载
@@ -109,9 +112,9 @@ out/MIEdit-Demo-Setup.exe --silent --dir="C:\My Apps\Demo"
 "%LOCALAPPDATA%\Programs\MIEdit Demo\uninstall.exe" --silent    # 静默卸载（保留用户数据）
 ```
 
-## 脚本参考（`.mi` — MI 脚本语言）
+## 脚本参考（`.mis` — MI 脚本语言）
 
-完整示例见 [`examples/demo-app.mi`](examples/demo-app.mi)。
+完整示例见 [`examples/demo-app.mis`](examples/demo-app.mis)。
 
 ```toml
 [app]
@@ -252,7 +255,7 @@ values = { InstallPath = "{install_dir}" }
 ```
 crates/
 ├── miedit-core         # 包格式（MIEARC2 归档 + MIEDPKG2 包尾 + MIEDUNIN 卸载内嵌）、配置、Windows 工具
-├── miedit-compiler     # 打包库（build_package）+ CLI（含 PE 图标替换 UpdateResourceW）
+├── miedit-compiler     # 打包库（build_package）+ `mis` CLI（`mis build <script.mis>`，含 PE 图标替换 UpdateResourceW）
 ├── miedit-builder      # GUI 构建向导（10 步，实时预览，脚本编辑）
 ├── miedit-installer    # 自解压安装器 Stub（egui 向导）
 └── miedit-uninstaller  # 自包含卸载器 Stub（egui）
@@ -268,7 +271,7 @@ crates/
 ## 测试
 
 ```bash
-cargo test --workspace    # 182 个单元测试：归档（含 LZMA/Brotli 压缩算法往返）/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/文件错误决策与提示信箱/重启替换/安装类型状态机/系统版本门槛/目录统计/组件过滤映射/slug/语言匹配与 LANGID 映射/多语言文案解析链/卸载器文案键集与解析链/卸载语言匹配索引/环境变量解析与 PATH 合并去重/卸载清单新旧兼容/修复入口与修复统计/包尾 v4 与卸载数据新旧格式/安装目录解析与根路径校验/盘符切换空间刷新回归/内置模板色板/CLI 组件参数解析/LANG 参数提取与 NSIS LCID 覆盖/压缩方式别名归一化/CRC 后台校验门/MI 脚本语法高亮与脚本 IDE 纯逻辑（查找/替换/字符字节换算/自动缩进/括号补全/命令面板过滤/面包屑/缩进检测）/MI 脚本 v2 组件指令（变量展开/校验/serde 往返/互斥名构造/UAC 执行级别与 manifest XML/CopyFiles 复制内核与自嵌套防护/INI 写入语义/磁盘空间预检判定）
+cargo test --workspace    # 212 个单元测试（本轮新增 midiag 诊断/纠错、theme 模式解析与设置持久化、KNOWN_OPS 清单守卫、[build] 段兼容等）：归档（含 LZMA/Brotli 压缩算法往返）/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/文件错误决策与提示信箱/重启替换/安装类型状态机/系统版本门槛/目录统计/组件过滤映射/slug/语言匹配与 LANGID 映射/多语言文案解析链/卸载器文案键集与解析链/卸载语言匹配索引/环境变量解析与 PATH 合并去重/卸载清单新旧兼容/修复入口与修复统计/包尾 v4 与卸载数据新旧格式/安装目录解析与根路径校验/盘符切换空间刷新回归/内置模板色板/CLI 组件参数解析/LANG 参数提取与 NSIS LCID 覆盖/压缩方式别名归一化/CRC 后台校验门/MI 脚本语法高亮与脚本 IDE 纯逻辑（查找/替换/字符字节换算/自动缩进/括号补全/命令面板过滤/面包屑/缩进检测）/MI 脚本 v2 组件指令（变量展开/校验/serde 往返/互斥名构造/UAC 执行级别与 manifest XML/CopyFiles 复制内核与自嵌套防护/INI 写入语义/磁盘空间预检判定）
 ```
 
 已在 Windows 10 x64 实机验证：CLI 与 GUI 构建链路、静默安装/卸载全清理、组件过滤生效、

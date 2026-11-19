@@ -32,6 +32,29 @@ pub struct Config {
     pub install_types: Vec<InstallTypeSpec>,
     /// 编译器生成：每条 [[files]] 规则展开出的文件（安装器按组件过滤用），脚本中无需手写
     pub files_map: Vec<Vec<FileRef>>,
+    /// 编译输出偏好（`[build]` 段；None = 脚本未写，CLI 走默认输出目录
+    /// `<命令行所在目录>/output/`，GUI 沿用构建页输出框）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<BuildSection>,
+}
+
+/// `[build]` 段：编译输出偏好。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildSection {
+    /// 编译输出目录（None = 脚本未写；相对路径相对当前工作目录解析）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_dir: Option<String>,
+}
+
+impl Config {
+    /// 脚本显式写出的编译输出目录（去空白；未写/空白 → None）。
+    pub fn output_dir_opt(&self) -> Option<&str> {
+        self.build
+            .as_ref()
+            .and_then(|b| b.output_dir.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
 }
 
 /// 规则展开出的单个文件引用（编译器生成）。
@@ -937,5 +960,31 @@ mod step_tests {
         let cfg_json = r#"{"app":{"name":"A"},"install":{}}"#;
         let c: Config = serde_json::from_str(cfg_json).unwrap();
         assert!(c.install.env.is_empty());
+    }
+
+    /// [build] 段：脚本未写（旧格式）→ None；写了 → 往返一致；
+    /// 未写时序列化不产生 [build] 噪音（向后兼容 + GUI 再生成保持干净）。
+    #[test]
+    fn build_section_compat() {
+        // 旧脚本无 build 段
+        let old: Config = toml::from_str("[app]\nname = \"A\"\nversion = \"1\"\n").unwrap();
+        assert!(old.build.is_none());
+        assert_eq!(old.output_dir_opt(), None);
+        // 写了 output_dir
+        let with: Config = toml::from_str("[build]\noutput_dir = \"out/dist\"\n").unwrap();
+        assert_eq!(with.output_dir_opt(), Some("out/dist"));
+        let back: Config = toml::from_str(&toml::to_string_pretty(&with).unwrap()).unwrap();
+        assert_eq!(back.output_dir_opt(), Some("out/dist"));
+        // 未写时序列化不出现 build 键
+        let s = toml::to_string_pretty(&old).unwrap();
+        assert!(!s.contains("build"), "unexpected [build] in: {s}");
+        // 空白值视为未写
+        let blank: Config = toml::from_str("[build]\noutput_dir = \"   \"\n").unwrap();
+        assert_eq!(blank.output_dir_opt(), None);
+        // 包内 JSON 配置同样兼容（旧安装器读新配置忽略未知字段）
+        let j = serde_json::to_string(&with).unwrap();
+        assert!(j.contains("output_dir"));
+        let back2: Config = serde_json::from_str(&j).unwrap();
+        assert_eq!(back2.output_dir_opt(), Some("out/dist"));
     }
 }

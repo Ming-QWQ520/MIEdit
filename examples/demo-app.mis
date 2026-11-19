@@ -1,5 +1,11 @@
 files_map = []
 
+# [build] 段：编译输出偏好（可选）。
+# 未写时 `mis build` 默认输出到 <命令行所在目录>/output/<应用名>-<版本>-setup.exe；
+# 写了则输出到该目录（相对路径相对当前工作目录）。-o 参数永远优先。
+# [build]
+# output_dir = "out/dist"
+
 [app]
 name = "MIEdit Demo"
 version = "1.3.0"

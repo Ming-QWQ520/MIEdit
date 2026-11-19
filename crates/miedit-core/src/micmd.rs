@@ -216,6 +216,25 @@ pub enum MiInstruction {
 /// NSIS 脚本几乎没有更深的分支嵌套；4 层足以覆盖真实场景且防递归爆炸。
 pub const MAX_CODE_DEPTH: usize = 4;
 
+/// 全部指令 op 名（serde tag 集合；诊断层 [`crate::midiag::KNOWN_OPS`]
+/// 与编辑器补全/文档共用。`test_known_ops_all_parse` 守卫清单与
+/// `MiInstruction` 反序列化一致，防止新增指令漏登记）。
+pub const KNOWN_OPS: &[&str] = &[
+    "run",
+    "write_reg",
+    "create_dir",
+    "delete_file",
+    "rename",
+    "copy_files",
+    "write_ini",
+    "sleep",
+    "detail_print",
+    "exec_shell",
+    "rmdir",
+    "if_file_exists",
+    "abort",
+];
+
 /// NSIS 常量变量集（[`standard_var_map`] 产出、[`expand_vars`] 消费）。
 ///
 /// 目录语义对齐 NSIS shell folders 常量；`per_machine` 影响
@@ -327,6 +346,132 @@ pub fn validate(code: &[MiInstruction]) -> Vec<String> {
     validate_at(code, 0, "")
 }
 
+/// 单条指令的非递归校验（诊断层 `midiag` 的 `if_file_exists` 分支
+/// 遍历自控行号映射，因此需要无前缀、不递归的单条版本）。
+/// 返回的错误描述**不带「指令 #N」前缀**，形如 `run.cmd 为空`。
+pub fn validate_one(inst: &MiInstruction) -> Vec<String> {
+    let mut errs = Vec::new();
+    match inst {
+        MiInstruction::Run { cmd, .. } => {
+            if cmd.trim().is_empty() {
+                errs.push("run.cmd 为空".into());
+            }
+        }
+        MiInstruction::WriteReg { key, name, value, r#type, view } => {
+            let k = key.trim();
+            if k.is_empty() {
+                errs.push("write_reg.key 为空".into());
+            } else if !k.starts_with("HKLM\\") && !k.starts_with("HKCU\\") {
+                errs.push(format!(
+                    "write_reg.key 需以 HKLM\\ 或 HKCU\\ 开头: {k}"
+                ));
+            }
+            if name.trim().is_empty() {
+                errs.push("write_reg.name 为空".into());
+            }
+            let ty = r#type.trim().to_ascii_lowercase();
+            match ty.as_str() {
+                "" | "str" => {}
+                "dword" => {
+                    if let Err(e) = crate::regspec::parse_dword(value) {
+                        errs.push(format!("write_reg.value 无效: {e}"));
+                    }
+                }
+                "bin" | "binary" => {
+                    if let Err(e) = crate::regspec::parse_hex_binary(value) {
+                        errs.push(format!("write_reg.bin 值无效: {e}"));
+                    }
+                }
+                "expand" | "expand_sz" => {
+                    if value.trim().is_empty() {
+                        errs.push("write_reg.expand.value 为空".into());
+                    }
+                }
+                "multi_sz" => {
+                    if value.split('|').any(|seg| seg.trim().is_empty()) {
+                        errs.push(format!(
+                            "write_reg.multi_sz 值含空段（`|` 分隔）: {value}"
+                        ));
+                    }
+                }
+                other => errs.push(format!(
+                    "write_reg.type \"{other}\" 无效（str / dword / bin / expand / multi_sz）"
+                )),
+            }
+            if let Err(e) = crate::regspec::parse_view(view) {
+                errs.push(format!("write_reg.view 无效: {e}"));
+            }
+        }
+        MiInstruction::CreateDir { path } => {
+            if path.trim().is_empty() {
+                errs.push("create_dir.path 为空".into());
+            }
+        }
+        MiInstruction::DeleteFile { path } => {
+            if path.trim().is_empty() {
+                errs.push("delete_file.path 为空".into());
+            }
+        }
+        MiInstruction::Rename { from, to } => {
+            if from.trim().is_empty() {
+                errs.push("rename.from 为空".into());
+            }
+            if to.trim().is_empty() {
+                errs.push("rename.to 为空".into());
+            }
+            if !from.trim().is_empty() && from.trim().eq_ignore_ascii_case(to.trim()) {
+                errs.push(format!("rename.from 与 to 相同: {from}"));
+            }
+        }
+        MiInstruction::CopyFiles { from, to } => {
+            if from.trim().is_empty() {
+                errs.push("copy_files.from 为空".into());
+            }
+            if to.trim().is_empty() {
+                errs.push("copy_files.to 为空".into());
+            }
+            // 目标在源内部会自嵌套复制（CopyFiles 不允许，NSIS 同语义）
+            if let (Some(f), Some(t)) = (norm_path(from), norm_path(to)) {
+                if t.starts_with(&format!("{f}\\")) {
+                    errs.push(format!(
+                        "copy_files.to 在 from 内部（会无限自复制）: {from} → {to}"
+                    ));
+                }
+            }
+        }
+        MiInstruction::WriteIni { file, section, key, .. } => {
+            if file.trim().is_empty() {
+                errs.push("write_ini.file 为空".into());
+            }
+            if section.trim().is_empty() {
+                errs.push("write_ini.section 为空".into());
+            }
+            if key.trim().is_empty() {
+                errs.push("write_ini.key 为空".into());
+            }
+        }
+        MiInstruction::Sleep { .. } => {}
+        MiInstruction::DetailPrint { .. } => {}
+        MiInstruction::ExecShell { target, .. } => {
+            if target.trim().is_empty() {
+                errs.push("exec_shell.target 为空".into());
+            }
+        }
+        MiInstruction::RmDir { path, .. } => {
+            if path.trim().is_empty() {
+                errs.push("rmdir.path 为空".into());
+            }
+        }
+        MiInstruction::IfFileExists { path, .. } => {
+            if path.trim().is_empty() {
+                errs.push("if_file_exists.path 为空".into());
+            }
+        }
+        MiInstruction::Abort { .. } => {}
+    }
+    errs
+}
+
 /// [`validate`] 的递归内核：`depth` 为当前嵌套层数（0 = 顶层），
 /// `label` 为错误位置的分支路径前缀（如 `"then>else"`，顶层为空）。
 fn validate_at(code: &[MiInstruction], depth: usize, label: &str) -> Vec<String> {
@@ -342,136 +487,20 @@ fn validate_at(code: &[MiInstruction], depth: usize, label: &str) -> Vec<String>
         } else {
             format!("指令 #{}（{label} 内）", i + 1)
         };
-        match inst {
-            MiInstruction::Run { cmd, .. } => {
-                if cmd.trim().is_empty() {
-                    errs.push(format!("{at}: run.cmd 为空"));
-                }
+        for inner in validate_one(inst) {
+            errs.push(format!("{at}: {inner}"));
+        }
+        // 分支块递归（与 midiag 诊断层的独立遍历同语义）
+        if let MiInstruction::IfFileExists { then, else_branch, .. } = inst {
+            let next_depth = depth + 1;
+            if next_depth > MAX_CODE_DEPTH {
+                errs.push(format!("{at}: if_file_exists 嵌套深度超限（≤ {MAX_CODE_DEPTH}）"));
+            } else {
+                let then_label = if label.is_empty() { "then".to_string() } else { format!("{label}>then") };
+                let else_label = if label.is_empty() { "else".to_string() } else { format!("{label}>else") };
+                errs.extend(validate_at(then, next_depth, &then_label));
+                errs.extend(validate_at(else_branch, next_depth, &else_label));
             }
-            MiInstruction::WriteReg { key, name, value, r#type, view } => {
-                let k = key.trim();
-                if k.is_empty() {
-                    errs.push(format!("{at}: write_reg.key 为空"));
-                } else if !k.starts_with("HKLM\\") && !k.starts_with("HKCU\\") {
-                    errs.push(format!(
-                        "{at}: write_reg.key 需以 HKLM\\ 或 HKCU\\ 开头: {k}"
-                    ));
-                }
-                if name.trim().is_empty() {
-                    errs.push(format!("{at}: write_reg.name 为空"));
-                }
-                let ty = r#type.trim().to_ascii_lowercase();
-                match ty.as_str() {
-                    "" | "str" => {}
-                    "dword" => {
-                        if let Err(e) = crate::regspec::parse_dword(value) {
-                            errs.push(format!("{at}: write_reg.value 无效: {e}"));
-                        }
-                    }
-                    "bin" | "binary" => {
-                        if let Err(e) = crate::regspec::parse_hex_binary(value) {
-                            errs.push(format!("{at}: write_reg.bin 值无效: {e}"));
-                        }
-                    }
-                    "expand" | "expand_sz" => {
-                        if value.trim().is_empty() {
-                            errs.push(format!("{at}: write_reg.expand.value 为空"));
-                        }
-                    }
-                    "multi_sz" => {
-                        if value.split('|').any(|seg| seg.trim().is_empty()) {
-                            errs.push(format!(
-                                "{at}: write_reg.multi_sz 值含空段（`|` 分隔）: {value}"
-                            ));
-                        }
-                    }
-                    other => errs.push(format!(
-                        "{at}: write_reg.type \"{other}\" 无效（str / dword / bin / expand / multi_sz）"
-                    )),
-                }
-                if let Err(e) = crate::regspec::parse_view(view) {
-                    errs.push(format!("{at}: write_reg.view 无效: {e}"));
-                }
-            }
-            MiInstruction::CreateDir { path } => {
-                if path.trim().is_empty() {
-                    errs.push(format!("{at}: create_dir.path 为空"));
-                }
-            }
-            MiInstruction::DeleteFile { path } => {
-                if path.trim().is_empty() {
-                    errs.push(format!("{at}: delete_file.path 为空"));
-                }
-            }
-            MiInstruction::Rename { from, to } => {
-                if from.trim().is_empty() {
-                    errs.push(format!("{at}: rename.from 为空"));
-                }
-                if to.trim().is_empty() {
-                    errs.push(format!("{at}: rename.to 为空"));
-                }
-                if !from.trim().is_empty()
-                    && from.trim().eq_ignore_ascii_case(to.trim())
-                {
-                    errs.push(format!("{at}: rename.from 与 to 相同: {from}"));
-                }
-            }
-            MiInstruction::CopyFiles { from, to } => {
-                if from.trim().is_empty() {
-                    errs.push(format!("{at}: copy_files.from 为空"));
-                }
-                if to.trim().is_empty() {
-                    errs.push(format!("{at}: copy_files.to 为空"));
-                }
-                // 目标在源内部会自嵌套复制（CopyFiles 不允许，NSIS 同语义）
-                if let (Some(f), Some(t)) = (norm_path(from), norm_path(to)) {
-                    if t.starts_with(&format!("{f}\\")) {
-                        errs.push(format!(
-                            "{at}: copy_files.to 在 from 内部（会无限自复制）: {from} → {to}"
-                        ));
-                    }
-                }
-            }
-            MiInstruction::WriteIni { file, section, key, .. } => {
-                if file.trim().is_empty() {
-                    errs.push(format!("{at}: write_ini.file 为空"));
-                }
-                if section.trim().is_empty() {
-                    errs.push(format!("{at}: write_ini.section 为空"));
-                }
-                if key.trim().is_empty() {
-                    errs.push(format!("{at}: write_ini.key 为空"));
-                }
-            }
-            MiInstruction::Sleep { .. } => {}
-            MiInstruction::DetailPrint { .. } => {}
-            MiInstruction::ExecShell { target, .. } => {
-                if target.trim().is_empty() {
-                    errs.push(format!("{at}: exec_shell.target 为空"));
-                }
-            }
-            MiInstruction::RmDir { path, .. } => {
-                if path.trim().is_empty() {
-                    errs.push(format!("{at}: rmdir.path 为空"));
-                }
-            }
-            MiInstruction::IfFileExists { path, then, else_branch } => {
-                if path.trim().is_empty() {
-                    errs.push(format!("{at}: if_file_exists.path 为空"));
-                }
-                let next_depth = depth + 1;
-                if next_depth > MAX_CODE_DEPTH {
-                    errs.push(format!(
-                        "{at}: if_file_exists 嵌套深度超限（≤ {MAX_CODE_DEPTH}）"
-                    ));
-                } else {
-                    let then_label = if label.is_empty() { "then".to_string() } else { format!("{label}>then") };
-                    let else_label = if label.is_empty() { "else".to_string() } else { format!("{label}>else") };
-                    errs.extend(validate_at(then, next_depth, &then_label));
-                    errs.extend(validate_at(else_branch, next_depth, &else_label));
-                }
-            }
-            MiInstruction::Abort { .. } => {}
         }
     }
     errs
@@ -629,6 +658,35 @@ mod tests {
             ("SMPROGRAMS".into(), "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs".into()),
             ("WINDIR".into(), "C:\\Windows".into()),
         ])
+    }
+
+    /// 每个已登记 op 都能以最小字段反序列化（KNOWN_OPS 与 MiInstruction
+    /// 不漂移的守卫；新增指令必须同步登记）。
+    #[test]
+    fn test_known_ops_all_parse() {
+        let minimal: &[(&str, &str)] = &[
+            ("run", r#""cmd":"x""#),
+            ("write_reg", r#""key":"HKCU\\A","name":"n","value":"v""#),
+            ("create_dir", r#""path":"p""#),
+            ("delete_file", r#""path":"p""#),
+            ("rename", r#""from":"a","to":"b""#),
+            ("copy_files", r#""from":"a","to":"b""#),
+            ("write_ini", r#""file":"f","section":"s","key":"k","value":"v""#),
+            ("sleep", r#""ms":1"#),
+            ("detail_print", r#""text":"t""#),
+            ("exec_shell", r#""target":"t""#),
+            ("rmdir", r#""path":"p""#),
+            ("if_file_exists", r#""path":"p""#),
+            ("abort", r#""message":"stop""#),
+        ];
+        assert_eq!(KNOWN_OPS.len(), minimal.len(), "KNOWN_OPS 与最小样例数不一致");
+        for (i, (op, fields)) in minimal.iter().enumerate() {
+            assert_eq!(KNOWN_OPS[i], *op, "KNOWN_OPS 第 {i} 项与样例顺序不一致");
+            let json = format!(r#"{{"op":"{op}",{fields}}}"#);
+            let inst: MiInstruction =
+                serde_json::from_str(&json).unwrap_or_else(|e| panic!("{op}: {e}"));
+            assert_eq!(describe(&inst, None).is_empty(), false, "{op} describe 非空");
+        }
     }
 
     #[test]

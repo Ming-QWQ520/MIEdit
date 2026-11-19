@@ -1976,6 +1976,7 @@ dependencies = [
  "lzma-rust",
  "serde",
  "serde_json",
+ "toml",
  "walkdir",
  "windows 0.58.0",
  "winreg",

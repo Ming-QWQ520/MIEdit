@@ -5,14 +5,16 @@
 //! 每页：标题 + 说明 + 页脚 ⟨ 上一步(B) | 下一步(N) | 取消 ⟩；项目脚本与 CLI 互通。
 
 use crate::{
-    accent_color, default_config, preview, ACCENT_PRESETS, AMBER, BG_BOTTOM, BG_TOP, CARD,
-    CARD_STROKE, FIELD, GREEN, RED, TEXT, TEXT_DEFAULTS_ZH, TEXT_DIM, WINDOW_HINT,
+    accent_color, default_config, pal, preview, ACCENT_PRESETS, AMBER, GREEN, RED, TEXT_DEFAULTS_ZH,
+    WINDOW_HINT,
 };
 use crate::scriptide::{self, IdeAction};
 use anyhow::Context as _;
 use eframe::egui::{self, Color32, FontId, Pos2, Rect, Sense, TextureHandle, Vec2};
 use miedit_compiler::{build_package, locate_components, BuildOptions, BuildSummary};
 use miedit_core::config::Config;
+use miedit_core::midiag::{self, Severity};
+use miedit_core::theme::{BuilderSettings, ThemeMode};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -41,20 +43,25 @@ pub fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-pub fn apply_style(ctx: &egui::Context) {
-    ctx.set_visuals(egui::Visuals::dark());
+pub fn apply_style(ctx: &egui::Context, dark: bool) {
+    let p = pal();
+    ctx.set_visuals(if dark {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
+    });
     ctx.style_mut(|st| {
         let v = &mut st.visuals;
-        v.panel_fill = BG_TOP;
-        v.window_fill = CARD;
-        v.extreme_bg_color = FIELD;
-        v.faint_bg_color = Color32::from_rgb(31, 34, 43);
+        v.panel_fill = p.bg_top;
+        v.window_fill = p.card;
+        v.extreme_bg_color = p.field;
+        v.faint_bg_color = p.faint;
         v.selection.bg_fill = Color32::from_rgb(0x4F, 0x8C, 0xFF);
         v.widgets.noninteractive.bg_stroke = egui::Stroke::NONE;
-        v.widgets.inactive.bg_fill = Color32::from_rgb(32, 36, 46);
+        v.widgets.inactive.bg_fill = p.btn_bg;
         v.widgets.inactive.bg_stroke = egui::Stroke::NONE;
-        v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, TEXT);
-        v.widgets.hovered.bg_fill = Color32::from_rgb(42, 47, 60);
+        v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, p.text);
+        v.widgets.hovered.bg_fill = p.hover;
         v.widgets.active.bg_fill = Color32::from_rgb(0x4F, 0x8C, 0xFF);
         st.spacing.item_spacing = Vec2::new(8.0, 8.0);
         st.spacing.button_padding = Vec2::new(14.0, 6.0);
@@ -98,7 +105,7 @@ const STEP_TITLES: [(&str, &str); 10] = [
     ("应用程序快捷方式", "请指定为应用程序创建哪些快捷方式。"),
     ("安装完成后运行", "请指定安装程序完成时要运行的任务。"),
     ("卸载程序与注册表", "请指定卸载相关属性与注册表写入项。"),
-    ("MI 脚本（.mi）", "像 VSCode 一样直接编辑 MI 脚本（自研轻量脚本，TOML 语法）。"),
+    ("MI 脚本（.mis）", "像 VSCode 一样直接编辑 MI 脚本（自研轻量脚本，TOML 语法）。"),
     ("构建安装程序", "确认配置并生成自解压安装程序。"),
 ];
 
@@ -115,9 +122,6 @@ const STEP_SHORT: [&str; 10] = [
     "MI 脚本",
     "构建",
 ];
-
-/// 左栏当前步底色（accent 低透明近似值，深色主题）
-const RAIL_CURRENT_BG: Color32 = Color32::from_rgb(45, 58, 96);
 
 struct RegRow {
     key: String,
@@ -143,11 +147,32 @@ pub struct BuilderApp {
     ide: scriptide::IdeState,
     /// 左栏导航待跳转步骤（egui 借用规则：rail 内记录，update 末尾执行）
     pending_jump: Option<usize>,
+    /// 主题模式（跟随系统/深色/浅色；持久化到应用设置，路线图步骤 44）
+    theme: ThemeMode,
+    /// 应用设置文件路径（None = 无法定位配置目录，仅内存生效）
+    settings_file: Option<PathBuf>,
+    /// 全流程预览会话（Some = 打开；Esc / 完成 / 关闭退出，路线图步骤 41）
+    preview: Option<preview::PreviewState>,
+    /// 关于对话框
+    show_about: bool,
+    /// 跟随系统模式下的轮询计时与上次系统偏好
+    last_sys_check: Instant,
+    last_sys_dark: bool,
 }
 
 impl BuilderApp {
     pub fn new(project: Option<PathBuf>, ctx: &egui::Context) -> Self {
         let cfg = default_config();
+        // 主题：读应用设置（默认跟随系统），启动即应用（路线图步骤 44）
+        let settings_file = miedit_core::theme::settings_path();
+        let settings = settings_file
+            .as_deref()
+            .map(|p| BuilderSettings::load_from(p))
+            .unwrap_or_default();
+        let sys_dark = miedit_core::theme::system_prefers_dark();
+        let dark = miedit_core::theme::resolve(settings.theme, sys_dark);
+        crate::DARK_MODE.store(dark, std::sync::atomic::Ordering::Relaxed);
+        apply_style(ctx, dark);
         let mut app = Self {
             cfg,
             step: Step::Welcome,
@@ -164,6 +189,12 @@ impl BuilderApp {
             script_dirty: false,
             ide: scriptide::IdeState::default(),
             pending_jump: None,
+            theme: settings.theme,
+            settings_file,
+            preview: None,
+            show_about: false,
+            last_sys_check: Instant::now(),
+            last_sys_dark: sys_dark,
         };
         if let Some(p) = project {
             if let Err(e) = app.open_project(&p, ctx) {
@@ -333,8 +364,8 @@ impl BuilderApp {
                     },
                 );
                 match rfd::FileDialog::new()
-                    .set_file_name(format!("{slug}.mi"))
-                    .add_filter("MI 脚本（.mi）", &["mi", "toml"])
+                    .set_file_name(format!("{slug}.mis"))
+                    .add_filter("MI 脚本（.mis / .mi）", &["mis", "mi", "toml"])
                     .save_file()
                 {
                     Some(p) => p,
@@ -412,9 +443,9 @@ fn text_input(ui: &mut egui::Ui, text: &mut String, hint: &str, width: f32) -> e
         egui::RichText::new(hint.to_string()).color(Color32::from_rgb(96, 102, 116));
     let width = width.max(60.0);
     egui::Frame::none()
-        .fill(FIELD)
+        .fill(pal().field)
         .rounding(8.0)
-        .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
+        .stroke(egui::Stroke::new(1.0_f32, pal().card_stroke))
         .inner_margin(egui::Margin::symmetric(10.0, 7.0))
         .show(ui, |ui| {
             ui.add_sized(
@@ -431,13 +462,13 @@ fn text_input(ui: &mut egui::Ui, text: &mut String, hint: &str, width: f32) -> e
 /// “标签 + 输入框” 行（Inno 向导风格：左标签，右输入）。
 fn field_row(ui: &mut egui::Ui, label: &str, text: &mut String, hint: &str, base: f32, input_reserve: f32) {
     ui.horizontal(|ui| {
-        ui.add_sized([150.0, 0.0], egui::Label::new(egui::RichText::new(label).color(TEXT).size(13.5)));
+        ui.add_sized([150.0, 0.0], egui::Label::new(egui::RichText::new(label).color(pal().text).size(13.5)));
         text_input(ui, text, hint, base - 150.0 - input_reserve);
     });
 }
 
 fn field_label(ui: &mut egui::Ui, label: &str) {
-    ui.label(egui::RichText::new(label).color(TEXT_DIM).size(12.5));
+    ui.label(egui::RichText::new(label).color(pal().text_dim).size(12.5));
 }
 
 fn primary_button<'a>(text: &'a str, accent: Color32) -> egui::Button<'a> {
@@ -453,18 +484,18 @@ fn nav_button<'a>(text: &'a str, accent: Option<Color32>) -> egui::Button<'a> {
             .fill(c)
             .rounding(8.0)
             .min_size(Vec2::new(104.0, 34.0)),
-        None => egui::Button::new(egui::RichText::new(text).color(TEXT).size(14.0))
+        None => egui::Button::new(egui::RichText::new(text).color(pal().text).size(14.0))
             .fill(Color32::from_rgb(32, 36, 46))
-            .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
+            .stroke(egui::Stroke::new(1.0_f32, pal().card_stroke))
             .rounding(8.0)
             .min_size(Vec2::new(104.0, 34.0)),
     }
 }
 
 fn small_button<'a>(text: &'a str) -> egui::Button<'a> {
-    egui::Button::new(egui::RichText::new(text).color(TEXT_DIM).size(12.5))
+    egui::Button::new(egui::RichText::new(text).color(pal().text_dim).size(12.5))
         .fill(Color32::from_rgb(32, 36, 46))
-        .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
+        .stroke(egui::Stroke::new(1.0_f32, pal().card_stroke))
         .rounding(7.0)
         .min_size(Vec2::new(0.0, 30.0))
 }
@@ -482,15 +513,15 @@ fn chip(ui: &mut egui::Ui, text: &str, color: Color32) {
 
 fn log_lines(ui: &mut egui::Ui, log: &[String]) {
     egui::Frame::none()
-        .fill(FIELD)
+        .fill(pal().field)
         .rounding(8.0)
-        .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
+        .stroke(egui::Stroke::new(1.0_f32, pal().card_stroke))
         .inner_margin(egui::Margin::same(8.0))
         .show(ui, |ui| {
             egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 for line in log {
-                    ui.label(egui::RichText::new(line).color(TEXT_DIM).size(11.5).monospace());
+                    ui.label(egui::RichText::new(line).color(pal().text_dim).size(11.5).monospace());
                 }
             });
         });
@@ -568,38 +599,38 @@ impl BuilderApp {
             ui.allocate_ui_at_rect(text_rect, |ui| {
                 ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                     ui.add_space(14.0);
-                    ui.label(egui::RichText::new("欢迎使用 MIEdit 安装包构建向导").color(TEXT).size(24.0).strong());
+                    ui.label(egui::RichText::new("欢迎使用 MIEdit 安装包构建向导").color(pal().text).size(24.0).strong());
                     ui.add_space(14.0);
                     ui.label(
                         egui::RichText::new(
                             "本向导将指导你创建一个新 MIEdit 自解压安装程序的完整配置。结果将生成一个单文件安装程序 EXE，包含现代化安装向导与自动生成的卸载程序。",
                         )
-                        .color(TEXT_DIM)
+                        .color(pal().text_dim)
                         .size(14.0),
                     );
                     ui.add_space(10.0);
                     ui.label(
                         egui::RichText::new(
-                            "向导并不会涵盖 MIEdit 的所有功能。生成的 MI 脚本（.mi，自研轻量脚本语言，TOML 语法）可在「MI 脚本」页像 VSCode 一样直接编辑，或使用 miedit-compiler 命令行编译。",
+                            "向导并不会涵盖 MIEdit 的所有功能。生成的 MI 脚本（.mis，自研轻量脚本语言，TOML 语法）可在「MI 脚本」页像 VSCode 一样直接编辑，或使用 mis build 命令行编译。",
                         )
-                        .color(TEXT_DIM)
+                        .color(pal().text_dim)
                         .size(14.0),
                     );
                     ui.add_space(10.0);
                     ui.label(
                         egui::RichText::new("单击「下一步」继续，或单击「取消」退出此向导。")
-                            .color(TEXT)
+                            .color(pal().text)
                             .size(14.0),
                     );
                     ui.add_space(24.0);
                     let mut open = false;
                     ui.checkbox(
                         &mut open,
-                        egui::RichText::new("打开现有项目（.mi / .toml）").color(TEXT).size(13.5),
+                        egui::RichText::new("打开现有项目（.mis / .mi / .toml）").color(pal().text).size(13.5),
                     );
                     if open {
                         if let Some(p) = rfd::FileDialog::new()
-                            .add_filter("MI 脚本（.mi）", &["mi", "toml"])
+                            .add_filter("MI 脚本（.mis / .mi）", &["mis", "mi", "toml"])
                             .pick_file()
                         {
                             if let Err(e) = self.open_project(&p, ctx) {
@@ -618,9 +649,9 @@ impl BuilderApp {
         let base = ui.available_width() - 40.0;
         field_row(ui, "应用程序名称 *：", &mut self.cfg.app.name, "例如：我的应用", base, 0.0);
         ui.horizontal(|ui| {
-            ui.add_sized([150.0, 0.0], egui::Label::new(egui::RichText::new("应用程序版本：").color(TEXT).size(13.5)));
+            ui.add_sized([150.0, 0.0], egui::Label::new(egui::RichText::new("应用程序版本：").color(pal().text).size(13.5)));
             text_input(ui, &mut self.cfg.app.version, "1.0.0", 180.0);
-            ui.add_sized([90.0, 0.0], egui::Label::new(egui::RichText::new("发布者：").color(TEXT).size(13.5)));
+            ui.add_sized([90.0, 0.0], egui::Label::new(egui::RichText::new("发布者：").color(pal().text).size(13.5)));
             text_input(ui, &mut self.cfg.app.publisher, "发布者名称", base - 340.0);
         });
         field_row(ui, "应用程序网站：", &mut self.cfg.app.url, "https://example.com（可选）", base, 0.0);
@@ -637,7 +668,7 @@ impl BuilderApp {
         ui.checkbox(
             &mut self.cfg.app.per_machine,
             egui::RichText::new("每机器安装（写入 HKLM 与公共开始菜单，启动时请求管理员权限）")
-                .color(TEXT)
+                .color(pal().text)
                 .size(13.5),
         );
         let _ = ctx;
@@ -680,14 +711,14 @@ impl BuilderApp {
                 }
             });
             col.horizontal(|ui| {
-                ui.add_sized([80.0, 0.0], egui::Label::new(egui::RichText::new("显示模式：").color(TEXT).size(13.5)));
+                ui.add_sized([80.0, 0.0], egui::Label::new(egui::RichText::new("显示模式：").color(pal().text).size(13.5)));
                 for (style, label) in [("cover", "等比填满"), ("contain", "等比完整"), ("stretch", "拉伸")] {
                     let selected = self.cfg.ui.background_style == style;
                     if ui
                         .add(egui::SelectableLabel::new(
                             selected,
                             egui::RichText::new(label)
-                                .color(if selected { Color32::WHITE } else { TEXT_DIM })
+                                .color(if selected { Color32::WHITE } else { pal().text_dim })
                                 .size(13.0),
                         ))
                         .clicked()
@@ -697,7 +728,7 @@ impl BuilderApp {
                 }
             });
             col.horizontal(|ui| {
-                ui.add_sized([80.0, 0.0], egui::Label::new(egui::RichText::new("主题色：").color(TEXT).size(13.5)));
+                ui.add_sized([80.0, 0.0], egui::Label::new(egui::RichText::new("主题色：").color(pal().text).size(13.5)));
                 for (hex, tip) in ACCENT_PRESETS {
                     let on = self.cfg.ui.accent.eq_ignore_ascii_case(hex);
                     let [r, g, b] = miedit_core::util::parse_hex_color(hex).unwrap_or([255, 255, 255]);
@@ -714,12 +745,12 @@ impl BuilderApp {
                 text_input(ui, &mut self.cfg.ui.accent, "#RRGGBB", 100.0);
             });
             col.horizontal(|ui| {
-                ui.add_sized([80.0, 0.0], egui::Label::new(egui::RichText::new("窗口尺寸：").color(TEXT).size(13.5)));
+                ui.add_sized([80.0, 0.0], egui::Label::new(egui::RichText::new("窗口尺寸：").color(pal().text).size(13.5)));
                 ui.add_sized([100.0, 0.0], egui::DragValue::new(&mut self.cfg.ui.window_size[0]).range(720.0..=1600.0).speed(10.0).prefix("宽 "));
                 ui.add_sized([100.0, 0.0], egui::DragValue::new(&mut self.cfg.ui.window_size[1]).range(520.0..=1200.0).speed(10.0).prefix("高 "));
             });
             col.horizontal(|ui| {
-                ui.add_sized([80.0, 0.0], egui::Label::new(egui::RichText::new("压缩方式：").color(TEXT).size(13.5)));
+                ui.add_sized([80.0, 0.0], egui::Label::new(egui::RichText::new("压缩方式：").color(pal().text).size(13.5)));
                 let mut comp = self.cfg.install.compression.clone();
                 let comp_label = match comp.as_str() {
                     "solid" => "Deflate Solid（整包，体积更小）",
@@ -750,10 +781,10 @@ impl BuilderApp {
             // 右：实时预览
             let rcol = &mut cols[1];
             rcol.add_space(2.0);
-            rcol.label(egui::RichText::new("实时预览").color(TEXT).size(15.0).strong());
+            rcol.label(egui::RichText::new("实时预览").color(pal().text).size(15.0).strong());
             rcol.add_space(4.0);
             let pw = rcol.available_width() - 8.0;
-            preview::draw(rcol, self.bg_tex.as_ref(), &self.cfg, pw);
+            preview::draw_welcome_static(rcol, self.bg_tex.as_ref(), &self.cfg, pw);
         });
     }
 
@@ -781,7 +812,7 @@ impl BuilderApp {
         ui.add_space(6.0);
         ui.checkbox(
             &mut self.cfg.ui.show_dir_page,
-            egui::RichText::new("允许用户更改应用程序目录（显示目录选择页）").color(TEXT).size(13.5),
+            egui::RichText::new("允许用户更改应用程序目录（显示目录选择页）").color(pal().text).size(13.5),
         );
         ui.add_space(10.0);
         field_label(ui, "授权（许可）文件");
@@ -805,13 +836,13 @@ impl BuilderApp {
             ui.horizontal(|ui| {
                 let mut style = if self.cfg.ui.license_scroll_required { 1 } else { 0 };
                 if ui
-                    .add(egui::RadioButton::new(style == 0, egui::RichText::new("勾选框：勾选“我接受”后继续").color(TEXT).size(13.5)))
+                    .add(egui::RadioButton::new(style == 0, egui::RichText::new("勾选框：勾选“我接受”后继续").color(pal().text).size(13.5)))
                     .clicked()
                 {
                     style = 0;
                 }
                 if ui
-                    .add(egui::RadioButton::new(style == 1, egui::RichText::new("强制滚动：滚到底部才可接受（Inno 风格）").color(TEXT).size(13.5)))
+                    .add(egui::RadioButton::new(style == 1, egui::RichText::new("强制滚动：滚到底部才可接受（Inno 风格）").color(pal().text).size(13.5)))
                     .clicked()
                 {
                     style = 1;
@@ -821,14 +852,14 @@ impl BuilderApp {
             });
             if let Some(text) = &self.license_preview {
                 egui::Frame::none()
-                    .fill(FIELD)
+                    .fill(pal().field)
                     .rounding(8.0)
-                    .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
+                    .stroke(egui::Stroke::new(1.0_f32, pal().card_stroke))
                     .inner_margin(egui::Margin::same(10.0))
                     .show(ui, |ui| {
                         egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
-                            ui.label(egui::RichText::new(text).color(TEXT_DIM).size(12.0));
+                            ui.label(egui::RichText::new(text).color(pal().text_dim).size(12.0));
                         });
                     });
             }
@@ -841,7 +872,7 @@ impl BuilderApp {
         let mut show_components = self.cfg.ui.show_components_page.unwrap_or(true);
         ui.checkbox(
             &mut show_components,
-            egui::RichText::new("允许用户选择要安装的组件（组件页）").color(TEXT).size(13.5),
+            egui::RichText::new("允许用户选择要安装的组件（组件页）").color(pal().text).size(13.5),
         );
         self.cfg.ui.show_components_page = Some(show_components);
         ui.add_space(6.0);
@@ -858,14 +889,14 @@ impl BuilderApp {
                     let mut comp_remove: Option<usize> = None;
                     for (i, comp) in self.cfg.components.iter_mut().enumerate() {
                         egui::Frame::none()
-                            .fill(CARD)
+                            .fill(pal().card)
                             .rounding(8.0)
-                            .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
+                            .stroke(egui::Stroke::new(1.0_f32, pal().card_stroke))
                             .inner_margin(egui::Margin::symmetric(8.0, 6.0))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     text_input(ui, &mut comp.name, "组件名称", inner_w - 170.0);
-                                    ui.checkbox(&mut comp.required, egui::RichText::new("必装").color(TEXT_DIM).size(12.0));
+                                    ui.checkbox(&mut comp.required, egui::RichText::new("必装").color(pal().text_dim).size(12.0));
                                     if ui.small_button(egui::RichText::new("×").color(RED)).clicked() {
                                         comp_remove = Some(i);
                                     }
@@ -901,9 +932,9 @@ impl BuilderApp {
                 .show(col, |ui| {
                     for (i, t) in self.cfg.install_types.iter_mut().enumerate() {
                         egui::Frame::none()
-                            .fill(CARD)
+                            .fill(pal().card)
                             .rounding(8.0)
-                            .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
+                            .stroke(egui::Stroke::new(1.0_f32, pal().card_stroke))
                             .inner_margin(egui::Margin::symmetric(8.0, 6.0))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
@@ -911,7 +942,7 @@ impl BuilderApp {
                                     if ui
                                         .checkbox(
                                             &mut t.default,
-                                            egui::RichText::new("默认").color(TEXT_DIM).size(12.0),
+                                            egui::RichText::new("默认").color(pal().text_dim).size(12.0),
                                         )
                                         .changed()
                                         && t.default
@@ -958,9 +989,9 @@ impl BuilderApp {
                     let mut remove_idx: Option<usize> = None;
                     for (i, spec) in self.cfg.files.iter_mut().enumerate() {
                         egui::Frame::none()
-                            .fill(CARD)
+                            .fill(pal().card)
                             .rounding(8.0)
-                            .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
+                            .stroke(egui::Stroke::new(1.0_f32, pal().card_stroke))
                             .inner_margin(egui::Margin::symmetric(8.0, 6.0))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
@@ -1013,7 +1044,7 @@ impl BuilderApp {
             let (n, bytes) = self.files_stat;
             rcol.label(
                 egui::RichText::new(format!("共 {n} 个文件 · 未压缩 {}", miedit_core::util::human_size(bytes)))
-                    .color(TEXT_DIM)
+                    .color(pal().text_dim)
                     .size(11.5),
             );
         });
@@ -1029,13 +1060,13 @@ impl BuilderApp {
         let base = ui.available_width() - 40.0;
         ui.checkbox(
             &mut self.cfg.shortcuts.start_menu,
-            egui::RichText::new("在「开始菜单」程序文件夹中创建快捷方式（自动含卸载快捷方式）").color(TEXT).size(13.5),
+            egui::RichText::new("在「开始菜单」程序文件夹中创建快捷方式（自动含卸载快捷方式）").color(pal().text).size(13.5),
         );
         let mut name = self.cfg.shortcuts.name.clone().unwrap_or_default();
         field_row(ui, "开始菜单文件夹名称：", &mut name, "默认应用名称", base, 0.0);
         self.cfg.shortcuts.name = if name.is_empty() { None } else { Some(name) };
         ui.add_space(6.0);
-        ui.checkbox(&mut self.cfg.shortcuts.desktop, egui::RichText::new("允许用户创建桌面快捷方式（桌面快捷方式）").color(TEXT).size(13.5));
+        ui.checkbox(&mut self.cfg.shortcuts.desktop, egui::RichText::new("允许用户创建桌面快捷方式（桌面快捷方式）").color(pal().text).size(13.5));
         field_row(ui, "主程序启动参数：", &mut self.cfg.shortcuts.run_args, "可空", base, 0.0);
     }
 
@@ -1043,7 +1074,7 @@ impl BuilderApp {
         let base = ui.available_width() - 40.0;
         ui.label(
             egui::RichText::new("任务将在完成页显示为复选框，由用户决定是否运行。为空时：若主程序存在则显示“运行主程序”。")
-                .color(TEXT_DIM)
+                .color(pal().text_dim)
                 .size(12.5),
         );
         ui.add_space(6.0);
@@ -1051,15 +1082,15 @@ impl BuilderApp {
         let mut task_remove: Option<usize> = None;
         for (i, task) in self.cfg.install.run_tasks.iter_mut().enumerate() {
             egui::Frame::none()
-                .fill(CARD)
+                .fill(pal().card)
                 .rounding(8.0)
-                .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
+                .stroke(egui::Stroke::new(1.0_f32, pal().card_stroke))
                 .inner_margin(egui::Margin::symmetric(8.0, 6.0))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.monospace(egui::RichText::new(format!("#{}", i + 1)).color(accent).size(12.0));
                         text_input(ui, &mut task.name, "复选框文案（支持 {app} {version}）", base - 230.0);
-                        ui.checkbox(&mut task.default_checked, egui::RichText::new("默认勾选").color(TEXT_DIM).size(12.5));
+                        ui.checkbox(&mut task.default_checked, egui::RichText::new("默认勾选").color(pal().text_dim).size(12.5));
                         if ui.small_button(egui::RichText::new("×").color(RED)).clicked() {
                             task_remove = Some(i);
                         }
@@ -1121,9 +1152,9 @@ impl BuilderApp {
         let mut env_remove: Option<usize> = None;
         for (i, e) in self.cfg.install.env.iter_mut().enumerate() {
             egui::Frame::none()
-                .fill(CARD)
+                .fill(pal().card)
                 .rounding(8.0)
-                .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
+                .stroke(egui::Stroke::new(1.0_f32, pal().card_stroke))
                 .inner_margin(egui::Margin::symmetric(8.0, 6.0))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
@@ -1174,7 +1205,7 @@ impl BuilderApp {
         ui.add_space(4.0);
         ui.label(
             egui::RichText::new("提示：PATH 追加/前置按 \";\" 列表去重合并（不覆盖已有内容），卸载时只移除本安装写入的段；\"直接设值\" 卸载时还原安装前的原值。")
-                .color(TEXT_DIM)
+                .color(pal().text_dim)
                 .size(12.0),
         );
     }
@@ -1185,31 +1216,14 @@ impl BuilderApp {
     fn page_script(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let editor_id = egui::Id::new("mi-script-editor");
         let tab_label = self.tab_label();
-        // 实时校验（一处解析：状态栏 / 问题面板 / 错误行高亮共用）
-        let parse_result = toml::from_str::<Config>(&self.script_text);
-        let error_pos =
-            parse_result.as_ref().err().and_then(|e| scriptide::parse_toml_error_pos(&e.to_string()));
-        let has_error = parse_result.is_err();
-        // MI 脚本 v2（步骤 33）：解析成功后对组件指令做静态校验
-        // （必填字段/dword 合法性/hive 前缀），问题面板与状态栏共用
-        let inst_errs: Vec<String> = match &parse_result {
-            Ok(cfg) => cfg
-                .components
-                .iter()
-                .enumerate()
-                .flat_map(|(ci, c)| {
-                    miedit_core::micmd::validate(&c.code).into_iter().map(move |e| {
-                        let cname = if c.name.trim().is_empty() {
-                            format!("#{}", ci + 1)
-                        } else {
-                            c.name.clone()
-                        };
-                        format!("组件「{}」{e}", cname)
-                    })
-                })
-                .collect(),
-            Err(_) => Vec::new(),
-        };
+        // 语法检测和纠错（路线图步骤 43）：midiag 三层诊断，
+        // 状态栏 / 问题面板 / 错误行高亮 / 一键修复共用
+        let diags = midiag::diagnose_text(&self.script_text);
+        let n_errors = diags.iter().filter(|d| d.severity == Severity::Error).count();
+        let first_error_line = diags
+            .iter()
+            .find(|d| d.severity == Severity::Error)
+            .map(|d| d.line);
         let accent = self.accent();
 
         // 上一帧光标（行号高亮 / 面包屑用；编辑后的新光标由状态栏重读）
@@ -1220,6 +1234,8 @@ impl BuilderApp {
             prev_caret.map(|c| scriptide::line_of_char(&self.script_text, c)).unwrap_or(1);
 
         let mut actions: Vec<IdeAction> = Vec::new();
+        // 问题面板「一键修复」待应用项（egui 借用规则：面板内记录，此处之后执行）
+        let mut pending_fix: Option<miedit_core::midiag::QuickFix> = None;
 
         // ---- VSCode 快捷键（仅脚本页生效）----
         ctx.input(|i| {
@@ -1256,82 +1272,18 @@ impl BuilderApp {
             }
         }
 
-        // ---- 菜单栏（VSCode 顶部菜单；RefCell 规避嵌套闭包可变借用）----
-        let picked = std::cell::RefCell::new(None::<IdeAction>);
-        egui::menu::bar(ui, |ui| {
-            ui.menu_button("文件", |ui| {
-                for (label, a) in [
-                    ("保存脚本　Ctrl+S", IdeAction::Save),
-                    ("另存为脚本...", IdeAction::SaveAs),
-                    ("打开项目...", IdeAction::OpenProject),
-                ] {
-                    if ui.button(label).clicked() {
-                        *picked.borrow_mut() = Some(a);
-                        ui.close_menu();
-                    }
-                }
-            });
-            ui.menu_button("编辑", |ui| {
-                for (label, a) in [
-                    ("查找　Ctrl+F", IdeAction::ToggleFind),
-                    ("替换　Ctrl+H", IdeAction::ToggleReplace),
-                    ("转到行　Ctrl+G", IdeAction::GotoLine),
-                ] {
-                    if ui.button(label).clicked() {
-                        *picked.borrow_mut() = Some(a);
-                        ui.close_menu();
-                    }
-                }
-            });
-            ui.menu_button("查看", |ui| {
-                let wrap_label = if self.ide.wrap {
-                    "自动换行（开）　Alt+Z"
-                } else {
-                    "自动换行（关）　Alt+Z"
-                };
-                for (label, a) in [
-                    ("命令面板　Ctrl+Shift+P", IdeAction::TogglePalette),
-                    (wrap_label, IdeAction::ToggleWrap),
-                ] {
-                    if ui.button(label).clicked() {
-                        *picked.borrow_mut() = Some(a);
-                        ui.close_menu();
-                    }
-                }
-            });
-            ui.menu_button("工具", |ui| {
-                for (label, a) in [
-                    ("应用修改到向导", IdeAction::Apply),
-                    ("重新生成脚本（丢弃编辑）", IdeAction::Regenerate),
-                    ("转到构建页", IdeAction::OpenBuild),
-                ] {
-                    if ui.button(label).clicked() {
-                        *picked.borrow_mut() = Some(a);
-                        ui.close_menu();
-                    }
-                }
-            });
-            ui.menu_button("帮助", |ui| {
-                if ui.button("MI 脚本语法说明").clicked() {
-                    *picked.borrow_mut() = Some(IdeAction::HelpSyntax);
-                    ui.close_menu();
-                }
-            });
-        });
-        if let Some(a) = picked.into_inner() {
-            actions.push(a);
-        }
+        // （顶部菜单已并入全局菜单栏：文件 / 选项 / 设置 / 关于——用户指令 2026-11-19）
 
         // ---- 标签栏（VSCode 编辑器标签：文件图标 + 名称 + 未保存圆点）----
         egui::Frame::none()
-            .fill(FIELD)
+            .fill(pal().field)
             .rounding(8.0)
-            .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
+            .stroke(egui::Stroke::new(1.0_f32, pal().card_stroke))
             .inner_margin(egui::Margin::symmetric(10.0, 5.0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     egui::Frame::none()
-                        .fill(scriptide::VSC_BG)
+                        .fill(scriptide::VSC_BG())
                         .rounding(6.0)
                         .inner_margin(egui::Margin::symmetric(10.0, 6.0))
                         .show(ui, |ui| {
@@ -1339,7 +1291,7 @@ impl BuilderApp {
                                 let (r, _) =
                                     ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
                                 let p = ui.painter_at(r);
-                                p.rect_filled(r, 3.0, scriptide::VSC_SECTION);
+                                p.rect_filled(r, 3.0, scriptide::VSC_SECTION());
                                 p.text(
                                     r.center(),
                                     egui::Align2::CENTER_CENTER,
@@ -1348,7 +1300,7 @@ impl BuilderApp {
                                     Color32::WHITE,
                                 );
                                 ui.label(
-                                    egui::RichText::new(&tab_label).color(TEXT).size(13.0).strong(),
+                                    egui::RichText::new(&tab_label).color(pal().text).size(13.0).strong(),
                                 );
                                 if self.script_dirty {
                                     // VSCode 未保存圆点
@@ -1396,6 +1348,14 @@ impl BuilderApp {
             if ui.add(small_button("重新生成（丢弃编辑）")).clicked() {
                 actions.push(IdeAction::Regenerate);
             }
+            ui.separator();
+            // 全流程预览按键（用户指令 2026-11-19：预览安装/卸载页面）
+            if ui.add(small_button("▶ 预览安装")).clicked() {
+                actions.push(IdeAction::PreviewInstall);
+            }
+            if ui.add(small_button("▶ 预览卸载")).clicked() {
+                actions.push(IdeAction::PreviewUninstall);
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
                     egui::RichText::new(
@@ -1431,12 +1391,12 @@ impl BuilderApp {
             },
             matches,
             caret_line: Some(caret_line_prev),
-            error_line: error_pos.map(|(l, _)| l),
+            error_line: first_error_line,
         };
         egui::Frame::none()
-            .fill(scriptide::VSC_BG)
+            .fill(scriptide::VSC_BG())
             .rounding(8.0)
-            .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
+            .stroke(egui::Stroke::new(1.0_f32, pal().card_stroke))
             .inner_margin(egui::Margin::same(8.0))
             .show(ui, |ui| {
                 // 编辑前采集编辑意图（供自动缩进 / 括号补全后处理）
@@ -1551,32 +1511,16 @@ impl BuilderApp {
                 col,
                 sel,
                 indent_label,
-                errors: usize::from(has_error || !inst_errs.is_empty()),
+                errors: n_errors,
                 wrap: self.ide.wrap,
                 dirty: self.script_dirty,
             },
             accent,
         );
 
-        // ---- 问题面板（VSCode Problems）：解析失败时显示首个错误与位置；
-        // 解析成功时显示组件指令静态校验问题（MI 脚本 v2，步骤 33）----
-        if let Err(e) = &parse_result {
-            ui.add_space(4.0);
-            egui::Frame::none()
-                .fill(Color32::from_rgba_unmultiplied(90, 50, 20, 70))
-                .rounding(8.0)
-                .inner_margin(egui::Margin::symmetric(10.0, 6.0))
-                .show(ui, |ui| {
-                    let pos_txt = error_pos
-                        .map(|(l, c)| format!("行 {l}, 列 {c}"))
-                        .unwrap_or_else(|| "位置未知".to_string());
-                    ui.label(
-                        egui::RichText::new(format!("× 脚本解析错误（{pos_txt}）：{e}"))
-                            .color(AMBER)
-                            .size(12.0),
-                    );
-                });
-        } else if !inst_errs.is_empty() {
+        // ---- 问题面板（语法检测和纠错，路线图步骤 43）：
+        // 诊断列表（错误/警告分级）+ 可行诊断的一键修复按钮 ----
+        if !diags.is_empty() {
             ui.add_space(4.0);
             egui::Frame::none()
                 .fill(Color32::from_rgba_unmultiplied(90, 50, 20, 70))
@@ -1584,14 +1528,45 @@ impl BuilderApp {
                 .inner_margin(egui::Margin::symmetric(10.0, 6.0))
                 .show(ui, |ui| {
                     ui.label(
-                        egui::RichText::new(format!("! 指令校验：{} 个问题", inst_errs.len()))
-                            .color(AMBER)
-                            .size(12.0),
+                        egui::RichText::new(format!(
+                            "语法检测：{} 个错误 / {} 个警告",
+                            n_errors,
+                            diags.len() - n_errors
+                        ))
+                        .color(AMBER)
+                        .size(12.0)
+                        .strong(),
                     );
-                    for e in &inst_errs {
-                        ui.label(egui::RichText::new(format!("  {e}")).color(AMBER).size(12.0));
-                    }
+                    egui::ScrollArea::vertical()
+                        .max_height(130.0)
+                        .id_salt("mi-problems")
+                        .show(ui, |ui| {
+                            for d in diags.iter().take(40) {
+                                ui.horizontal(|ui| {
+                                    let (icon, color) = match d.severity {
+                                        Severity::Error => ("×", crate::RED),
+                                        Severity::Warning => ("!", AMBER),
+                                    };
+                                    ui.label(egui::RichText::new(icon).color(color).size(12.5).strong());
+                                    ui.label(
+                                        egui::RichText::new(format!("行 {}：{}", d.line, d.message))
+                                            .color(pal().text_dim)
+                                            .size(12.0),
+                                    );
+                                    if let Some(fix) = &d.fix {
+                                        let fix = fix.clone();
+                                        if ui.add(small_button(&fix.label)).clicked() {
+                                            pending_fix = Some(fix);
+                                        }
+                                    }
+                                });
+                            }
+                        });
                 });
+        }
+        if let Some(fix) = pending_fix {
+            self.script_text = midiag::apply_quick_fix(&self.script_text, &fix);
+            self.set_flash(format!("已应用修复（第 {} 行）：{}", fix.line, fix.label));
         }
 
         // 脏检测：脚本内容与当前配置的序列化结果不同即视为脏（配置很小，序列化开销可忽略）
@@ -1612,7 +1587,7 @@ impl BuilderApp {
                         &self.cfg.app.name
                     },
                 );
-                format!("{slug}.mi")
+                format!("{slug}.mis")
             })
     }
 
@@ -1629,6 +1604,8 @@ impl BuilderApp {
             ("转到行", "Ctrl+G", IdeAction::GotoLine),
             ("自动换行", "Alt+Z", IdeAction::ToggleWrap),
             ("转到构建页", "", IdeAction::OpenBuild),
+            ("预览安装向导", "全流程交互预览（Esc 退出）", IdeAction::PreviewInstall),
+            ("预览卸载向导", "全流程交互预览（Esc 退出）", IdeAction::PreviewUninstall),
             ("MI 脚本语法说明", "", IdeAction::HelpSyntax),
         ]
     }
@@ -1672,8 +1649,8 @@ impl BuilderApp {
                     },
                 );
                 if let Some(p) = rfd::FileDialog::new()
-                    .set_file_name(format!("{slug}.mi"))
-                    .add_filter("MI 脚本（.mi）", &["mi", "toml"])
+                    .set_file_name(format!("{slug}.mis"))
+                    .add_filter("MI 脚本（.mis / .mi）", &["mis", "mi", "toml"])
                     .save_file()
                 {
                     let _ = std::fs::write(&p, self.script_text.as_str());
@@ -1689,7 +1666,7 @@ impl BuilderApp {
             }
             IdeAction::OpenProject => {
                 if let Some(p) = rfd::FileDialog::new()
-                    .add_filter("MI 脚本（.mi）", &["mi", "toml"])
+                    .add_filter("MI 脚本（.mis / .mi）", &["mis", "mi", "toml"])
                     .pick_file()
                 {
                     if let Err(e) = self.open_project(&p, ctx) {
@@ -1699,6 +1676,22 @@ impl BuilderApp {
             }
             IdeAction::OpenBuild => {
                 self.pending_jump = Some(Step::Build as usize);
+            }
+            IdeAction::PreviewInstall => {
+                match toml::from_str::<Config>(&self.script_text) {
+                    Ok(cfg) => {
+                        self.preview = Some(preview::PreviewState::new_install(&cfg));
+                    }
+                    Err(e) => self.set_flash(format!("脚本解析失败，请先修正语法再预览: {e}")),
+                }
+            }
+            IdeAction::PreviewUninstall => {
+                match toml::from_str::<Config>(&self.script_text) {
+                    Ok(cfg) => {
+                        self.preview = Some(preview::PreviewState::new_uninstall(&cfg));
+                    }
+                    Err(e) => self.set_flash(format!("脚本解析失败，请先修正语法再预览: {e}")),
+                }
             }
             IdeAction::ToggleFind => {
                 self.ide.find.open = true;
@@ -1794,7 +1787,7 @@ impl BuilderApp {
             }
             IdeAction::HelpSyntax => {
                 self.set_flash(
-                    "MI 脚本（.mi）＝ TOML 语法：[节头] 分节；键 = \"值\"；# 注释；数组 [a, b]；布尔 true/false。与向导各页完全互通。\n组件指令（v2，NSIS Section 指令语义）：组件表内 code = [{ op = \"run\" | \"write_reg\" | \"create_dir\" | \"delete_file\" | \"detail_print\", ... }] 内联数组；路径可用 $INSTDIR/$DESKTOP/$SMPROGRAMS 等 NSIS 常量变量。",
+                    "MI 脚本（.mis）＝ TOML 语法：[节头] 分节；键 = \"值\"；# 注释；数组 [a, b]；布尔 true/false。与向导各页完全互通。\n组件指令（v2，NSIS Section 指令语义）：组件表内 code = [{ op = \"run\" | \"write_reg\" | \"create_dir\" | \"delete_file\" | \"detail_print\", ... }] 内联数组；路径可用 $INSTDIR/$DESKTOP/$SMPROGRAMS 等 NSIS 常量变量。",
                 );
             }
         }
@@ -1823,9 +1816,9 @@ impl BuilderApp {
             format!("{} 个任务", cfg.install.run_tasks.len())
         };
         egui::Frame::none()
-            .fill(FIELD)
+            .fill(pal().field)
             .rounding(8.0)
-            .stroke(egui::Stroke::new(1.0_f32, CARD_STROKE))
+            .stroke(egui::Stroke::new(1.0_f32, pal().card_stroke))
             .inner_margin(egui::Margin::same(12.0))
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
@@ -1850,8 +1843,8 @@ impl BuilderApp {
                 ];
                 for (k, v) in rows {
                     ui.horizontal(|ui| {
-                        ui.add_sized([110.0, 0.0], egui::Label::new(egui::RichText::new(k).color(TEXT_DIM).size(12.5)));
-                        ui.label(egui::RichText::new(v).color(TEXT).size(13.0));
+                        ui.add_sized([110.0, 0.0], egui::Label::new(egui::RichText::new(k).color(pal().text_dim).size(12.5)));
+                        ui.label(egui::RichText::new(v).color(pal().text).size(13.0));
                     });
                 }
             });
@@ -1884,7 +1877,7 @@ impl BuilderApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
                     egui::RichText::new(format!("{n} 个文件 · {}", miedit_core::util::human_size(bytes)))
-                        .color(TEXT_DIM)
+                        .color(pal().text_dim)
                         .size(12.0),
                 );
             });
@@ -1896,7 +1889,7 @@ impl BuilderApp {
             BuildState::Running => {
                 ui.horizontal(|ui| {
                     ui.add(egui::Spinner::new().size(18.0).color(self.accent()));
-                    ui.label(egui::RichText::new("正在打包...").color(TEXT_DIM).size(13.5));
+                    ui.label(egui::RichText::new("正在打包...").color(pal().text_dim).size(13.5));
                 });
             }
             _ => {
@@ -1918,7 +1911,7 @@ impl BuilderApp {
                         summary.file_count,
                         miedit_core::util::human_size(summary.payload_len),
                     ))
-                    .color(TEXT)
+                    .color(pal().text)
                     .size(12.5),
                 );
                 ui.horizontal(|ui| {
@@ -1948,7 +1941,7 @@ impl BuilderApp {
         }
         ui.add_space(8.0);
         ui.label(
-            egui::RichText::new("建议先「保存项目」（页脚）将配置存为 .mi（MI 脚本），以便后续继续编辑或用 miedit-compiler 命令行编译。")
+            egui::RichText::new("建议先「保存项目」（页脚）将配置存为 .mis（MI 脚本），以便后续继续编辑或用 mis build 命令行编译。")
                 .color(Color32::from_rgb(110, 116, 130))
                 .size(11.5),
         );
@@ -1973,12 +1966,12 @@ impl BuilderApp {
                         idx + 1,
                         STEP_TITLES.len()
                     ))
-                        .color(TEXT)
+                        .color(pal().text)
                         .size(19.0)
                         .strong(),
                 );
                 if !desc.is_empty() {
-                    ui.label(egui::RichText::new(desc).color(TEXT_DIM).size(12.5));
+                    ui.label(egui::RichText::new(desc).color(pal().text_dim).size(12.5));
                 }
                 ui.add_space(8.0);
             });
@@ -2010,7 +2003,7 @@ impl BuilderApp {
             // 左：项目操作
             if ui.add(small_button("打开项目")).clicked() {
                 if let Some(p) = rfd::FileDialog::new()
-                    .add_filter("MI 脚本（.mi）", &["mi", "toml"])
+                    .add_filter("MI 脚本（.mis / .mi）", &["mis", "mi", "toml"])
                     .pick_file()
                 {
                     if let Err(e) = self.open_project(&p, ctx) {
@@ -2073,6 +2066,114 @@ impl BuilderApp {
         }
     }
 
+    /// 切换主题模式（设置菜单；立即生效 + 持久化）。
+    fn set_theme(&mut self, ctx: &egui::Context, mode: ThemeMode) {
+        self.theme = mode;
+        let dark = miedit_core::theme::resolve(mode, self.last_sys_dark);
+        crate::DARK_MODE.store(dark, std::sync::atomic::Ordering::Relaxed);
+        apply_style(ctx, dark);
+        self.last_sys_check = Instant::now();
+        if let Some(p) = &self.settings_file {
+            let st = BuilderSettings { theme: mode };
+            if let Err(e) = st.save_to(p) {
+                self.set_flash(format!("保存主题设置失败: {e}"));
+            }
+        }
+    }
+
+    /// 把 mis 所在目录写入 Path 环境变量（设置菜单；默认当前用户，
+    /// 全体用户需管理员——用户指令 2026-11-19）。
+    fn write_mis_path(&mut self, per_machine: bool) {
+        let dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        let Some(dir) = dir else {
+            self.set_flash("无法定位 mis 所在目录");
+            return;
+        };
+        match miedit_core::winutil::env_append_path(per_machine, &dir.display().to_string()) {
+            Ok(true) => self.set_flash(format!(
+                "已将 {} 写入{} Path，新开的终端/程序即可使用 mis 命令",
+                dir.display(),
+                if per_machine { "系统" } else { "当前用户" }
+            )),
+            Ok(false) => self.set_flash("Path 中已存在该目录，无需重复写入"),
+            Err(e) => self.set_flash(format!("写入 Path 失败: {e:#}")),
+        }
+    }
+
+    /// 全局顶栏菜单（VSCode 式：文件 / 选项 / 设置 / 关于，用户指令 2026-11-19）。
+    fn menu_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let editor_id = egui::Id::new("mi-script-editor");
+        egui::menu::bar(ui, |ui| {
+            ui.menu_button("文件", |ui| {
+                if ui.button("打开项目...").clicked() {
+                    if let Some(p) = rfd::FileDialog::new()
+                        .add_filter("MI 脚本（.mis / .mi）", &["mis", "mi", "toml"])
+                        .pick_file()
+                    {
+                        if let Err(e) = self.open_project(&p, ctx) {
+                            self.set_flash(format!("打开项目失败: {e:#}"));
+                        }
+                    }
+                    ui.close_menu();
+                }
+                if ui.button("保存项目").clicked() {
+                    self.save_project();
+                    ui.close_menu();
+                }
+                if ui.button("另存为脚本...").clicked() {
+                    self.handle_ide_action(IdeAction::SaveAs, ctx, editor_id);
+                    ui.close_menu();
+                }
+                if ui.button("退出").clicked() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            });
+            ui.menu_button("选项", |ui| {
+                for (label, a) in [
+                    ("查找　Ctrl+F", IdeAction::ToggleFind),
+                    ("替换　Ctrl+H", IdeAction::ToggleReplace),
+                    ("转到行　Ctrl+G", IdeAction::GotoLine),
+                    ("命令面板　Ctrl+Shift+P", IdeAction::TogglePalette),
+                    ("自动换行　Alt+Z", IdeAction::ToggleWrap),
+                ] {
+                    if ui.button(label).clicked() {
+                        self.handle_ide_action(a, ctx, editor_id);
+                        ui.close_menu();
+                    }
+                }
+            });
+            ui.menu_button("设置", |ui| {
+                ui.label(egui::RichText::new("主题").size(12.0).color(pal().text_dim));
+                for m in [ThemeMode::System, ThemeMode::Dark, ThemeMode::Light] {
+                    if ui.radio(self.theme == m, m.label()).clicked() {
+                        self.set_theme(ctx, m);
+                    }
+                }
+                ui.separator();
+                if ui.button("将 mis 写入 Path 环境变量（当前用户）").clicked() {
+                    self.write_mis_path(false);
+                    ui.close_menu();
+                }
+                if ui.button("将 mis 写入 Path 环境变量（全体用户，需管理员）").clicked() {
+                    self.write_mis_path(true);
+                    ui.close_menu();
+                }
+            });
+            ui.menu_button("关于", |ui| {
+                if ui.button("关于 MIEdit...").clicked() {
+                    self.show_about = true;
+                    ui.close_menu();
+                }
+                if ui.button("MI 脚本语法说明").clicked() {
+                    self.handle_ide_action(IdeAction::HelpSyntax, ctx, editor_id);
+                    ui.close_menu();
+                }
+            });
+        });
+    }
+
     fn advance(&mut self, ctx: &egui::Context) {
         self.goto_step(ctx, self.step_index() + 1);
     }
@@ -2109,7 +2210,7 @@ impl BuilderApp {
         ui.add_space(10.0);
         ui.label(
             egui::RichText::new("构建向导")
-                .color(TEXT_DIM)
+                .color(pal().text_dim)
                 .size(11.5)
                 .strong(),
         );
@@ -2118,7 +2219,7 @@ impl BuilderApp {
             let current = i == self.step_index();
             let done = i < self.step_index();
             let (bg, stroke) = if current {
-                (RAIL_CURRENT_BG, egui::Stroke::new(1.0_f32, accent_color(&self.cfg)))
+                (pal().rail_current, egui::Stroke::new(1.0_f32, accent_color(&self.cfg)))
             } else {
                 (Color32::TRANSPARENT, egui::Stroke::NONE)
             };
@@ -2151,7 +2252,7 @@ impl BuilderApp {
                             FontId::proportional(11.0),
                             Color32::WHITE,
                         );
-                        let name_color = if current { TEXT } else { TEXT_DIM };
+                        let name_color = if current { pal().text } else { pal().text_dim };
                         ui.label(egui::RichText::new(STEP_SHORT[i]).color(name_color).size(13.0));
                     });
                 })
@@ -2167,7 +2268,7 @@ impl BuilderApp {
         ui.separator();
         ui.add_space(6.0);
         ui.label(
-            egui::RichText::new("MI 脚本（.mi）与向导完全互通：
+            egui::RichText::new("MI 脚本（.mis）与向导完全互通：
 向导页改动会同步进脚本，
 脚本页「应用修改」回填向导。")
                 .color(Color32::from_rgb(110, 116, 130))
@@ -2210,9 +2311,27 @@ impl Step {
 
 impl eframe::App for BuilderApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 跟随系统模式：每 2 秒复查系统主题偏好（路线图步骤 44）
+        if self.theme == ThemeMode::System && self.last_sys_check.elapsed().as_secs_f32() > 2.0 {
+            self.last_sys_check = Instant::now();
+            let dark = miedit_core::theme::system_prefers_dark();
+            if dark != self.last_sys_dark {
+                self.last_sys_dark = dark;
+                let applied = miedit_core::theme::resolve(self.theme, dark);
+                crate::DARK_MODE.store(applied, std::sync::atomic::Ordering::Relaxed);
+                apply_style(ctx, applied);
+            }
+        }
+
+        // 预览浮层优先：Esc 关闭预览，其余按键不透传给向导（路线图步骤 41）
+        if self.preview.is_some() {
+            let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+            if esc {
+                self.preview = None;
+            }
+        } else if self.step != Step::Script {
         // NSIS/HM NIS Edit 操作方式：Enter 触发下一步/开始构建，Esc 取消
         // （脚本编辑页不拦截，多行编辑器需要 Enter/Escape）
-        if self.step != Step::Script {
             let (enter, esc) = ctx.input(|i| {
                 (
                     i.key_pressed(egui::Key::Enter),
@@ -2249,16 +2368,23 @@ impl eframe::App for BuilderApp {
             }
         }
 
+        // 顶栏菜单（VSCode 式：文件 / 选项 / 设置 / 关于，用户指令 2026-11-19）
+        egui::TopBottomPanel::top("wizard-menubar")
+            .frame(egui::Frame::none().fill(pal().bg_top))
+            .show(ctx, |ui| {
+                self.menu_bar(ui, ctx);
+            });
+
         // 顶栏：标题 + 徽标
         egui::TopBottomPanel::top("wizard-header")
-            .frame(egui::Frame::none().fill(BG_TOP))
+            .frame(egui::Frame::none().fill(pal().bg_top))
             .show(ctx, |ui| {
                 self.header(ui, ctx);
             });
 
         // 底栏：导航
         egui::TopBottomPanel::bottom("wizard-footer")
-            .frame(egui::Frame::none().fill(BG_TOP))
+            .frame(egui::Frame::none().fill(pal().bg_top))
             .show(ctx, |ui| {
                 self.footer(ui, ctx);
             });
@@ -2267,7 +2393,7 @@ impl eframe::App for BuilderApp {
         egui::SidePanel::left("wizard-rail")
             .resizable(false)
             .exact_width(188.0)
-            .frame(egui::Frame::none().fill(BG_TOP))
+            .frame(egui::Frame::none().fill(pal().bg_top))
             .show(ctx, |ui| {
                 self.step_rail(ui);
             });
@@ -2283,7 +2409,7 @@ impl eframe::App for BuilderApp {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::none()
-                    .fill(BG_BOTTOM)
+                    .fill(pal().bg_bottom)
                     .inner_margin(egui::Margin {
                         left: 18.0,
                         right: 18.0,
@@ -2306,5 +2432,111 @@ impl eframe::App for BuilderApp {
                         ui.add_space(20.0);
                     });
             });
+
+        // 全流程预览浮层（路线图步骤 41）：交互式安装/卸载向导，
+        // 随脚本实时变化（内嵌配置快照），Esc / 关闭 / 完成 退出
+        if self.preview.is_some() {
+            let mut open = true;
+            let mut close = false;
+            let accent = self.accent();
+            let files_stat = self.files_stat;
+            egui::Window::new(
+                egui::RichText::new("安装界面实时预览（Esc 关闭 · 按钮可交互）")
+                    .strong()
+                    .color(pal().text),
+            )
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(egui::Frame::none().fill(pal().card).rounding(10.0).stroke(egui::Stroke::new(1.0_f32, pal().card_stroke)).inner_margin(egui::Margin::same(10.0)))
+            .show(ctx, |ui| {
+                if let Some(st) = self.preview.as_mut() {
+                    close = preview::draw_full(ui, st, self.bg_tex.as_ref(), files_stat, accent);
+                }
+            });
+            if !open || close {
+                self.preview = None;
+            }
+        }
+
+        // 关于对话框（VSCode 式「关于」菜单项）
+        if self.show_about {
+            let mut open = true;
+            egui::Window::new("关于 MIEdit")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, -60.0])
+                .frame(egui::Frame::none().fill(pal().card).rounding(10.0).stroke(egui::Stroke::new(1.0_f32, pal().card_stroke)).inner_margin(egui::Margin::same(14.0)))
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        let accent = self.accent();
+                        let (r, _) = ui.allocate_exact_size(Vec2::splat(44.0), Sense::hover());
+                        ui.painter().rect_filled(r, 10.0, accent.linear_multiply(0.2));
+                        ui.painter().rect_stroke(
+                            r,
+                            10.0,
+                            egui::Stroke::new(1.0_f32, accent.linear_multiply(0.7)),
+                        );
+                        ui.painter().text(
+                            r.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "M",
+                            FontId::proportional(22.0),
+                            accent,
+                        );
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new("MIEdit 安装包构建向导")
+                                    .size(16.0)
+                                    .strong()
+                                    .color(pal().text),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "版本 {} · 功能对齐 NSIS / HM NIS Edit",
+                                    miedit_core::VERSION
+                                ))
+                                .size(12.0)
+                                .color(pal().text_dim),
+                            );
+                            ui.label(
+                                egui::RichText::new("自研 MI 脚本（.mis）· VSCode 式编辑器 · 全流程实时预览")
+                                    .size(12.0)
+                                    .color(pal().text_dim),
+                            );
+                        });
+                    });
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new("命令行: mis build <script.mis>（未写输出目录时默认 <当前目录>/output/）")
+                            .size(12.0)
+                            .color(pal().text_dim),
+                    );
+                    ui.label(
+                        egui::RichText::new("提示: 「设置」菜单可把 mis 所在目录写入 Path 环境变量（默认当前用户）")
+                            .size(12.0)
+                            .color(pal().text_dim),
+                    );
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("MI 脚本语法说明").clicked() {
+                            self.show_about = false;
+                            self.handle_ide_action(
+                                IdeAction::HelpSyntax,
+                                ctx,
+                                egui::Id::new("mi-script-editor"),
+                            );
+                        }
+                        if ui.button("关闭").clicked() {
+                            self.show_about = false;
+                        }
+                    });
+                });
+            if !open {
+                self.show_about = false;
+            }
+        }
     }
 }

@@ -1,6 +1,6 @@
 //! VSCode 式脚本 IDE 组件库（MI 脚本页专用，路线图步骤 32）。
 //!
-//! 只需适配自家 `.mi` 脚本（TOML 语法），在此基础上对齐 VSCode 的编辑体验：
+//! 只需适配自家 `.mis` 脚本（TOML 语法），在此基础上对齐 VSCode 的编辑体验：
 //! - 查找/替换小部件（Ctrl+F / Ctrl+H）：命中计数、逐个跳转、大小写开关、全部替换；
 //! - 命令面板（Ctrl+Shift+P）与转到行（Ctrl+G）；
 //! - 当前行 / 查找命中 / 错误行三层高亮（基于 galley 几何，逐字符光标映射）；
@@ -18,47 +18,103 @@ use eframe::egui::{self, Color32, Pos2, Rect, Sense, Vec2};
 // VSCode Dark+ 主题色
 // ---------------------------------------------------------------------------
 
-/// 编辑器背景（VSCode Dark+ `editor.background` #1E1E1E）
-pub const VSC_BG: Color32 = Color32::from_rgb(30, 30, 30);
-/// 默认文本色（#D4D4D4）
-pub const VSC_TEXT: Color32 = Color32::from_rgb(212, 212, 212);
-/// 行号 gutter 色（#858585）
-pub const VSC_LINENO: Color32 = Color32::from_rgb(133, 133, 133);
-/// 当前行行号色（#C6C6C6）
-pub const VSC_LINENO_ACTIVE: Color32 = Color32::from_rgb(198, 198, 198);
-/// 当前行高亮（`editor.lineHighlightBackground` #2A2D2E，半透明覆盖）。
+use crate::is_dark;
+
+/// 编辑器背景（Dark+ `#1E1E1E` / Light+ `#F6F6F6`）
+#[allow(non_snake_case)] // 保持 VSCode 主题常量命名（与文档/VSCode 对齐）
+pub fn VSC_BG() -> Color32 {
+    if is_dark() { Color32::from_rgb(30, 30, 30) } else { Color32::from_rgb(246, 246, 246) }
+}
+/// 默认文本色（#D4D4D4 / #3B3B3B）
+#[allow(non_snake_case)] // 保持 VSCode 主题常量命名（与文档/VSCode 对齐）
+pub fn VSC_TEXT() -> Color32 {
+    if is_dark() { Color32::from_rgb(212, 212, 212) } else { Color32::from_rgb(59, 59, 59) }
+}
+/// 行号 gutter 色（#858585 / #6E7681）
+#[allow(non_snake_case)] // 保持 VSCode 主题常量命名（与文档/VSCode 对齐）
+pub fn VSC_LINENO() -> Color32 {
+    if is_dark() { Color32::from_rgb(133, 133, 133) } else { Color32::from_rgb(110, 118, 129) }
+}
+/// 当前行行号色（#C6C6C6 / 深蓝）
+#[allow(non_snake_case)] // 保持 VSCode 主题常量命名（与文档/VSCode 对齐）
+pub fn VSC_LINENO_ACTIVE() -> Color32 {
+    if is_dark() { Color32::from_rgb(198, 198, 198) } else { Color32::from_rgb(35, 38, 110) }
+}
+/// 当前行高亮（Dark #2A2D2E / Light #E8EAF2，半透明覆盖）。
 /// 注：`from_rgba_unmultiplied` 非 const fn，故以函数提供。
 pub fn vsc_line_hl() -> Color32 {
-    Color32::from_rgba_unmultiplied(42, 45, 46, 160)
+    if is_dark() {
+        Color32::from_rgba_unmultiplied(42, 45, 46, 160)
+    } else {
+        Color32::from_rgba_unmultiplied(232, 234, 242, 190)
+    }
 }
-/// 注释（#6A9955）
-pub const VSC_COMMENT: Color32 = Color32::from_rgb(106, 153, 130);
-/// 节头 `[section]` / `[[array]]`（#569CD6）
-pub const VSC_SECTION: Color32 = Color32::from_rgb(86, 156, 214);
-/// 键名（#9CDCFE）
-pub const VSC_KEY: Color32 = Color32::from_rgb(156, 220, 254);
-/// 字符串（#CE9178）
-pub const VSC_STRING: Color32 = Color32::from_rgb(206, 145, 120);
-/// 数值（Dark+ 数值为浅绿 #B5CEA8）
-pub const VSC_NUMBER: Color32 = Color32::from_rgb(181, 206, 168);
-/// 布尔（#569CD6）
-pub const VSC_BOOL: Color32 = Color32::from_rgb(86, 156, 214);
-/// 错误下划线（`editorError.foreground` #F14C4C）
-pub const VSC_ERROR: Color32 = Color32::from_rgb(241, 76, 76);
-/// 查找命中底色（`editor.findMatchHighlightBackground` #515C6A）。
+/// 注释（#6A9955 / Light+ #008000）
+#[allow(non_snake_case)] // 保持 VSCode 主题常量命名（与文档/VSCode 对齐）
+pub fn VSC_COMMENT() -> Color32 {
+    if is_dark() { Color32::from_rgb(106, 153, 130) } else { Color32::from_rgb(0, 128, 0) }
+}
+/// 节头 `[section]` / `[[array]]`（#569CD6 / Light+ #0000FF）
+#[allow(non_snake_case)] // 保持 VSCode 主题常量命名（与文档/VSCode 对齐）
+pub fn VSC_SECTION() -> Color32 {
+    if is_dark() { Color32::from_rgb(86, 156, 214) } else { Color32::from_rgb(0, 0, 255) }
+}
+/// 键名（#9CDCFE / Light+ #0451A5）
+#[allow(non_snake_case)] // 保持 VSCode 主题常量命名（与文档/VSCode 对齐）
+pub fn VSC_KEY() -> Color32 {
+    if is_dark() { Color32::from_rgb(156, 220, 254) } else { Color32::from_rgb(4, 81, 165) }
+}
+/// 字符串（#CE9178 / Light+ #A31515）
+#[allow(non_snake_case)] // 保持 VSCode 主题常量命名（与文档/VSCode 对齐）
+pub fn VSC_STRING() -> Color32 {
+    if is_dark() { Color32::from_rgb(206, 145, 120) } else { Color32::from_rgb(163, 21, 21) }
+}
+/// 数值（浅绿 #B5CEA8 / Light+ #098658）
+#[allow(non_snake_case)] // 保持 VSCode 主题常量命名（与文档/VSCode 对齐）
+pub fn VSC_NUMBER() -> Color32 {
+    if is_dark() { Color32::from_rgb(181, 206, 168) } else { Color32::from_rgb(9, 134, 88) }
+}
+/// 布尔（#569CD6 / Light+ #0000FF）
+#[allow(non_snake_case)] // 保持 VSCode 主题常量命名（与文档/VSCode 对齐）
+pub fn VSC_BOOL() -> Color32 {
+    VSC_SECTION()
+}
+/// 错误下划线（#F14C4C / Light+ #E00000）
+#[allow(non_snake_case)] // 保持 VSCode 主题常量命名（与文档/VSCode 对齐）
+pub fn VSC_ERROR() -> Color32 {
+    if is_dark() { Color32::from_rgb(241, 76, 76) } else { Color32::from_rgb(224, 0, 0) }
+}
+/// 查找命中底色（Dark #515C6A / Light 琥珀）
 pub fn vsc_match_bg() -> Color32 {
-    Color32::from_rgba_unmultiplied(81, 92, 106, 140)
+    if is_dark() {
+        Color32::from_rgba_unmultiplied(81, 92, 106, 140)
+    } else {
+        Color32::from_rgba_unmultiplied(234, 192, 63, 130)
+    }
 }
-/// 当前查找命中底色（`editor.findMatchBackground` #9E6A03）。
+/// 当前查找命中底色（Dark #9E6A03 / Light 橙）
 pub fn vsc_match_cur_bg() -> Color32 {
-    Color32::from_rgba_unmultiplied(158, 106, 3, 150)
+    if is_dark() {
+        Color32::from_rgba_unmultiplied(158, 106, 3, 150)
+    } else {
+        Color32::from_rgba_unmultiplied(255, 164, 0, 170)
+    }
 }
-/// 查找小部件面板底色（VSCode `#252526`）
-pub const VSC_PANEL: Color32 = Color32::from_rgb(37, 37, 38);
+/// 查找小部件面板底色（#252526 / #F3F3F3）
+#[allow(non_snake_case)] // 保持 VSCode 主题常量命名（与文档/VSCode 对齐）
+pub fn VSC_PANEL() -> Color32 {
+    if is_dark() { Color32::from_rgb(37, 37, 38) } else { Color32::from_rgb(243, 243, 243) }
+}
 /// minimap 空白底色
-pub const VSC_MINIMAP_BG: Color32 = Color32::from_rgb(27, 27, 29);
+#[allow(non_snake_case)] // 保持 VSCode 主题常量命名（与文档/VSCode 对齐）
+pub fn VSC_MINIMAP_BG() -> Color32 {
+    if is_dark() { Color32::from_rgb(27, 27, 29) } else { Color32::from_rgb(248, 248, 248) }
+}
 /// minimap 普通行条色
-pub const VSC_MINIMAP_FG: Color32 = Color32::from_rgb(110, 118, 129);
+#[allow(non_snake_case)] // 保持 VSCode 主题常量命名（与文档/VSCode 对齐）
+pub fn VSC_MINIMAP_FG() -> Color32 {
+    if is_dark() { Color32::from_rgb(110, 118, 129) } else { Color32::from_rgb(167, 175, 187) }
+}
 
 // ---------------------------------------------------------------------------
 // 行号映射与纯文本工具（全部可单测）
@@ -158,23 +214,6 @@ pub fn detect_indent(text: &str) -> (&'static str, usize) {
     } else {
         ("空格: 2", 2)
     }
-}
-
-/// 从 `toml::de::Error` 的 Display 文本中解析 (行, 列)。
-/// toml 0.8 的错误形如 `TOML parse error at line 5, col 3\n...`。
-pub fn parse_toml_error_pos(msg: &str) -> Option<(usize, usize)> {
-    let marker = "at line ";
-    let i = msg.find(marker)? + marker.len();
-    let rest = &msg[i..];
-    let d_end = rest.find(|c: char| !c.is_ascii_digit())?;
-    let line: usize = rest[..d_end].parse().ok()?;
-    let rest = &rest[d_end..];
-    let cmarker = "col ";
-    let j = rest.find(cmarker)? + cmarker.len();
-    let rest = &rest[j..];
-    let c_end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
-    let col: usize = rest[..c_end].parse().ok()?;
-    Some((line, col))
 }
 
 /// 查找全部命中：大小写不敏感（默认）子串，返回字符索引区间（半开），
@@ -387,7 +426,7 @@ pub fn palette_filter(labels: &[&str], query: &str) -> Vec<usize> {
 }
 
 // ---------------------------------------------------------------------------
-// 语法高亮（TOML 语法的 .mi 脚本，VSCode Dark+ 配色）
+// 语法高亮（TOML 语法的 .mis 脚本，Dark+ / Light+ 配色）
 // ---------------------------------------------------------------------------
 
 /// 构建 MI 脚本（TOML 语法）的着色布局：逐行行号 + 注释/节头/键/字符串/
@@ -407,24 +446,24 @@ pub fn mi_script_job_hl(text: &str, caret_line: Option<usize>) -> egui::text::La
     for (i, line) in lines.iter().enumerate() {
         // 当前行行号亮色（gutter 行号高亮，对齐 VSCode）
         let lineno_color =
-            if caret_line == Some(i + 1) { VSC_LINENO_ACTIVE } else { VSC_LINENO };
+            if caret_line == Some(i + 1) { VSC_LINENO_ACTIVE() } else { VSC_LINENO() };
         job.append(&format!("{:>w$}  ", i + 1), 0.0, fmt(lineno_color));
         let trimmed = line.trim_start();
         if trimmed.starts_with('#') {
-            job.append(line, 0.0, fmt(VSC_COMMENT));
+            job.append(line, 0.0, fmt(VSC_COMMENT()));
         } else if trimmed.starts_with('[') {
-            job.append(line, 0.0, fmt(VSC_SECTION));
+            job.append(line, 0.0, fmt(VSC_SECTION()));
         } else {
             match line.find('=') {
                 Some(eq) if !line[..eq].trim().is_empty() => {
-                    job.append(&line[..eq], 0.0, fmt(VSC_KEY));
-                    job.append("=", 0.0, fmt(VSC_TEXT));
+                    job.append(&line[..eq], 0.0, fmt(VSC_KEY()));
+                    job.append("=", 0.0, fmt(VSC_TEXT()));
                     push_mi_value(&line[eq + 1..], &mut job, &font);
                 }
-                _ => job.append(line, 0.0, fmt(VSC_TEXT)),
+                _ => job.append(line, 0.0, fmt(VSC_TEXT())),
             }
         }
-        job.append("\n", 0.0, fmt(VSC_TEXT));
+        job.append("\n", 0.0, fmt(VSC_TEXT()));
     }
     job
 }
@@ -445,7 +484,7 @@ fn push_mi_value(rest: &str, job: &mut egui::text::LayoutJob, font: &egui::FontI
         match in_str {
             Some(q) => {
                 if c == q {
-                    job.append(&rest[start..end], 0.0, fmt(VSC_STRING));
+                    job.append(&rest[start..end], 0.0, fmt(VSC_STRING()));
                     start = end;
                     in_str = None;
                 }
@@ -474,11 +513,11 @@ fn push_mi_token(
     }
     let t = tok.trim();
     if t.parse::<f64>().is_ok() {
-        job.append(tok, 0.0, fmt(VSC_NUMBER));
+        job.append(tok, 0.0, fmt(VSC_NUMBER()));
     } else if t == "true" || t == "false" {
-        job.append(tok, 0.0, fmt(VSC_BOOL));
+        job.append(tok, 0.0, fmt(VSC_BOOL()));
     } else {
-        job.append(tok, 0.0, fmt(VSC_TEXT));
+        job.append(tok, 0.0, fmt(VSC_TEXT()));
     }
 }
 
@@ -589,7 +628,7 @@ pub fn paint_highlight(
                         Pos2::new(clip.right(), gp.y + r.bottom()),
                     ),
                     1.0,
-                    VSC_ERROR.linear_multiply(0.8),
+                    VSC_ERROR().linear_multiply(0.8),
                 );
             }
         }
@@ -622,6 +661,10 @@ pub enum IdeAction {
     ReplaceAll,
     JumpLine(usize),
     HelpSyntax,
+    /// 打开安装向导全流程预览（路线图步骤 41）
+    PreviewInstall,
+    /// 打开封装卸载向导全流程预览
+    PreviewUninstall,
 }
 
 /// 查找/替换状态。
@@ -785,7 +828,7 @@ pub fn show_find(
         .fixed_pos(pos)
         .show(ctx, |ui| {
             egui::Frame::none()
-                .fill(VSC_PANEL)
+                .fill(VSC_PANEL())
                 .rounding(6.0)
                 .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(69, 69, 74)))
                 .inner_margin(egui::Margin::same(8.0))
@@ -896,7 +939,7 @@ pub fn show_palette(
         .default_width(480.0)
         .show(ctx, |ui| {
             egui::Frame::none()
-                .fill(VSC_PANEL)
+                .fill(VSC_PANEL())
                 .rounding(8.0)
                 .inner_margin(egui::Margin::same(6.0))
                 .show(ui, |ui| {
@@ -995,7 +1038,7 @@ pub fn show_goto(ctx: &egui::Context, st: &mut GotoState) -> Option<usize> {
         .default_width(240.0)
         .show(ctx, |ui| {
             egui::Frame::none()
-                .fill(VSC_PANEL)
+                .fill(VSC_PANEL())
                 .rounding(8.0)
                 .inner_margin(egui::Margin::same(8.0))
                 .show(ui, |ui| {
@@ -1060,7 +1103,7 @@ pub fn minimap(
     let avail_h = height.min(ui.available_height().max(120.0));
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, avail_h.max(60.0)), Sense::click());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 4.0, VSC_MINIMAP_BG);
+    painter.rect_filled(rect, 4.0, VSC_MINIMAP_BG());
     if lines.is_empty() {
         return None;
     }
@@ -1082,10 +1125,10 @@ pub fn minimap(
         let w = (((line.trim().chars().count() as f32) * scale) + 2.0)
             .clamp(2.0, (rect.right() - 4.0 - x0).max(3.0));
         let color = match line_kind(line) {
-            0 => VSC_COMMENT.linear_multiply(0.75),
-            1 => VSC_SECTION.linear_multiply(0.85),
-            2 => VSC_STRING.linear_multiply(0.8),
-            _ => VSC_MINIMAP_FG,
+            0 => VSC_COMMENT().linear_multiply(0.75),
+            1 => VSC_SECTION().linear_multiply(0.85),
+            2 => VSC_STRING().linear_multiply(0.8),
+            _ => VSC_MINIMAP_FG(),
         };
         painter.rect_filled(
             Rect::from_min_max(Pos2::new(x0, y), Pos2::new(x0 + w, y + (bar_h * 0.65).max(1.0))),
@@ -1224,13 +1267,6 @@ mod tests {
         assert_eq!(detect_indent("a = 1\n    b = 2\n"), ("空格: 4", 4));
         assert_eq!(detect_indent("a = 1\n\tb = 2\n"), ("Tab 缩进", 4));
         assert_eq!(detect_indent("a = 1\n"), ("空格: 4", 4));
-    }
-
-    #[test]
-    fn toml_error_pos_parsed() {
-        let msg = "TOML parse error at line 5, col 3\n  |\n5 | x = \n  |   ^\ninvalid string\n";
-        assert_eq!(parse_toml_error_pos(msg), Some((5, 3)));
-        assert_eq!(parse_toml_error_pos("no positional info"), None);
     }
 
     #[test]
@@ -1403,10 +1439,10 @@ code = [
         let job = mi_script_job_hl("# hello\n", None);
         let parts = colored(&job);
         // 第一段 = 行号 "  1  "（gutter 色）
-        assert_eq!(parts[0].0, VSC_LINENO);
+        assert_eq!(parts[0].0, VSC_LINENO());
         assert_eq!(parts[0].1, "  1  ");
         // 第二段 = 注释行（注释色）
-        assert_eq!(parts[1].0, VSC_COMMENT);
+        assert_eq!(parts[1].0, VSC_COMMENT());
         assert_eq!(parts[1].1, "# hello");
     }
 
@@ -1422,13 +1458,13 @@ code = [
                 .map(|(c, _)| *c)
                 .unwrap_or_else(|| panic!("段未找到: {needle}"))
         };
-        assert_eq!(find("[app]"), VSC_SECTION);
-        assert_eq!(find("name "), VSC_KEY);
-        assert_eq!(find("\"Demo App\""), VSC_STRING);
-        assert_eq!(find(" 1"), VSC_NUMBER);
-        assert_eq!(find(" true"), VSC_BOOL);
+        assert_eq!(find("[app]"), VSC_SECTION());
+        assert_eq!(find("name "), VSC_KEY());
+        assert_eq!(find("\"Demo App\""), VSC_STRING());
+        assert_eq!(find(" 1"), VSC_NUMBER());
+        assert_eq!(find(" true"), VSC_BOOL());
         // 行号与正文段数一致：5 行（含末尾换行）→ 5 个行号段
-        let lineno_count = parts.iter().filter(|(c, _)| *c == VSC_LINENO).count();
+        let lineno_count = parts.iter().filter(|(c, _)| *c == VSC_LINENO()).count();
         assert_eq!(lineno_count, 5);
     }
 
@@ -1439,12 +1475,12 @@ code = [
         let job = mi_script_job_hl(src, None);
         let parts = colored(&job);
         assert!(
-            parts.iter().any(|(c, t)| *c == VSC_KEY && t.contains("title")),
+            parts.iter().any(|(c, t)| *c == VSC_KEY() && t.contains("title")),
             "键名未识别"
         );
-        assert!(parts.iter().any(|(c, _)| *c == VSC_STRING), "字符串未识别");
+        assert!(parts.iter().any(|(c, _)| *c == VSC_STRING()), "字符串未识别");
         assert!(
-            !parts.iter().any(|(c, _)| *c == VSC_COMMENT),
+            !parts.iter().any(|(c, _)| *c == VSC_COMMENT()),
             "字符串内 # 误判为注释"
         );
     }
@@ -1454,7 +1490,7 @@ code = [
         let job = mi_script_job_hl("\nplain line\n", None);
         let parts = colored(&job);
         assert!(
-            parts.iter().any(|(c, t)| *c == VSC_TEXT && t == "plain line"),
+            parts.iter().any(|(c, t)| *c == VSC_TEXT() && t == "plain line"),
             "无等号行应走默认色"
         );
     }
@@ -1467,7 +1503,7 @@ code = [
         let n = job
             .sections
             .iter()
-            .filter(|sec| sec.format.color == VSC_LINENO)
+            .filter(|sec| sec.format.color == VSC_LINENO())
             .count();
         assert_eq!(n, 4);
     }
@@ -1490,12 +1526,12 @@ code = [
         let parts = colored(&job);
         let linenos: Vec<Color32> = parts
             .iter()
-            .filter(|(c, _)| *c == VSC_LINENO || *c == VSC_LINENO_ACTIVE)
+            .filter(|(c, _)| *c == VSC_LINENO() || *c == VSC_LINENO_ACTIVE())
             .map(|(c, _)| *c)
             .collect();
         assert_eq!(linenos.len(), 3); // 两行 + 末尾空行
-        assert_eq!(linenos[0], VSC_LINENO);
-        assert_eq!(linenos[1], VSC_LINENO_ACTIVE);
-        assert_eq!(linenos[2], VSC_LINENO);
+        assert_eq!(linenos[0], VSC_LINENO());
+        assert_eq!(linenos[1], VSC_LINENO_ACTIVE());
+        assert_eq!(linenos[2], VSC_LINENO());
     }
 }

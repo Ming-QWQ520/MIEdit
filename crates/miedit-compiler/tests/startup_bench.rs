@@ -10,7 +10,7 @@
 use miedit_core::config::{Config, FileSpec};
 use miedit_core::trailer;
 use std::fs::File;
-use std::io::{Seek, Write};
+use std::io::Write;
 use std::time::Instant;
 
 fn build_test_package(payload_mb: usize, dir: &std::path::Path) -> std::path::PathBuf {

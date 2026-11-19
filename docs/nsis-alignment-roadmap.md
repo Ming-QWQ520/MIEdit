@@ -49,6 +49,10 @@
 | 38 | 安装期磁盘空间预检（覆盖抵扣 + 余量） | NSIS 磁盘满中止语义（Error writing to file） | **已完成**（0.1.0，#19） |
 | 39 | MI 指令注册表全类型 + ExecShell + RMDir | NSIS `WriteRegBin`/`WriteRegExpandStr`/`WriteRegMultiSz`/`SetRegView`/`ExecShell`/`RMDir` | **已完成**（0.1.0，#20） |
 | 40 | MI 条件指令：if_file_exists + abort | NSIS `IfFileExists`/`Abort`（error-flag/中止语义） | **已完成**（0.1.0，#20） |
+| 41 | 全流程实时预览（安装 6 页 + 卸载 3 页交互式） | NSIS/HM NIS Edit 向导预览（许可解锁安装语义） | **已完成**（0.1.0，#21） |
+| 42 | `mis` 命令行（`mis build`）+ 默认输出目录 + PATH 环境变量写入 | NSIS makensis CLI / 用户指令（命令头 mis） | **已完成**（0.1.0，#21） |
+| 43 | 语法检测和纠错（诊断 + 一键快速修复） | VSCode Problems / Quick Fix | **已完成**（0.1.0，#21） |
+| 44 | 深色/浅色主题（默认跟随系统）+ 顶部菜单（文件/选项/设置/关于） | VSCode 主题与菜单栏 | **已完成**（0.1.0，#21） |
 
 ## 迭代步骤定义
 
@@ -521,6 +525,51 @@
    不再随功能对齐批次递增；历史批次 v0.2.0–v0.13.0 保留原版本号记录）。
 
 ## 变更日志
+
+- 0.1.0（步骤 41–44，#21）：**全流程实时预览 + `mis` 命令行 + 语法检测纠错 +
+  深浅色主题**（用户指令：实时预览页面从开始至解锁安装、扩展名 `.mi`→`.mis`、
+  IDE 顶部菜单 文件/选项/设置/关于、命令行 `mis build`、设置页写入环境变量
+  默认当前用户、默认输出目录 `<cwd>/output/`、预览安装/卸载按键、语法检测和
+  纠错、深色/浅色默认跟随系统）：
+  ① **全流程实时预览**（步骤 41）：`preview::PreviewState` 交互式会话
+  （内嵌配置快照——脚本未应用也能即时预览），安装向导 欢迎 → 许可
+  （勾选接受才解锁下一步，NSIS license force 语义）→ 目录（可编辑 +
+  空间展示）→ 组件（类型单选/勾选锁定/描述框联动，手动改动即跳 Custom）→
+  正在安装（进度动画 + 解压/快捷方式/注册表/环境变量日志逐条滚动）→
+  完成（运行勾选）；卸载向导 确认（删除用户数据勾选）→ 正在卸载（逆序
+  删除日志）→ 完成（统计）；等比缩放渲染 + 左侧步骤导航（`show_step_rail`
+  对齐）；脚本页新增「▶ 预览安装 / ▶ 预览卸载」按键与命令面板入口；
+  Esc / 关闭 / 完成退出，预览期间 Enter/Esc 不透传向导（浮层优先）。
+  ② **`mis` 命令行**（步骤 42）：编译器二进制改名 `miedit-compiler`→`mis`
+  （命令头 `mis build <script.mis> [-o out.exe]`）；输出三层规则：
+  `-o` 优先 → 脚本 `[build] output_dir`（新增可选段，serde
+  skip_serializing_if 向后兼容、旧脚本/旧包不受影响）→ 默认
+  `<命令行所在目录>/output/<slug>-<version>-setup.exe`（目录自动创建）；
+  `.mi`/`.mis` 扩展名均接受。
+  ③ **PATH 环境变量写入**（步骤 42）：`winutil::env_append_path`
+  （读 Path → envspec 去重合并 → REG_EXPAND_SZ 写回 → 广播
+  WM_SETTINGCHANGE，幂等）；GUI「设置」菜单入口（当前用户 = HKCU 默认 /
+  全体用户 = HKLM 需管理员）；`theme::BuilderSettings` 应用级设置持久化
+  （`%APPDATA%\MIEdit\builder.json` / XDG config）。
+  ④ **语法检测和纠错**（步骤 43）：新模块 `miedit_core::midiag` 三层——
+  文本层（未知 op / Tab 缩进 / 引号不闭合 / TOML 错误定位）永远运行；
+  结构层 `toml::Value` 宽松解析 + 逐条 `serde_json` 转换（未知 op /
+  缺必填字段从 serde 错误提取，`then/else` 剥离后递归保证行号就近映射），
+  转换成功走 `micmd::validate_one`（新增无前缀单条校验）；纠错层
+  `QuickFix`（整行替换）：未知 op 就近建议（Levenshtein ≤ 2）/ 补全
+  必填字段 / dword 归零 / 补全 `HKCU\` 前缀 / Tab 转空格，
+  `apply_quick_fix` 纯函数；问题面板升级为 诊断列表 + 一键修复按钮，
+  状态栏 / 错误行高亮共用。`micmd::KNOWN_OPS` 清单守卫单测防漂移。
+  ⑤ **深浅色主题 + 顶部菜单**（步骤 44）：`theme` 模块（`ThemeMode`
+  System/Dark/Light + `resolve` 纯函数 + 系统偏好探测：Windows 注册表
+  `AppsUseLightTheme` / Linux gsettings，默认深色兜底）；构建器 Palette
+  双套色 + 全局 `DARK_MODE` 原子开关（脚本编辑器同步 Dark+/Light+ 配色，
+  预览页恒定模拟安装器深色视觉）；默认跟随系统，每 2 秒轮询切换；
+  全局顶栏菜单「文件 / 选项 / 设置 / 关于」（原脚本页内嵌菜单移除，
+  消除双菜单冲突），关于对话框含版本/命令行/PATH 提示。
+  ⑥ **扩展名 `.mi` → `.mis`**（用户指令）：对话框过滤器/默认文件名/
+  标签页/帮助文案全部更新，旧 `.mi` 打开兼容（过滤器与解析均接受）；
+  `examples/demo-app.mi` → `demo-app.mis`（附 `[build]` 注释示例）。
 
 - 0.1.0（步骤 39–40，#20）：**MI 指令注册表全类型 + ExecShell/RMDir +
   条件指令（IfFileExists/Abort）**（对齐 NSIS `WriteRegBin`/

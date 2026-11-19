@@ -923,6 +923,37 @@ pub fn env_delete(_per_machine: bool, _name: &str) -> Result<()> {
     Ok(())
 }
 
+/// 把目录追加到 Path 环境变量（构建器「将 mis 写入环境变量」用，路线图
+/// 步骤 42）：读取现值 → [`crate::envspec::merge_path_list`] 去重合并 →
+/// 写回（`Path` 写 REG_EXPAND_SZ，保留 `%VAR%` 引用）→ 广播
+/// WM_SETTINGCHANGE。幂等：目录已存在（ASCII 不区分大小写）时不改写。
+///
+/// 返回 `Ok(true)` = 已写入；`Ok(false)` = 已存在无需改写。
+/// `per_machine = true` 需要管理员权限（HKLM），失败即返回错误。
+#[cfg(windows)]
+pub fn env_append_path(per_machine: bool, dir: &str) -> Result<bool> {
+    let seg = dir.trim().trim_matches('"');
+    if seg.is_empty() {
+        return Ok(false);
+    }
+    let current = env_read(per_machine, "Path");
+    let items = crate::envspec::split_path_list(current.as_deref().unwrap_or(""));
+    let merged = crate::envspec::merge_path_list(&items, seg, false);
+    if merged.len() == items.len() {
+        // merge_path_list 去重后长度不变 = 已存在
+        return Ok(false);
+    }
+    env_write(per_machine, "Path", &crate::envspec::join_path_list(&merged))?;
+    env_broadcast();
+    Ok(true)
+}
+
+/// 非 Windows 平台无 Path 环境区可写，直接报告"无需写入"（Ok(false)）。
+#[cfg(not(windows))]
+pub fn env_append_path(_per_machine: bool, _dir: &str) -> Result<bool> {
+    Ok(false)
+}
+
 /// 广播 WM_SETTINGCHANGE "Environment"（Inno ChangesEnvironment 语义）：
 /// 已运行的 Explorer/桌面环境刷新后，新启动的进程即可看到新值，无需注销。
 /// 尽力而为（2 秒超时，忽略失败——已被挂起的窗口不阻塞安装流程）。
