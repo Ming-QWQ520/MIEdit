@@ -5,6 +5,7 @@
 
 pub mod archive;
 pub mod cliargs;
+pub mod compbench;
 pub mod componenttree;
 pub mod config;
 pub mod crc32;

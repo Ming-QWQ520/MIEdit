@@ -54,8 +54,8 @@
 | 43 | 语法检测和纠错（诊断 + 一键快速修复） | VSCode Problems / Quick Fix | **已完成**（0.1.0，#21） |
 | 44 | 深色/浅色主题（默认跟随系统）+ 顶部菜单（文件/选项/设置/关于） | VSCode 主题与菜单栏 | **已完成**（0.1.0，#21） |
 | 45 | 压缩档大扩充：BZip2/Zstd(+solid) 落地 + 激进压缩档 lzma-ultra/zstd-ultra/brotli-ultra（14 档矩阵） | NSIS `SetCompressor bzip2` / Inno Zstd + 用户指令（增加压缩方法、激进压缩方案、优化 zstd/bzip2 编码器） | **已完成**（0.1.0，#22） |
-| 46 | 压缩差分基准与模糊往返（14 档压缩率/耗时表入库 + 可复现种子 fuzz roundtrip） | 健壮性对齐（压缩链路回归防护） | **待办** |
-| 47 | 14 档端到端矩阵验证（构建→静默安装→逐字节比对，扩展 #13 Linux 无头脚本） | 健壮性对齐（自解压链路回归） | **待办** |
+| 46 | 压缩差分基准与模糊往返（14 档压缩率/耗时表入库 + 可复现种子 fuzz roundtrip） | 健壮性对齐（压缩链路回归防护） | **已完成**（0.1.0，#23） |
+| 47 | 14 档端到端矩阵验证（构建→静默安装→逐字节比对，扩展 #13 Linux 无头脚本） | 健壮性对齐（自解压链路回归） | **已完成**（0.1.0，#23） |
 
 ## 迭代步骤定义
 
@@ -553,6 +553,36 @@
   （lzma 9.8% 最小、zstd 15.5% 解压 61ms 最快、bzip2 15.3%、
   deflate 21.8%）。
 
+### 步骤 46：压缩差分基准与可复现种子模糊往返（健壮性对齐）
+- **做什么**：新模块 `miedit_core::compbench`（纯函数，core 下沉）——
+  ① SplitMix64 确定性语料生成器（五熵级：文本/二进制/零段/重复块/随机，
+  无外部依赖，跨平台逐字节一致）；② 14 档差分基准
+  `bench_profiles`/`bench_markdown`（逐档压缩→解压→逐字节校验，产出
+  压缩率/压缩 ms/解压 ms/往返结果，直接渲染入库表格）；③ 种子模糊往返
+  `fuzz_roundtrip`（固定尺寸序列 0…16KB × 五熵级轮转，14 档全 roundtrip，
+  失败收集 `FuzzFailure` 含档位/尺寸/熵级/原因，同种子可复现）；
+  ④ 差分基准入库 `docs/compression-bench.md`（方法论 + 基准表 + 模糊
+  记录 + e2e 矩阵结果 + 回归防护清单）与复现工具
+  `examples/compbench.rs`（默认打印表格 / `--fuzz` 深模糊 /
+  `--emit-payload` 端到端 payload 落盘）。
+- **验收**：core 单测新增 5 项（语料确定性/熵级生成器/14 档全往返/
+  双种子模糊全过/payload 确定性），186 → 191 全过；release 实测
+  14 档全 OK（详见 compression-bench.md）；双种子 60 轮模糊
+  1680 次往返 0 失败；Windows 交叉 check 0 error 0 warning。
+
+### 步骤 47：14 档端到端矩阵验证（构建→静默安装→逐字节比对）
+- **做什么**：无头脚本 `scripts/e2e-matrix.sh`（扩展 #13 的 Linux 实机
+  验证为全档位常态化回归）——确定性 payload（compbench 生成，六文件
+  文本×2/二进制/重复块/零段/纯随机）→ 逐档 `mis build`（真实编译链全流程）
+  → 安装器 `--silent --dir=` 静默安装（退出码 0）→ 六文件 `cmp` 逐字节
+  比对 + `uninstall.json` 清单落盘断言；strip 副本控制磁盘占用、逐档清理。
+- **顺带修复**：`mis build` 在 Linux 上 `File::create` 新建输出丢失 stub
+  可执行位（0644）——成品包无法直接运行；编译器写出后回授 stub 权限位
+  （`#[cfg(unix)]`，Windows PE 不受影响）。
+- **验收**：14/14 档全过（构建 exit 0 + 静默安装 exit 0 + 逐字节一致 +
+  清单落盘，结果入库 compression-bench.md 第四节）；脚本可重复执行
+  （`--no-build`/`--keep` 调试开关）；Windows 交叉 check 0 error 0 warning。
+
 1. **纯 Rust**：不引入 C 构建链；新增依赖须在 Windows/Linux 双平台可编译。
 2. **向后兼容**：旧格式安装包/卸载清单必须仍可处理（serde default / magic 回退）。
 3. **测试**：核心逻辑写成 `miedit-core` 纯函数并加单元测试；`cargo test -p miedit-core`
@@ -564,6 +594,27 @@
    不再随功能对齐批次递增；历史批次 v0.2.0–v0.13.0 保留原版本号记录）。
 
 ## 变更日志
+
+- 0.1.0（步骤 46–47，#23）：**压缩链路回归防护（差分基准入库 + 种子模糊
+  往返 + 14 档端到端矩阵）**：
+  ① **compbench 模块**（core 下沉，纯函数）：SplitMix64 确定性语料
+  （五熵级：文本/二进制/零段/重复块/随机，跨平台逐字节一致）+
+  14 档差分基准 `bench_profiles`/`bench_markdown`（压缩率/耗时/往返）
+  + 种子模糊往返 `fuzz_roundtrip`（固定尺寸序列 × 五熵级轮转，失败
+  可复现收集）+ 确定性 e2e payload 生成 `emit_payload_files`；
+  ② **基准入库** `docs/compression-bench.md`（方法论 + 14 档表 +
+  模糊记录 + e2e 结果 + 回归防护清单），复现工具
+  `examples/compbench.rs`（表格/`--fuzz`/`--emit-payload` 三模式）；
+  ③ **模糊记录**：双种子 60 轮 × 14 档 = 1680 次往返 0 失败
+  （release），单测小批次常驻防护（186 → 191 测试）；
+  ④ **14 档端到端矩阵** `scripts/e2e-matrix.sh`：确定性 payload →
+  `mis build` 真实编译链 → `--silent` 静默安装 exit 0 → 六文件
+  `cmp` 逐字节比对 + 清单落盘断言，14/14 全过（Linux 无头，
+  结果入库 compression-bench.md）；
+  ⑤ **顺带修复**（e2e 发现）：`mis build` 在 Linux 上成品包丢失
+  stub 可执行位（`File::create` 0644），编译器写出后回授权限位
+  （`#[cfg(unix)]`，Windows 不受影响）；小语料 ultra 档与标准档
+  持平的诚实记录入 compression-bench.md（与 #22 结论一致）。
 
 - 0.1.0（步骤 16 解阻 + 45，#22）：**压缩方法大扩充 + 激进压缩档**
   （用户指令：再增加压缩方法、增加激进压缩方案、优化 zstd/bzip2 编码器）：

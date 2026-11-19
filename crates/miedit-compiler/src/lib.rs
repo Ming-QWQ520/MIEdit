@@ -640,6 +640,18 @@ pub fn build_package(
     f.sync_all().ok();
     drop(f);
 
+    // Linux 适配（步骤 47 e2e 发现）：安装包 = stub 的字节拷贝 + 追加数据，
+    // 在 Linux 上包本身就是可执行 ELF，`File::create` 新建文件默认 0644 会丢失
+    // stub 的可执行位，导致生成后无法直接运行（Windows PE 无此概念）。
+    // 这里把 stub 的权限位原样授给成品包（仅 Unix；失败不致命）。
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = fs::metadata(&stub_path) {
+            let _ = fs::set_permissions(out, fs::Permissions::from_mode(meta.permissions().mode()));
+        }
+    }
+
     let total = fs::metadata(out)?.len();
     Ok(BuildSummary {
         output: out.clone(),
