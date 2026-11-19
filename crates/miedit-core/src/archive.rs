@@ -43,6 +43,11 @@ pub const FLAG_LZMA: u8 = 8;
 pub const FLAG_BZIP2: u8 = 16;
 pub const FLAG_ZSTD: u8 = 32;
 
+/// 单条目长度上限（2 GiB，步骤 49 健壮性加固）：损坏归档的长度字段
+/// （comp_len/orig_len）最大到 u64::MAX，直接按值分配会 OOM abort；
+/// 超限改为优雅报错。合法安装包条目远低于此值。
+pub const MAX_ENTRY_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
 /// 压缩算法（条目级与整包 solid 共用，全部纯 Rust 实现）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Algo {
@@ -487,6 +492,24 @@ impl<R: Read> ArchiveReader<R> {
         self.inner.read_exact(&mut ol)?;
         let comp_len = u64::from_le_bytes(cl);
         let orig_len = u64::from_le_bytes(ol);
+        // 健壮性加固（步骤 49）：损坏包 / `--ncrc` 下条目长度字段是攻击面——
+        // 直接 `vec![0u8; comp_len]` 会因 u64::MAX 级分配直接 OOM abort（不可
+        // 恢复）。设 2GiB 单条目上限（远超合法安装包条目），超出即优雅报错，
+        // 与 NSIS 逐条目校验长度的行为对齐。
+        if comp_len > MAX_ENTRY_BYTES {
+            bail!(
+                "条目 {} 压缩长度 {} 超过上限 {}（归档损坏或非 MIEdit 归档）",
+                plen,
+                comp_len,
+                MAX_ENTRY_BYTES
+            );
+        }
+        if orig_len > MAX_ENTRY_BYTES {
+            bail!(
+                "条目 {} 原始长度 {} 超过上限 {}（归档损坏或非 MIEdit 归档）",
+                plen, orig_len, MAX_ENTRY_BYTES
+            );
+        }
         let mut data = vec![0u8; comp_len as usize];
         self.inner.read_exact(&mut data)?;
         Ok(Some(ArchiveEntry {
@@ -731,5 +754,43 @@ mod tests {
         let mut r = ArchiveReader::new(buf).unwrap();
         let e = r.next_entry().unwrap().unwrap();
         assert_eq!(e.decode().unwrap(), data);
+    }
+
+    /// 步骤 49 健壮性加固：损坏归档的 comp_len/orig_len 超限必须优雅报错
+    /// （此前 `vec![0u8; comp_len]` 遇 u64::MAX 级字段直接 OOM abort，
+    /// `--ncrc` 跳过 CRC 后是不可恢复的 DoS 面）。
+    #[test]
+    fn corrupted_entry_len_rejected_gracefully() {
+        // 构造合法归档：magic(8) + total(8) + count(8) + path_len(2) + path + flag(1)
+        // + comp_len(8) + orig_len(8) + data + terminator(2)
+        let mut buf = Vec::new();
+        {
+            let mut w =
+                ArchiveWriter::new_with_total(&mut buf, 4, 1).unwrap();
+            w.add_file("x.txt", b"abcd").unwrap();
+            w.finish().unwrap();
+        }
+        let patch_len_field = |buf: &[u8], value: u64| -> Vec<u8> {
+            let mut b = buf.to_vec();
+            let off = 8 + 8 + 8 + 2 + "x.txt".len() + 1; // comp_len 字段偏移
+            b[off..off + 8].copy_from_slice(&value.to_le_bytes());
+            b
+        };
+        // comp_len 超限（u64::MAX 与 3GiB 两档）
+        for bad in [u64::MAX, MAX_ENTRY_BYTES + 1] {
+            let mut r = ArchiveReader::new(Cursor::new(patch_len_field(&buf, bad))).unwrap();
+            let err = r.next_entry().err().expect("超限 comp_len 必须返回 Err 而非 abort");
+            assert!(err.to_string().contains("超过上限"), "{err}");
+        }
+        // orig_len 超限
+        let mut b = buf.clone();
+        let off = 8 + 8 + 8 + 2 + "x.txt".len() + 1 + 8;
+        b[off..off + 8].copy_from_slice(&(MAX_ENTRY_BYTES + 1).to_le_bytes());
+        let mut r = ArchiveReader::new(Cursor::new(b)).unwrap();
+        let err = r.next_entry().err().expect("超限 orig_len 必须返回 Err 而非 abort");
+        assert!(err.to_string().contains("超过上限"), "{err}");
+        // 正常值不受影响
+        let mut r2 = ArchiveReader::new(Cursor::new(buf)).unwrap();
+        assert_eq!(r2.next_entry().unwrap().unwrap().decode().unwrap(), b"abcd");
     }
 }

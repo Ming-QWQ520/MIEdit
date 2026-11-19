@@ -56,6 +56,9 @@
 | 45 | 压缩档大扩充：BZip2/Zstd(+solid) 落地 + 激进压缩档 lzma-ultra/zstd-ultra/brotli-ultra（14 档矩阵） | NSIS `SetCompressor bzip2` / Inno Zstd + 用户指令（增加压缩方法、激进压缩方案、优化 zstd/bzip2 编码器） | **已完成**（0.1.0，#22） |
 | 46 | 压缩差分基准与模糊往返（14 档压缩率/耗时表入库 + 可复现种子 fuzz roundtrip） | 健壮性对齐（压缩链路回归防护） | **已完成**（0.1.0，#23） |
 | 47 | 14 档端到端矩阵验证（构建→静默安装→逐字节比对，扩展 #13 Linux 无头脚本） | 健壮性对齐（自解压链路回归） | **已完成**（0.1.0，#23） |
+| 48 | 卸载端到端矩阵（安装→静默卸载→文件/清单/本体/目录全清断言 + Linux 自删除落地） | 健壮性对齐（卸载链路回归，NSIS 卸载语义） | **已完成**（0.1.0，#24） |
+| 49 | 抗损坏输入 fuzz（五算法压缩流 + 归档读路径变异，不 panic 不变量）+ 条目长度上限加固 | 健壮性对齐（损坏包/`--ncrc` 攻击面） | **已完成**（0.1.0，#24） |
+| 50 | 静默安装参数矩阵（`--components`/`--lang`/`--no-shortcuts`/`--repair` 退出码与行为断言） | 健壮性对齐（NSIS /S 参数语义） | **待办** |
 
 ## 迭代步骤定义
 
@@ -583,6 +586,46 @@
   清单落盘，结果入库 compression-bench.md 第四节）；脚本可重复执行
   （`--no-build`/`--keep` 调试开关）；Windows 交叉 check 0 error 0 warning。
 
+### 步骤 48：卸载端到端矩阵（安装→静默卸载→全清断言）
+- **做什么**：① `scripts/e2e-matrix.sh` 扩展卸载阶段——安装比对通过后
+  把 stripped 卸载器放进安装目录（模拟 Windows `uninstall.exe` 布局），
+  `--silent` 卸载，断言退出码 0 + 六文件全清 + `uninstall.json` 清单删除 +
+  卸载器本体删除 + 安装目录移除（后台延迟自删除，轮询等待）；
+  ② **Linux 自删除落地**：`winutil::schedule_self_delete` 非 Windows 分支
+  此前为 no-op（卸载器本体与安装目录永不清理），现派生后台 `sh -c`
+  （sleep 2 → `rm -f` 本体 → `rmdir` 仅空目录，NSIS `RMDir` 语义），
+  脚本构造独立为 `self_delete_script_unix` 纯函数（POSIX 单引号转义）；
+  ③ **两个 e2e 发现的真缺陷修复**：Linux 清单 `manifest_path` 在序列化
+  后才回填（清单文件内恒空串，卸载器永远删不掉 uninstall.json）→
+  序列化前回填；卸载器 `cleanup_after_uninstall` 兜底（空路径回退
+  exe 同目录 uninstall.json + 清理安装器副产物 `install.log`）。
+- **验收**：修复前 14/14 档全部「目录残留」（uninstall.json +
+  install.log），修复后 14/14 全清（文件/清单/本体/目录）；
+  core 单测 +2（自删除脚本构造/POSIX 转义/空路径行为）；
+  Windows 交叉 check 0 error 0 warning。
+
+### 步骤 49：抗损坏输入 fuzz + 条目长度上限加固
+- **做什么**：① `compbench::fuzz_decode_robustness`（种子可复现）——
+  对五算法压缩流与归档读路径（`ArchiveReader::new` + 逐条目
+  `next_entry` + `decode`，即安装器 `--ncrc` 路径的真实输入形态）施加
+  五种确定性变异（截断/位翻转/清零窗口/尾部追加/空输入），不变量=
+  **解码路径不 panic**（返回 Ok 或 Err 均可接受），panic 逐例可复现记录；
+  ② **长度字段加固**：损坏归档的 comp_len/orig_len 直接 `vec![0u8; len]`
+  会遇 u64::MAX 级字段 OOM abort，新增 `MAX_ENTRY_BYTES`（2 GiB）上限，
+  超限优雅报错（与 NSIS 逐条目校验行为对齐）；③ 复现入口
+  `examples/compbench.rs --robust [seed] [iters]`。
+- **验收**：release 三种子各 120 轮 × 6 目标 = 2160 变异案例 0 panic；
+  归档超限长度单测（u64::MAX 与 2GiB+1 两档优雅拒绝）；core 测试
+  191 → 195 全过；Windows 交叉 check 0 error 0 warning。
+
+### 步骤 50：静默安装参数矩阵（`--components`/`--lang`/`--no-shortcuts`/`--repair`）
+- **做什么**：扩展 e2e 矩阵（或独立脚本）覆盖静默安装命令行参数矩阵：
+  每参数的退出码 + 行为断言（`--components=a,b` 只装所选组件、
+  `--no-shortcuts` 不建快捷方式、`--lang=` 语言覆盖、`--repair` 修复模式
+  重解压全量、未知组件名报错路径），Linux 无头可验部分 + Windows
+  实机验证清单（快捷方式/注册表/UAC 相关项）。
+- **验收**：参数矩阵全过入库；Windows 交叉 check 0 error 0 warning。
+
 1. **纯 Rust**：不引入 C 构建链；新增依赖须在 Windows/Linux 双平台可编译。
 2. **向后兼容**：旧格式安装包/卸载清单必须仍可处理（serde default / magic 回退）。
 3. **测试**：核心逻辑写成 `miedit-core` 纯函数并加单元测试；`cargo test -p miedit-core`
@@ -594,6 +637,26 @@
    不再随功能对齐批次递增；历史批次 v0.2.0–v0.13.0 保留原版本号记录）。
 
 ## 变更日志
+
+- 0.1.0（步骤 48–49，#24）：**卸载端到端矩阵 + 抗损坏输入 fuzz（健壮性
+  对齐，e2e 再捕获三个真缺陷）**：
+  ① **卸载 e2e**：e2e-matrix.sh 扩展卸载阶段（静默卸载 → 文件/清单/
+  卸载器本体/安装目录全清断言），14/14 档全过；
+  ② **Linux 自删除落地**：`schedule_self_delete` 非 Windows 分支此前
+  no-op → 后台 `sh -c`（sleep 2 → rm -f 本体 → rmdir 仅空目录，
+  NSIS RMDir 语义），`self_delete_script_unix` 纯函数 + 单测
+  （POSIX 单引号转义/空路径/无目录）；
+  ③ **e2e 发现并修复**：Linux 清单 `manifest_path` 序列化后才回填
+  （清单内恒空串，卸载器删不掉 uninstall.json）→ 序列化前回填；
+  卸载器 cleanup 兜底（空路径回退 exe 同目录 uninstall.json +
+  清理安装器副产物 install.log）；修复前 14/14 目录残留、修复后
+  14/14 全清；
+  ④ **抗损坏 fuzz**：`compbench::fuzz_decode_robustness`（五算法压缩流
+  + 归档读路径 × 五种变异，不变量=不 panic），release 三种子 2160
+  案例 0 panic；`MAX_ENTRY_BYTES`（2 GiB）条目长度上限加固
+  （u64::MAX 级损坏字段此前直接 OOM abort，现优雅报错）；
+  ⑤ 复现入口 `compbench --robust [seed] [iters]`；core 测试
+  191 → 195 全过；新增待办步骤 50（静默安装参数矩阵）。
 
 - 0.1.0（步骤 46–47，#23）：**压缩链路回归防护（差分基准入库 + 种子模糊
   往返 + 14 档端到端矩阵）**：

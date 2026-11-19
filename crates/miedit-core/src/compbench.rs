@@ -358,6 +358,171 @@ pub fn fuzz_roundtrip(seed: u64, iterations: usize) -> Vec<FuzzFailure> {
     failures
 }
 
+/// 抗损坏输入 fuzz 失败记录。
+#[derive(Clone, Debug)]
+pub struct RobustFailure {
+    /// 迭代号（0 起）。
+    pub iteration: usize,
+    /// 目标（如 "decompress:deflate" / "archive-reader"）。
+    pub target: &'static str,
+    /// 变异种类（truncate / bitflip / zero-window / append / empty）。
+    pub kind: &'static str,
+    /// 失败描述（仅记录 panic；Ok/Err 均为可接受行为）。
+    pub error: String,
+}
+
+/// 变异 `data`（确定性）：第 `kind` 档决定变异种类。
+fn mutate_input(rng: &mut SplitMix64, data: &[u8], kind: usize) -> (Vec<u8>, &'static str) {
+    match kind % 5 {
+        0 => {
+            let cut = rng.next_usize(0, data.len() + 1);
+            (data[..cut].to_vec(), "truncate")
+        }
+        1 => {
+            let mut b = data.to_vec();
+            let flips = rng.next_usize(1, 9);
+            for _ in 0..flips {
+                if b.is_empty() {
+                    break;
+                }
+                let i = rng.next_usize(0, b.len());
+                b[i] ^= (1u8) << rng.next_usize(0, 8);
+            }
+            (b, "bitflip")
+        }
+        2 => {
+            let mut b = data.to_vec();
+            if !b.is_empty() {
+                let start = rng.next_usize(0, b.len());
+                let end = rng.next_usize(start, b.len().max(1)).min(b.len());
+                for x in &mut b[start..end] {
+                    *x = 0;
+                }
+            }
+            (b, "zero-window")
+        }
+        3 => {
+            let mut b = data.to_vec();
+            let n = rng.next_usize(1, 65);
+            for _ in 0..n {
+                b.push(rng.next_byte());
+            }
+            (b, "append")
+        }
+        _ => (Vec::new(), "empty"),
+    }
+}
+
+/// 捕获 panic（步骤 49 抗损坏 fuzz 的不变量：解码路径对任意输入**不 panic**，
+/// 返回 Ok 或 Err 均为可接受行为）。release `panic = "abort"` 下 panic 会直接
+/// 中止进程——同样是显式失败信号，只是没有逐例记录。
+fn catch_decode_panic<F>(f: F) -> Option<String>
+where
+    F: FnOnce() -> anyhow::Result<Vec<u8>>,
+{
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(_) => None,
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "非字符串 panic".into());
+            Some(msg)
+        }
+    }
+}
+
+/// 可复现种子抗损坏 fuzz（步骤 49）：对五算法压缩流 + 归档读路径施加
+/// 确定性变异（截断/位翻转/清零窗口/尾部追加/空输入），断言解码路径
+/// **不 panic**（返回 Ok 或 Err 均可）。发现 panic 即记录（同种子可复现）。
+///
+/// 目标：
+/// - `decompress:<algo>`：`decompress_bytes` 对变异压缩流；
+/// - `archive-reader`：`ArchiveReader::new` + 逐条目 `next_entry` + `decode`
+///   对变异归档字节（安装器 `--ncrc` 路径的真实输入形态）。
+pub fn fuzz_decode_robustness(seed: u64, iterations: usize) -> Vec<RobustFailure> {
+    use crate::archive::{ArchiveReader, ArchiveWriter};
+    use std::io::Cursor;
+
+    let mut rng = SplitMix64::new(seed ^ 0xDEAD_BEEF);
+    let mut failures = Vec::new();
+
+    for it in 0..iterations {
+        let (data, kind) = {
+            let size = FUZZ_SIZES[it % FUZZ_SIZES.len()];
+            let ent = Entropy::ALL[it % Entropy::ALL.len()];
+            let raw = gen_section(rng.next_u64(), ent, size);
+            mutate_input(&mut rng, &raw, it)
+        };
+        let kind = kind;
+
+        // 目标 1：五算法压缩流变异 → 解码不 panic
+        for algo in [
+            crate::archive::Algo::Deflate,
+            crate::archive::Algo::Brotli,
+            crate::archive::Algo::Lzma,
+            crate::archive::Algo::Bzip2,
+            crate::archive::Algo::Zstd,
+        ] {
+            let compressed = crate::archive::compress_bytes_profile(algo, &data, false);
+            let target = match compressed {
+                Ok(c) => c,
+                Err(e) => {
+                    failures.push(RobustFailure {
+                        iteration: it,
+                        target: "compress",
+                        kind,
+                        error: format!("{} 压缩基准流失败: {e}", algo.label()),
+                    });
+                    continue;
+                }
+            };
+            let algo_label = algo.label();
+            if let Some(msg) = catch_decode_panic(|| decompress_bytes(algo, &target)) {
+                failures.push(RobustFailure {
+                    iteration: it,
+                    target: "decompress",
+                    kind,
+                    error: format!("{algo_label}: {msg}"),
+                });
+            }
+        }
+
+        // 目标 2：归档读路径变异（含逐条目解码，覆盖 magic/长度/标志字段）
+        let mut valid_archive = Vec::new();
+        {
+            let mut w = ArchiveWriter::new_with_total(
+                &mut valid_archive,
+                (data.len() + 4) as u64,
+                2,
+            )
+            .expect("归档基准流构建");
+            w.add_dir("d").expect("归档基准流构建");
+            w.add_file_with_algo("d/f.bin", &data, crate::archive::Algo::Deflate)
+                .expect("归档基准流构建");
+            w.finish().expect("归档基准流构建");
+        }
+        let mutated = mutate_input(&mut rng, &valid_archive, it.wrapping_add(2)).0;
+        if let Some(msg) = catch_decode_panic(|| -> anyhow::Result<Vec<u8>> {
+            let mut r = ArchiveReader::new(Cursor::new(&mutated))?;
+            while let Some(e) = r.next_entry()? {
+                let _ = e.decode()?;
+            }
+            Ok(Vec::new())
+        }) {
+            failures.push(RobustFailure {
+                iteration: it,
+                target: "archive-reader",
+                kind,
+                error: msg,
+            });
+        }
+    }
+    failures
+}
+
 /// 端到端 payload 文件清单（相对路径，含安装包内目标布局）。
 ///
 /// 与 `emit_payload_files` 一一对应；e2e 脚本按此清单生成脚本与逐字节比对。
@@ -484,6 +649,46 @@ mod tests {
         // 换种子再跑一批（不同尺寸×熵级组合）
         let failures2 = fuzz_roundtrip(987654321, 10);
         assert!(failures2.is_empty(), "第二批模糊往返失败: {failures2:#?}");
+    }
+
+    /// 步骤 49：抗损坏输入 fuzz——解码路径对变异流不 panic。
+    #[test]
+    fn test_fuzz_decode_robustness_no_panic() {
+        let failures = fuzz_decode_robustness(BENCH_SEED, 10);
+        assert!(
+            failures.is_empty(),
+            "抗损坏 fuzz 发现 panic: {failures:#?}"
+        );
+        // 换种子 + 换变异组合再跑一批
+        let failures2 = fuzz_decode_robustness(0xDEAD_BEEF, 10);
+        assert!(failures2.is_empty(), "第二批抗损坏 fuzz 失败: {failures2:#?}");
+    }
+
+    /// 变异生成器：确定性 + 种类正确 + 空输入安全。
+    #[test]
+    fn test_mutate_input_kinds() {
+        let base: Vec<u8> = (0..256u32).map(|i| i as u8).collect();
+        for kind in 0..5 {
+            let (m1, label) = mutate_input(&mut SplitMix64::new(7), &base, kind);
+            let (m2, label2) = mutate_input(&mut SplitMix64::new(7), &base, kind);
+            assert_eq!(m1, m2, "kind {kind} 确定性");
+            assert_eq!(label, label2);
+        }
+        // truncate：0..=len
+        let (t, l) = mutate_input(&mut SplitMix64::new(1), &base, 0);
+        assert_eq!(l, "truncate");
+        assert!(t.len() <= base.len());
+        // append：> len
+        let (a, l) = mutate_input(&mut SplitMix64::new(1), &base, 3);
+        assert_eq!(l, "append");
+        assert!(a.len() > base.len());
+        // empty
+        let (e, l) = mutate_input(&mut SplitMix64::new(1), &base, 4);
+        assert_eq!((e.len(), l), (0, "empty"));
+        // 空输入不 panic
+        for kind in 0..5 {
+            let _ = mutate_input(&mut SplitMix64::new(9), &[], kind);
+        }
     }
 
     /// 端到端 payload：确定性 + 清单一致 + 落盘往返。

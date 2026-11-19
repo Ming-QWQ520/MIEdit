@@ -271,16 +271,18 @@ crates/
 ## 测试
 
 ```bash
-cargo test --workspace    # 219 个单元测试（本轮新增 compbench 5 项：确定性语料/熵级生成器/14 档全往返/双种子模糊全过/payload 确定性）：归档（含 Deflate/BZip2/LZMA/Brotli/Zstd 压缩算法往返与激进档）/**压缩差分基准与种子模糊往返（compbench）**/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO 结构回读/文件错误决策与提示信箱/重启替换/安装类型状态机/系统版本门槛/目录统计/组件过滤映射/slug/语言匹配与 LANGID 映射/多语言文案解析链/卸载器文案键集与解析链/卸载语言匹配索引/环境变量解析与 PATH 合并去重/卸载清单新旧兼容/修复入口与修复统计/包尾 v4 与卸载数据新旧格式/安装目录解析与根路径校验/盘符切换空间刷新回归/内置模板色板/CLI 组件参数解析/LANG 参数提取与 NSIS LCID 覆盖/压缩方式别名归一化与分派映射/CRC 后台校验门/MI 脚本语法高亮与脚本 IDE 纯逻辑（查找/替换/字符字节换算/自动缩进/括号补全/命令面板过滤/面包屑/缩进检测）/MI 脚本 v2 组件指令（变量展开/校验/serde 往返/互斥名构造/UAC 执行级别与 manifest XML/CopyFiles 复制内核与自嵌套防护/INI 写入语义/磁盘空间预检判定）
-scripts/e2e-matrix.sh    # 14 档端到端矩阵（构建→静默安装→逐字节比对，结果入库 docs/compression-bench.md）
+cargo test --workspace    # 223 个单元测试（本轮新增 winutil 自删除脚本构造 + 归档超限长度优雅拒绝 + compbench 抗损坏 fuzz/变异生成器）：归档（含压缩往返/损坏长度拒绝）/压缩基准与双类 fuzz（compbench）/包尾/CRC32/通配符/路径安全/icon 解析/VERSIONINFO/文件错误决策/重启替换/Unix 自删除脚本/安装类型状态机/系统版本门槛/目录统计/组件过滤映射/slug/语言匹配/LANGID 映射/多语言文案解析链/卸载器文案键集/卸载语言匹配索引/环境变量解析与 PATH 合并/卸载清单新旧兼容/修复入口与统计/CLI 参数解析/LCID 覆盖/压缩别名归一化/CRC 后台校验门/MI 脚本语法高亮与 IDE 纯逻辑/MI 脚本 v2 组件指令（变量展开/校验/serde 往返/互斥名/UAC manifest/CopyFiles 内核/INI 写入/磁盘预检）
+scripts/e2e-matrix.sh    # 14 档端到端矩阵（构建→静默安装→逐字节比对→静默卸载→全清断言，结果入库 docs/compression-bench.md）
 ```
 
 已在 Windows 10 x64 实机验证：CLI 与 GUI 构建链路、静默安装/卸载全清理、组件过滤生效、
 默认图标链路（未配置自动内嵌）、solid 压缩（592KB→103KB）、升级检测、旧格式兼容。
 Linux 无头实机验证（#13）：6 种压缩档端到端构建 + 静默安装（退出码 0、逐字节一致）
 + install.log 落盘；体积排序 lzma-solid < brotli-solid < deflate-solid。
-常态化矩阵（#23）：14 档全部端到端（确定性 payload → mis build → --silent →
-cmp 逐字节比对 + 清单断言）14/14 全过，脚本 `scripts/e2e-matrix.sh` 可重复执行。
+常态化矩阵（#23/#24）：14 档全部端到端（确定性 payload → mis build → --silent →
+cmp 逐字节比对 → --silent 卸载 → 文件/清单/本体/目录全清断言）14/14 全过，
+脚本 `scripts/e2e-matrix.sh` 可重复执行；抗损坏 fuzz（三种子 2160 变异案例）
+与 14 档差分基准表入库 docs/compression-bench.md。
 
 ## License
 

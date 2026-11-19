@@ -611,7 +611,23 @@ fn do_uninstall(
 
 /// 关闭后清理：删除清单文件、自删除卸载器、尝试移除空的安装目录。
 fn cleanup_after_uninstall(m: &UninstallManifest) {
-    let _ = std::fs::remove_file(&m.manifest_path);
+    // 步骤 48（e2e 矩阵发现）：清单自身路径兜底——#23 之前的 Linux 清单
+    // 在序列化后才回填 manifest_path，清单文件内该字段为空串，这里
+    // remove_file("") 永远失败 → uninstall.json 残留。回退 exe 所在目录的
+    // uninstall.json（Linux 卸载器按目录布局就是放在安装目录里运行的）。
+    let manifest_path = if m.manifest_path.trim().is_empty() {
+        std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(|p| p.join("uninstall.json")))
+    } else {
+        Some(PathBuf::from(&m.manifest_path))
+    };
+    if let Some(p) = manifest_path {
+        let _ = std::fs::remove_file(&p);
+    }
+    // 安装器副产物（NSIS LogSet 风格安装日志）不随清单登记，卸载时一并清理；
+    // 缺失 / 已删（write_log = false）时 NotFound 静默忽略。
+    let _ = std::fs::remove_file(Path::new(&m.install_dir).join("install.log"));
     winutil::schedule_self_delete(
         Path::new(&m.uninstaller_path),
         &[PathBuf::from(&m.install_dir)],

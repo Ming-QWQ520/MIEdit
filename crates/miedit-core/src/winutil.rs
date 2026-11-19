@@ -1316,8 +1316,48 @@ pub fn schedule_self_delete(exe: &Path, extra_dirs: &[PathBuf]) {
     }
     #[cfg(not(windows))]
     {
-        let _ = (exe, extra_dirs);
+        // Linux 适配（步骤 48）：此前为 no-op——卸载器本体与安装目录永不清理，
+        // 卸载后安装目录残留空壳。现派生后台 `sh -c`（stdout/stderr 静默）：
+        // 等待进程退出（sleep 2）→ 删除卸载器本体 → 尝试删除安装目录。
+        // 目录删除用 `rmdir`（仅空目录，NSIS RMDir 语义）——目录内还有用户
+        // 自放文件时保留（与 #15 的 `RMDir` 仅空删除语义一致；注意 Windows
+        // 分支用 `rd /s /q` 更激进，平台不对称在 lessons 记录）。
+        // 清单里 uninstaller_path 为空串时回退 current_exe（Linux 安装器
+        // 不内嵌卸载器，卸载器以独立二进制形式放进安装目录运行）。
+        let exe_path = if exe.as_os_str().is_empty() {
+            std::env::current_exe().unwrap_or_default()
+        } else {
+            exe.to_path_buf()
+        };
+        if exe_path.as_os_str().is_empty() {
+            return;
+        }
+        let script = self_delete_script_unix(&exe_path, extra_dirs);
+        let _ = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
     }
+}
+
+/// 构造 Unix 自删除脚本（[`schedule_self_delete`] 的 Linux 分支实现，
+/// 独立成纯函数便于单测）：等待进程退出 → `rm -f` 卸载器本体（路径非空时）
+/// → `rmdir`（仅空目录）删除安装目录。路径单引号转义（POSIX shell 安全）。
+pub fn self_delete_script_unix(exe: &Path, extra_dirs: &[PathBuf]) -> String {
+    let quote = |p: &Path| {
+        format!("'{}'", p.display().to_string().replace('\'', "'\\''"))
+    };
+    let mut s = String::from("sleep 2");
+    if !exe.as_os_str().is_empty() {
+        s.push_str(&format!("; rm -f {}", quote(exe)));
+    }
+    for d in extra_dirs {
+        s.push_str(&format!("; rmdir {} 2>/dev/null", quote(d)));
+    }
+    s
 }
 
 // ---------------------------------------------------------------------------
@@ -1366,6 +1406,33 @@ mod tests {
         assert!(winutil_test_acquire("x", false).is_some());
         #[cfg(windows)]
         let _ = winutil_test_acquire("x", false);
+    }
+
+    // 步骤 48：Unix 自删除脚本构造（内容断言；Windows 上同样可测纯函数）
+    #[test]
+    fn test_self_delete_script_unix() {
+        let exe = PathBuf::from("/opt/app/uninstall");
+        let dirs = [PathBuf::from("/opt/app")];
+        let s = self_delete_script_unix(&exe, &dirs);
+        assert!(s.starts_with("sleep 2"), "先等进程退出: {s}");
+        assert!(s.contains("rm -f '/opt/app/uninstall'"), "删本体: {s}");
+        assert!(
+            s.contains("rmdir '/opt/app' 2>/dev/null"),
+            "仅空目录删除（NSIS RMDir 语义）: {s}"
+        );
+        // 带空格/单引号路径的 POSIX 转义（路径含两个单引号，均需转义为 '\''
+        let s2 = self_delete_script_unix(&PathBuf::from("/tmp/a 'b'/u.exe"), &[]);
+        assert!(
+            s2.contains("rm -f '/tmp/a '\\''b'\\''/u.exe'"),
+            "单引号转义: {s2}"
+        );
+        // uninstaller_path 空串（Linux 清单实际形态）→ 不写 rm -f
+        let s3 = self_delete_script_unix(Path::new(""), &dirs);
+        assert!(!s3.contains("rm -f"), "空路径跳过本体删除: {s3}");
+        assert!(s3.contains("rmdir '/opt/app'"));
+        // 无目录 → 不写 rmdir
+        let s4 = self_delete_script_unix(&exe, &[]);
+        assert!(!s4.contains("rmdir"));
     }
 
     fn winutil_test_name(app_id: &str, uninstaller: bool) -> String {

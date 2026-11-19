@@ -538,6 +538,15 @@ pub fn finalize_install(
     // 5. 卸载清单：Windows 内嵌进卸载器 EXE 尾部（NSIS 式自包含卸载器）；
     //    Linux 落盘 uninstall.json（卸载器自带清单文件回退读取）
     //    卸载器壁纸（步骤 19）随清单/图标一起内嵌；无壁纸时空字节（32B footer bg_len=0）
+    // 步骤 48 修复（e2e 矩阵发现）：Linux 清单自身路径必须在序列化**前**回填——
+    // 此前 json 先序列化、后赋值 manifest_path，清单文件内该字段恒为空串，
+    // 卸载器 cleanup 永远删不掉 uninstall.json，安装目录残留空壳。
+    #[cfg(not(windows))]
+    let manifest = {
+        let mut m0 = manifest;
+        m0.manifest_path = dest.join("uninstall.json").display().to_string();
+        m0
+    };
     let json = serde_json::to_vec_pretty(&manifest)?;
     #[cfg(windows)]
     {
@@ -571,7 +580,6 @@ pub fn finalize_install(
     {
         let mp = dest.join("uninstall.json");
         fs::write(&mp, &json).with_context(|| format!("写入卸载清单失败: {}", mp.display()))?;
-        manifest.manifest_path = mp.display().to_string();
         push_log(st, format!("卸载清单: {}", mp.display()));
     }
 

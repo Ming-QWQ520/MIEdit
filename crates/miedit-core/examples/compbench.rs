@@ -46,6 +46,33 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Some("--robust") => {
+            let seed: u64 = args
+                .get(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(compbench::BENCH_SEED);
+            let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(60);
+            println!("抗损坏输入 fuzz: seed={seed} iterations={iters}（五算法压缩流 + 归档读路径，不变量=不 panic）");
+            let t0 = std::time::Instant::now();
+            let failures = compbench::fuzz_decode_robustness(seed, iters);
+            println!(
+                "耗时 {:.1}s，panic {} 项",
+                t0.elapsed().as_secs_f64(),
+                failures.len()
+            );
+            for f in &failures {
+                println!(
+                    "PANIC it={} target={} kind={}: {}",
+                    f.iteration, f.target, f.kind, f.error
+                );
+            }
+            if failures.is_empty() {
+                println!("OK：解码路径无 panic");
+            } else {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
         Some("--emit-payload") => {
             let dir = args
                 .get(1)

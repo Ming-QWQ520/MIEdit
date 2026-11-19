@@ -77,8 +77,8 @@ rm -rf "$WORK"; mkdir -p "$WORK"
 echo "== 生成确定性 payload（种子 20261120）=="
 ./target/release/examples/compbench --emit-payload "$WORK/payload" >/dev/null || exit 1
 
-echo "== 逐档构建 → 静默安装 → 逐字节比对 =="
-printf '| %-18s | %10s | %-8s | %s |\n' "档位" "包大小" "安装退出码" "逐字节比对"
+echo "== 逐档构建 → 静默安装 → 逐字节比对 → 静默卸载 → 清理断言 =="
+printf '| %-18s | %10s | %-8s | %-14s | %s |\n' "档位" "包大小" "安装退出码" "卸载退出码" "安装比对/卸载清理"
 PASS=0; FAIL=0
 for tier in "${TIERS[@]}"; do
   DIR="$WORK/$tier"; mkdir -p "$DIR"
@@ -117,7 +117,7 @@ EOF
   PKG_SIZE=$(wc -c < "$DIR/pkg.exe" | tr -d ' ')
 
   if ! "$DIR/pkg.exe" --silent --dir="$DIR/inst" >"$DIR/install.log" 2>&1; then
-    printf '| %-18s | %10s | %-8s | %s |\n' "$tier" "$PKG_SIZE" "INSTALL FAIL" "见 $DIR/install.log"
+    printf '| %-18s | %10s | %-8s | %-14s | %s |\n' "$tier" "$PKG_SIZE" "INSTALL FAIL" "-" "见 $DIR/install.log"
     FAIL=$((FAIL+1)); continue
   fi
 
@@ -131,11 +131,37 @@ EOF
   if [ ! -f "$DIR/inst/uninstall.json" ]; then
     MISMATCH="$MISMATCH uninstall.json缺失"
   fi
+
+  # 卸载阶段（步骤 48）：把 stripped 卸载器放进安装目录（模拟 Windows
+  # uninstall.exe 布局），--silent 卸载，断言退出码 0 + 文件全清 +
+  # 清单/本体/目录全部移除（后台 sh 延迟自删除，轮询等待）。
+  UNSTAT="-"
   if [ -z "$MISMATCH" ]; then
-    printf '| %-18s | %10s | %-8s | %s |\n' "$tier" "$PKG_SIZE" "0" "OK（6 文件 + 清单）"
+    cp -f "$BIN/miedit-uninstaller" "$DIR/inst/miedit-uninstaller"
+    UNEXIT=0
+    "$DIR/inst/miedit-uninstaller" --silent >"$DIR/uninstall.log" 2>&1 || UNEXIT=$?
+    DIR_GONE=0
+    for _ in $(seq 1 15); do
+      [ ! -d "$DIR/inst" ] && { DIR_GONE=1; break; }
+      sleep 1
+    done
+    if [ "$UNEXIT" -ne 0 ]; then
+      UNSTAT="UNINSTALL FAIL(退出码 $UNEXIT，见 $DIR/uninstall.log)"
+      MISMATCH="卸载失败"
+    elif [ "$DIR_GONE" -ne 1 ]; then
+      LEFT=$(find "$DIR/inst" -mindepth 1 2>/dev/null | head -3 | tr '\n' ' ')
+      UNSTAT="残留: ${LEFT:-（空目录未移除）}"
+      MISMATCH="目录残留"
+    else
+      UNSTAT="OK（文件/清单/本体/目录全清）"
+    fi
+  fi
+
+  if [ -z "$MISMATCH" ]; then
+    printf '| %-18s | %10s | %-8s | %-14s | %s |\n' "$tier" "$PKG_SIZE" "0" "0" "安装比对+卸载清理 OK"
     PASS=$((PASS+1))
   else
-    printf '| %-18s | %10s | %-8s | %s |\n' "$tier" "$PKG_SIZE" "0" "不一致:$MISMATCH"
+    printf '| %-18s | %10s | %-8s | %-14s | %s |\n' "$tier" "$PKG_SIZE" "0" "FAIL" "${MISMATCH}${UNSTAT:+ —— $UNSTAT}"
     FAIL=$((FAIL+1))
   fi
   # 逐档清理大文件（pkg 内嵌完整 stub；磁盘紧张时避免累积）
@@ -145,7 +171,7 @@ EOF
   fi
 done
 
-echo "== 结果：$PASS 通过 / $FAIL 失败（共 14 档）=="
+echo "== 结果：$PASS 通过 / $FAIL 失败（共 14 档，含卸载清理断言）=="
 if [ "$KEEP" -eq 0 ]; then
   rm -rf "$WORK"
 fi

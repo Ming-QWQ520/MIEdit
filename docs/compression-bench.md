@@ -69,15 +69,16 @@
 `test_bench_profiles_all_roundtrip` 14 档语料往返 + 表渲染断言；
 `test_payload_emit_deterministic` 端到端 payload 确定性断言。
 
-## 四、14 档端到端矩阵验证（步骤 47）
+## 四、14 档端到端矩阵验证（步骤 47 + 步骤 48 卸载扩展）
 
 `scripts/e2e-matrix.sh`：确定性 payload（`compbench::emit_payload_files`，
 六文件约 104KB：文本 ×2 / 二进制 / 重复块 / 零段 / 纯随机）→ 逐档
 `mis build`（真实编译链，含许可/清单/Trailer 全流程）→ 安装器
 `--silent --dir=` 静默安装（退出码 0）→ 六文件 `cmp` 逐字节比对 +
-`uninstall.json` 清单落盘断言。
+`uninstall.json` 清单落盘断言 → **静默卸载**（`--silent`，退出码 0）→
+**全清断言**（六文件 / 清单 / 卸载器本体 / 安装目录全部移除）。
 
-本轮记录（2026-11-20，Linux 无头，debug 构建，全部通过）：
+本轮记录（2026-11-20，Linux 无头，debug 构建，**安装比对 + 卸载清理 14/14 全过**）：
 
 | 档位 | 包大小* | 安装退出码 | 逐字节比对 |
 | --- | --- | --- | --- |
@@ -92,22 +93,53 @@
 \* 调试构建 stub（约 71MB）体积主导包体，payload 压缩差异不敏感；
 大小差异的权威数据见第二节差分基准表与 #22 的 2.86MB 实测。
 
-**顺带修复**（e2e 发现的真实缺陷，#23）：`mis build` 在 Linux 上
-`File::create` 新建输出文件丢失 stub 的可执行位（0644），成品包无法直接
-运行；已在编译器写出后回授 stub 权限位（`#[cfg(unix)]`，Windows 不受影响）。
+**顺带修复**（e2e 发现的真实缺陷）：
+- #23：`mis build` 在 Linux 上 `File::create` 新建输出文件丢失 stub 的
+  可执行位（0644），成品包无法直接运行；已在编译器写出后回授 stub 权限位
+  （`#[cfg(unix)]`，Windows 不受影响）。
+- #24（卸载扩展阶段发现）：① Linux 清单 `manifest_path` 在序列化后才回填，
+  清单文件内恒为空串 → 卸载器永远删不掉 `uninstall.json`；改为序列化前
+  回填。② 卸载器 cleanup 兜底（空路径回退 exe 同目录 uninstall.json）
+  + 清理安装器副产物 `install.log`。③ `schedule_self_delete` Linux 分支
+  此前 no-op（本体与目录永不清理）→ 后台 `sh -c` 自删除落地。修复前
+  14/14 档目录残留（uninstall.json + install.log），修复后 14/14 全清。
+
+## 四.1、抗损坏输入 fuzz（步骤 49）
+
+`compbench::fuzz_decode_robustness`：对五算法压缩流与归档读路径
+（`ArchiveReader::new` + 逐条目 `next_entry` + `decode`，即安装器
+`--ncrc` 路径的真实输入形态）施加五种确定性变异（截断/位翻转/清零
+窗口/尾部追加/空输入），不变量 = **解码路径不 panic**（Ok/Err 均可接受）。
+
+本轮记录（release，三种子各 120 轮 × 6 目标 = 2160 变异案例）：
+
+| 种子 | 轮数 | 变异案例 | panic |
+| --- | --- | --- | --- |
+| 20261120 | 120 | 720 | **0** |
+| 987654321 | 120 | 720 | **0** |
+| 3735928559 | 120 | 720 | **0** |
+
+配套加固：`MAX_ENTRY_BYTES`（2 GiB）条目长度上限——损坏归档的
+comp_len/orig_len 遇 u64::MAX 级字段此前直接 OOM abort，现优雅报错
+（单测覆盖 u64::MAX 与 2 GiB+1 两档拒绝路径）。
+复现命令：`cargo run --release -p miedit-core --example compbench -- --robust [seed] [iters]`。
 
 ## 五、回归防护清单
 
 改压缩链路后按序重跑：
 
 ```bash
-# 1) core 单测（含 compbench 5 项 + 压缩档映射/往返既有测试）
+# 1) core 单测（含 compbench 7 项 + 压缩档映射/往返既有测试）
 cargo test -p miedit-core
 # 2) 重跑差分基准并对比第二节表格（release）
 cargo run --release -p miedit-core --example compbench
 # 3) 深模糊（双种子 60 轮应为 0 失败）
 cargo run --release -p miedit-core --example compbench -- --fuzz 20261120 60
 cargo run --release -p miedit-core --example compbench -- --fuzz 987654321 60
-# 4) 端到端矩阵（14/14 应全过）
+# 4) 抗损坏 fuzz（三种子 0 panic）
+cargo run --release -p miedit-core --example compbench -- --robust 20261120 120
+cargo run --release -p miedit-core --example compbench -- --robust 987654321 120
+cargo run --release -p miedit-core --example compbench -- --robust 3735928559 120
+# 5) 端到端矩阵（14/14 应全过，含安装比对 + 卸载清理断言）
 scripts/e2e-matrix.sh
 ```
